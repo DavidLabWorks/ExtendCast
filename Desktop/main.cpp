@@ -6,16 +6,17 @@
 #include <QFile>
 #include <QDebug>
 #include "MainWindow.h"
+#include "Version.h"
 
 #ifdef _WIN32
 // Add Windows Firewall exceptions for mDNS and streaming
 static void ensureFirewallRule() {
     // Check if our firewall rules already exist
     QProcess check;
-    check.start("netsh", {"advfirewall", "firewall", "show", "rule", "name=BetterCast mDNS In"});
+    check.start("netsh", {"advfirewall", "firewall", "show", "rule", "name=ExtendCast mDNS In"});
     check.waitForFinished(3000);
     QString output = QString::fromUtf8(check.readAllStandardOutput());
-    if (output.contains("BetterCast mDNS In")) {
+    if (output.contains("ExtendCast mDNS In")) {
         qDebug() << "Firewall: Rules already exist";
         return;
     }
@@ -25,40 +26,40 @@ static void ensureFirewallRule() {
     // Inbound UDP 5353 — receive mDNS queries from Mac/other devices
     QProcess addIn;
     addIn.start("netsh", {"advfirewall", "firewall", "add", "rule",
-                          "name=BetterCast mDNS In",
+                          "name=ExtendCast mDNS In",
                           "dir=in", "action=allow", "protocol=UDP",
                           "localport=5353",
                           "profile=private,public",
-                          "description=Allow inbound mDNS for BetterCast auto-discovery"});
+                          "description=Allow inbound mDNS for ExtendCast auto-discovery"});
     addIn.waitForFinished(3000);
 
     // Outbound UDP 5353 — send mDNS announcements to multicast
     QProcess addOut;
     addOut.start("netsh", {"advfirewall", "firewall", "add", "rule",
-                           "name=BetterCast mDNS Out",
+                           "name=ExtendCast mDNS Out",
                            "dir=out", "action=allow", "protocol=UDP",
                            "remoteport=5353",
                            "profile=private,public",
-                           "description=Allow outbound mDNS for BetterCast auto-discovery"});
+                           "description=Allow outbound mDNS for ExtendCast auto-discovery"});
     addOut.waitForFinished(3000);
 
     // Inbound TCP 51820 — accept streaming connections
     QProcess addTcp;
     addTcp.start("netsh", {"advfirewall", "firewall", "add", "rule",
-                            "name=BetterCast Receiver",
+                            "name=ExtendCast Receiver",
                             "dir=in", "action=allow", "protocol=TCP",
                             "localport=51820",
                             "profile=private,public",
-                            "description=Allow BetterCast screen streaming"});
+                            "description=Allow ExtendCast screen streaming"});
     addTcp.waitForFinished(3000);
 
     // Log firewall status — this runs before LogManager UI is set up,
     // so we store the result and MainWindow will log it later
     if (addIn.exitCode() == 0) {
-        qputenv("BETTERCAST_FW_STATUS", "ok");
+        qputenv("EXTENDCAST_FW_STATUS", "ok");
         qDebug() << "Firewall: Rules added successfully";
     } else {
-        qputenv("BETTERCAST_FW_STATUS", "failed");
+        qputenv("EXTENDCAST_FW_STATUS", "failed");
         qDebug() << "Firewall: Could not add rules (needs admin)";
     }
 }
@@ -74,9 +75,9 @@ int main(int argc, char* argv[]) {
     QSurfaceFormat::setDefaultFormat(format);
 
     QApplication app(argc, argv);
-    app.setApplicationName("BetterCast");
-    app.setOrganizationName("BetterCast");
-    app.setApplicationVersion("1.0.0");
+    app.setApplicationName("ExtendCast");
+    app.setOrganizationName("ExtendCast");
+    app.setApplicationVersion(EXTENDCAST_VERSION);
     app.setWindowIcon(QIcon(":/appicon.png"));
 
 #ifdef _WIN32

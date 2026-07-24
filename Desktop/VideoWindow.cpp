@@ -10,7 +10,7 @@ VideoWindow::VideoWindow(VideoRenderer* renderer, InputHandler* inputHandler, QW
     , m_renderer(renderer)
     , m_inputHandler(inputHandler)
 {
-    setWindowTitle("BetterCast — Receiving");
+    setWindowTitle("ExtendCast — Receiving");
     setStyleSheet("background-color: black;");
     setMinimumSize(320, 180);
 

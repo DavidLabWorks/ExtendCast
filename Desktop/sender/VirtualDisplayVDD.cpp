@@ -115,12 +115,12 @@ void VirtualDisplayVDD::refreshInstallStatus() {
 bool VirtualDisplayVDD::detectVddInstall() {
     VDD_LOG("VDD: Starting detection...");
 
-    // Method 0: Check BetterCast's own bundled VDD path (set by installer)
+    // Method 0: Check ExtendCast's bundled VDD path (set by installer)
 #ifdef _WIN32
     {
         HKEY hKey;
         LONG result = RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE, L"Software\\BetterCast",
+            HKEY_LOCAL_MACHINE, L"Software\\ExtendCast",
             0, KEY_READ, &hKey);
         if (result == ERROR_SUCCESS) {
             wchar_t vddPath[MAX_PATH] = {};
@@ -142,7 +142,7 @@ bool VirtualDisplayVDD::detectVddInstall() {
                 VDD_LOG("VDD [Method 0]: Registry key exists but VDDPath value not found");
             }
         } else {
-            VDD_LOG("VDD [Method 0]: No HKLM\\Software\\BetterCast registry key");
+            VDD_LOG("VDD [Method 0]: No HKLM\\Software\\ExtendCast registry key");
         }
     }
 #endif

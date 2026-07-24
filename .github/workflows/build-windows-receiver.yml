@@ -1,9 +1,9 @@
-name: Build Windows Receiver
+name: Build ExtendCast for Windows
 
 on:
   push:
     paths:
-      - 'Sources/BetterCastReceiverDesktop/**'
+      - 'Desktop/**'
       - '.github/workflows/build-windows-receiver.yml'
   workflow_dispatch:  # Manual trigger from GitHub UI
 
@@ -19,6 +19,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (Get-Content "Desktop/VERSION" -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            Write-Error "VERSION must contain semantic version X.Y.Z, got '$version'"
+            exit 1
+          }
+          Write-Host "Building ExtendCast $version"
+          "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -53,21 +65,10 @@ jobs:
         env:
           VCPKG_ROOT: C:/vcpkg
 
-      - name: Generate Windows icon (.ico)
-        shell: pwsh
-        run: |
-          pip install Pillow
-          python -c "
-          from PIL import Image
-          img = Image.open('Sources/BetterCastReceiverDesktop/icon_256x256.png')
-          img.save('Sources/BetterCastReceiverDesktop/appicon.ico',
-                   sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])
-          "
-
       - name: Configure CMake
         shell: pwsh
         run: |
-          cd Sources/BetterCastReceiverDesktop
+          cd Desktop
           mkdir build
           cd build
           cmake .. -G "Visual Studio 17 2022" -A x64 `
@@ -78,7 +79,7 @@ jobs:
       - name: Build
         shell: pwsh
         run: |
-          cd Sources/BetterCastReceiverDesktop/build
+          cd Desktop/build
           cmake --build . --config Release
 
       - name: Download ADB platform-tools
@@ -141,11 +142,11 @@ jobs:
           mkdir artifact
 
           # Copy the exe
-          Copy-Item "Sources/BetterCastReceiverDesktop/build/Release/BetterCastReceiver.exe" "artifact/"
+          Copy-Item "Desktop/build/Release/ExtendCast.exe" "artifact/"
 
           # Run windeployqt to bundle Qt DLLs
           windeployqt --release --no-translations --no-system-d3d-compiler `
-            --no-opengl-sw "artifact/BetterCastReceiver.exe"
+            --no-opengl-sw "artifact/ExtendCast.exe"
 
           # Copy FFmpeg DLLs
           $vcpkgBin = "C:/vcpkg/installed/x64-windows/bin"
@@ -164,7 +165,7 @@ jobs:
           }
 
           # Copy app icon for runtime (embedded via Qt resource, but also keep as fallback)
-          Copy-Item "Sources/BetterCastReceiverDesktop/appicon.ico" "artifact/" -ErrorAction SilentlyContinue
+          Copy-Item "Desktop/appicon.ico" "artifact/" -ErrorAction SilentlyContinue
 
           # Bundle VDD files into portable artifact too
           if ((Test-Path "vdd") -and (Get-ChildItem "vdd" -File).Count -gt 0) {
@@ -204,7 +205,7 @@ jobs:
       - name: Build installer
         shell: pwsh
         run: |
-          cd Sources/BetterCastReceiverDesktop
+          cd Desktop
 
           # Copy artifact and vdd directories next to installer.nsi
           # (NSIS references files relative to the .nsi script)
@@ -212,21 +213,21 @@ jobs:
           Copy-Item -Recurse "${{ github.workspace }}/vdd" "vdd"
 
           # Build the installer
-          makensis /DPRODUCT_VERSION="1.0.0" installer.nsi
+          makensis /DPRODUCT_VERSION="${{ steps.version.outputs.version }}" installer.nsi
 
           # Move installer to workspace root
-          Move-Item "BetterCast-Setup-*.exe" "${{ github.workspace }}/"
+          Move-Item "ExtendCast-Setup-*.exe" "${{ github.workspace }}/"
 
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BetterCastReceiver-Windows-x64
+          name: ExtendCast-Windows-x64
           path: artifact/
           retention-days: 30
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: BetterCast-Setup-Windows-x64
-          path: BetterCast-Setup-*.exe
+          name: ExtendCast-Setup-Windows-x64
+          path: ExtendCast-Setup-*.exe
           retention-days: 30

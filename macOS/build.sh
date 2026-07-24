@@ -3,6 +3,10 @@
 # Exit on error
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$SCRIPT_DIR"
+
 VERSION="v1.0.0"
 ARCHITECTURES=("arm64" "x86_64")
 
@@ -51,11 +55,11 @@ mkdir -p "$APP_NAME/Contents/MacOS"
 mkdir -p "$APP_NAME/Contents/Resources"
 # Binary is still named BetterCastSender from the Swift package target.
 cp "$UNIVERSAL_BINARY" "$APP_NAME/Contents/MacOS/BetterCastSender"
-cp "BetterCastSender-Info.plist" "$APP_NAME/Contents/Info.plist"
-cp "assets/branding/BetterCastIcon.icns" "$APP_NAME/Contents/Resources/AppIcon.icns"
+cp "Info.plist" "$APP_NAME/Contents/Info.plist"
+cp "$REPO_ROOT/Shared/Branding/BetterCastIcon.icns" "$APP_NAME/Contents/Resources/AppIcon.icns"
 
 # Code sign with entitlements
-codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" --entitlements "BetterCastSender-Release.entitlements" "$APP_NAME"
+codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" --entitlements "ExtendCast.entitlements" "$APP_NAME"
 
 echo "Creating release archive..."
 ditto -c -k --sequesterRsrc --keepParent "$APP_NAME" "$ZIP_NAME"

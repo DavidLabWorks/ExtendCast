@@ -3,7 +3,7 @@ name: Build Linux Receiver
 on:
   push:
     paths:
-      - 'Sources/BetterCastReceiverDesktop/**'
+      - 'Desktop/**'
       - '.github/workflows/build-linux-receiver.yml'
   workflow_dispatch:  # Manual trigger from GitHub UI
 
@@ -59,7 +59,7 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cd Sources/BetterCastReceiverDesktop
+          cd Desktop
           mkdir build
           cd build
           cmake .. \
@@ -69,12 +69,12 @@ jobs:
 
       - name: Build
         run: |
-          cd Sources/BetterCastReceiverDesktop/build
+          cd Desktop/build
           cmake --build . --config Release -- -j$(nproc)
 
       - name: Install to AppDir
         run: |
-          cd Sources/BetterCastReceiverDesktop/build
+          cd Desktop/build
           DESTDIR=$GITHUB_WORKSPACE/AppDir cmake --install . --config Release
 
       - name: Prepare AppImage structure
@@ -97,7 +97,7 @@ jobs:
           # Symlink .desktop and icon to AppDir root (required by AppImage)
           cp "$APPDIR/usr/share/applications/BetterCastReceiver.desktop" "$APPDIR/"
           mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
-          cp Sources/BetterCastReceiverDesktop/icon_256x256.png \
+          cp Desktop/icon_256x256.png \
             "$APPDIR/usr/share/icons/hicolor/256x256/apps/bettercast-receiver.png"
           cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/bettercast-receiver.png" "$APPDIR/"
 

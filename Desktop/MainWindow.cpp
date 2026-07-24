@@ -194,7 +194,7 @@ static QGroupBox* makeCard(const QString& title) {
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
-    setWindowTitle("BetterCast");
+    setWindowTitle("ExtendCast");
     setMinimumSize(800, 500);
 
     // Crash detection: check if previous session exited cleanly
@@ -204,8 +204,8 @@ MainWindow::MainWindow(QWidget* parent)
         QTimer::singleShot(500, this, [this]() {
             auto* dialog = new QMessageBox(this);
             dialog->setIcon(QMessageBox::Warning);
-            dialog->setWindowTitle("BetterCast crashed last time");
-            dialog->setText("BetterCast didn't exit cleanly last time. Would you like to report this issue on GitHub?");
+            dialog->setWindowTitle("ExtendCast crashed last time");
+            dialog->setText("ExtendCast didn't exit cleanly last time. Would you like to report this issue on GitHub?");
             dialog->setStandardButtons(QMessageBox::Yes | QMessageBox::No);
             dialog->setDefaultButton(QMessageBox::Yes);
             if (dialog->exec() == QMessageBox::Yes) {
@@ -316,9 +316,9 @@ MainWindow::MainWindow(QWidget* parent)
 #ifdef ENABLE_SENDER
     m_discovery->startBrowsing();
 #endif
-    LogManager::instance().log(QString("BetterCast started — listening on port %1").arg(actualPort));
+    LogManager::instance().log(QString("ExtendCast started — listening on port %1").arg(actualPort));
 #ifdef _WIN32
-    QByteArray fwStatus = qgetenv("BETTERCAST_FW_STATUS");
+    QByteArray fwStatus = qgetenv("EXTENDCAST_FW_STATUS");
     if (fwStatus == "ok") {
         LogManager::instance().log("Firewall: Rules added (mDNS + TCP)");
     } else if (fwStatus == "failed") {
@@ -432,7 +432,7 @@ void MainWindow::setupOverviewPage() {
     layout->addWidget(iconLabel);
 
     // Title
-    auto* title = new QLabel("BetterCast");
+    auto* title = new QLabel("ExtendCast");
     title->setStyleSheet("font-size: 28px; font-weight: bold; color: white;");
     title->setAlignment(Qt::AlignCenter);
     layout->addWidget(title);
@@ -476,7 +476,7 @@ void MainWindow::setupOverviewPage() {
     };
 
     addStep(1, "Download the Receiver",
-            "Install BetterCast Receiver on your iPad, Android, Windows, Linux, or Mac.");
+            "Install an ExtendCast-compatible receiver on your iPad, Android, Windows, Linux, or Mac.");
     addStep(2, "Connect to the Same Network",
             "Make sure both devices are on the same Wi-Fi network.");
     addStep(3, "Open the Receiver App",
@@ -521,7 +521,7 @@ void MainWindow::setupSendPage() {
     pageTitle->setStyleSheet("font-size: 22px; font-weight: bold; color: white;");
     layout->addWidget(pageTitle);
 
-    auto* pageDesc = new QLabel("Stream your screen to a BetterCast receiver on another device.");
+    auto* pageDesc = new QLabel("Stream your screen to an ExtendCast receiver on another device.");
     pageDesc->setStyleSheet("font-size: 13px; color: #888;");
     pageDesc->setWordWrap(true);
     layout->addWidget(pageDesc);
@@ -806,7 +806,7 @@ void MainWindow::setupReceivePage() {
 
     auto* instrLabel = new QLabel(
         "This device is ready to receive. On the sender device:\n"
-        "  1. Open BetterCast and go to Send Screen\n"
+        "  1. Open ExtendCast and go to Send Screen\n"
         "  2. This device should appear automatically\n"
         "  3. Or enter this device's IP address manually");
     instrLabel->setStyleSheet("color: #888; font-size: 12px;");
@@ -870,7 +870,7 @@ void MainWindow::setupReceivePage() {
         "1. Enable Developer Options (tap Build Number 7x in Settings > About)\n"
         "2. Enable USB Debugging in Developer Options\n"
         "3. Connect Android to this computer via USB\n"
-        "4. Open BetterCast on Android and tap \"Start Casting\"\n"
+        "4. Open the compatible Android app and tap \"Start Casting\"\n"
         "5. Click the button above to connect");
     m_adbHelpLabel->setStyleSheet("color: #666; font-size: 11px;");
     m_adbHelpLabel->setWordWrap(true);
@@ -904,7 +904,7 @@ void MainWindow::setupSettingsPage() {
     auto* aboutLayout = new QVBoxLayout(aboutCard);
     aboutLayout->setSpacing(8);
 
-    m_versionLabel = new QLabel(QString("BetterCast v%1")
+    m_versionLabel = new QLabel(QString("ExtendCast v%1")
         .arg(QApplication::applicationVersion()));
     m_versionLabel->setStyleSheet("font-size: 14px; font-weight: bold; color: #e0e0e0;");
     aboutLayout->addWidget(m_versionLabel);
@@ -1443,7 +1443,7 @@ void MainWindow::onClearLogs() {
 }
 
 void MainWindow::onReportIssue() {
-    QString sysInfo = QString("Platform: %1, BetterCast %2")
+    QString sysInfo = QString("Platform: %1, ExtendCast %2")
         .arg(
 #ifdef _WIN32
             "Windows"
@@ -1468,7 +1468,7 @@ void MainWindow::onReportIssue() {
         "<details><summary>Recent Logs</summary>\n\n```\n%2\n```\n\n</details>"
     ).arg(sysInfo, recentLogs.join("\n"));
 
-    QString url = QString("https://github.com/StephenLovino/BetterCast/issues/new?title=%1&body=%2")
+    QString url = QString("https://github.com/Ruobin521/ExtendCast/issues/new?title=%1&body=%2")
         .arg(QString("Bug: ").toUtf8().toPercentEncoding(),
              body.toUtf8().toPercentEncoding());
 

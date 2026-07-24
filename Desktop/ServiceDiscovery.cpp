@@ -44,7 +44,7 @@ ServiceDiscovery::~ServiceDiscovery() {
 
 QString ServiceDiscovery::getHostname() {
     QString hostname = QHostInfo::localHostName();
-    if (hostname.isEmpty()) hostname = "BetterCast-Receiver";
+    if (hostname.isEmpty()) hostname = "ExtendCast-Receiver";
     return hostname;
 }
 

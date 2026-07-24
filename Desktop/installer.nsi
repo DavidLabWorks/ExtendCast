@@ -1,24 +1,25 @@
-; BetterCast Windows Installer (NSIS)
-; Bundles BetterCast Receiver + Virtual Display Driver (VDD)
+; ExtendCast Windows Installer (NSIS)
+; Bundles ExtendCast + Virtual Display Driver (VDD)
 
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 
 ; ─── Configuration ──────────────────────────────────────────────────────────────
 
-!define PRODUCT_NAME "BetterCast"
-!define PRODUCT_PUBLISHER "BetterCast"
-!define PRODUCT_WEB_SITE "https://github.com/StephenLovino/BetterCast"
-!define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\BetterCastReceiver.exe"
+!define PRODUCT_NAME "ExtendCast"
+!define PRODUCT_PUBLISHER "ExtendCast"
+!define PRODUCT_WEB_SITE "https://github.com/Ruobin521/ExtendCast"
+!define PRODUCT_EXE "ExtendCast.exe"
+!define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\${PRODUCT_EXE}"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 
 ; Version is passed from CI via /DPRODUCT_VERSION=x.y.z
 !ifndef PRODUCT_VERSION
-  !define PRODUCT_VERSION "1.0.0"
+  !error "PRODUCT_VERSION is required; pass the value from the VERSION file."
 !endif
 
 Name "${PRODUCT_NAME} ${PRODUCT_VERSION}"
-OutFile "BetterCast-Setup-${PRODUCT_VERSION}.exe"
+OutFile "ExtendCast-Setup-${PRODUCT_VERSION}.exe"
 InstallDir "$PROGRAMFILES64\${PRODUCT_NAME}"
 InstallDirRegKey HKLM "${PRODUCT_DIR_REGKEY}" ""
 RequestExecutionLevel admin  ; Needed for driver installation
@@ -43,8 +44,8 @@ ShowInstDetails show
 !insertmacro MUI_PAGE_INSTFILES
 
 ; Finish page — offer to launch
-!define MUI_FINISHPAGE_RUN "$INSTDIR\BetterCastReceiver.exe"
-!define MUI_FINISHPAGE_RUN_TEXT "Launch BetterCast"
+!define MUI_FINISHPAGE_RUN "$INSTDIR\${PRODUCT_EXE}"
+!define MUI_FINISHPAGE_RUN_TEXT "Launch ExtendCast"
 !insertmacro MUI_PAGE_FINISH
 
 ; Uninstaller pages
@@ -56,7 +57,7 @@ ShowInstDetails show
 
 ; ─── Installer Sections ─────────────────────────────────────────────────────────
 
-Section "BetterCast (required)" SecCore
+Section "ExtendCast (required)" SecCore
     SectionIn RO  ; Required, cannot deselect
 
     SetOutPath "$INSTDIR"
@@ -66,17 +67,17 @@ Section "BetterCast (required)" SecCore
 
     ; Create Start Menu shortcuts
     CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
-    CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\BetterCast.lnk" "$INSTDIR\BetterCastReceiver.exe"
+    CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\ExtendCast.lnk" "$INSTDIR\${PRODUCT_EXE}"
     CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk" "$INSTDIR\uninstall.exe"
 
     ; Desktop shortcut
-    CreateShortCut "$DESKTOP\BetterCast.lnk" "$INSTDIR\BetterCastReceiver.exe"
+    CreateShortCut "$DESKTOP\ExtendCast.lnk" "$INSTDIR\${PRODUCT_EXE}"
 
     ; Write registry keys
-    WriteRegStr HKLM "${PRODUCT_DIR_REGKEY}" "" "$INSTDIR\BetterCastReceiver.exe"
+    WriteRegStr HKLM "${PRODUCT_DIR_REGKEY}" "" "$INSTDIR\${PRODUCT_EXE}"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "DisplayName" "${PRODUCT_NAME}"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "UninstallString" "$INSTDIR\uninstall.exe"
-    WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\BetterCastReceiver.exe"
+    WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\${PRODUCT_EXE}"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "DisplayVersion" "${PRODUCT_VERSION}"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "Publisher" "${PRODUCT_PUBLISHER}"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "URLInfoAbout" "${PRODUCT_WEB_SITE}"
@@ -93,9 +94,9 @@ Section "BetterCast (required)" SecCore
 
     ; Add firewall rules
     DetailPrint "Adding firewall rules..."
-    nsExec::ExecToLog 'netsh advfirewall firewall add rule name="BetterCast mDNS" dir=in action=allow protocol=UDP localport=5353'
-    nsExec::ExecToLog 'netsh advfirewall firewall add rule name="BetterCast Streaming" dir=in action=allow protocol=TCP localport=51820'
-    nsExec::ExecToLog 'netsh advfirewall firewall add rule name="BetterCast App" dir=in action=allow program="$INSTDIR\BetterCastReceiver.exe"'
+    nsExec::ExecToLog 'netsh advfirewall firewall add rule name="ExtendCast mDNS In" dir=in action=allow protocol=UDP localport=5353'
+    nsExec::ExecToLog 'netsh advfirewall firewall add rule name="ExtendCast mDNS Out" dir=out action=allow protocol=UDP remoteport=5353'
+    nsExec::ExecToLog 'netsh advfirewall firewall add rule name="ExtendCast Receiver" dir=in action=allow protocol=TCP localport=51820 program="$INSTDIR\${PRODUCT_EXE}"'
 SectionEnd
 
 Section "Virtual Display Driver (VDD)" SecVDD
@@ -166,7 +167,7 @@ Section "Virtual Display Driver (VDD)" SecVDD
 
     vdd_done:
 
-    ; Write VDD install path to registry for BetterCast to detect
+    ; Write VDD install path to registry for ExtendCast to detect
     WriteRegStr HKLM "Software\${PRODUCT_NAME}" "VDDPath" "$INSTDIR\VirtualDisplayDriver"
 
     vdd_skip_registry:
@@ -176,7 +177,7 @@ SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SecCore} \
-    "BetterCast receiver and sender application. Stream your screen to any device."
+    "ExtendCast receiver and sender application. Stream your screen to any device."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecVDD} \
     "Virtual Display Driver — creates virtual monitors to extend your desktop without a physical display. Required for sender mode screen extension."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
@@ -185,9 +186,9 @@ SectionEnd
 
 Section "Uninstall"
     ; Remove firewall rules
-    nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="BetterCast mDNS"'
-    nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="BetterCast Streaming"'
-    nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="BetterCast App"'
+    nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="ExtendCast mDNS In"'
+    nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="ExtendCast mDNS Out"'
+    nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="ExtendCast Receiver"'
 
     ; Remove VDD driver (best effort)
     IfFileExists "$INSTDIR\VirtualDisplayDriver\VirtualDisplayDriver.inf" 0 skip_vdd_remove
@@ -199,7 +200,7 @@ Section "Uninstall"
     RMDir /r "$INSTDIR"
 
     ; Remove shortcuts
-    Delete "$DESKTOP\BetterCast.lnk"
+    Delete "$DESKTOP\ExtendCast.lnk"
     RMDir /r "$SMPROGRAMS\${PRODUCT_NAME}"
 
     ; Remove registry keys

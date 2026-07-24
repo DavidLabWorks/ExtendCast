@@ -1,5 +1,16 @@
 cmake_minimum_required(VERSION 3.20)
-project(BetterCastReceiver VERSION 1.0.0 LANGUAGES CXX)
+
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" EXTENDCAST_VERSION LIMIT_COUNT 1)
+string(STRIP "${EXTENDCAST_VERSION}" EXTENDCAST_VERSION)
+if(NOT EXTENDCAST_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "VERSION must contain a semantic version (X.Y.Z)")
+endif()
+string(REPLACE "." ";" EXTENDCAST_VERSION_PARTS "${EXTENDCAST_VERSION}")
+list(GET EXTENDCAST_VERSION_PARTS 0 EXTENDCAST_VERSION_MAJOR)
+list(GET EXTENDCAST_VERSION_PARTS 1 EXTENDCAST_VERSION_MINOR)
+list(GET EXTENDCAST_VERSION_PARTS 2 EXTENDCAST_VERSION_PATCH)
+
+project(ExtendCast VERSION ${EXTENDCAST_VERSION} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -149,14 +160,27 @@ endif()
 # Qt resource file (embeds app icon PNG)
 qt_add_resources(RESOURCES resources.qrc)
 
-# Windows .exe icon via resource file
-if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/appicon.ico")
-    list(APPEND SOURCES app.rc)
+# Generate the application version header from the shared VERSION file.
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/Version.h.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/Version.h"
+    @ONLY
+)
+
+# Generate Windows executable metadata and icon resource.
+if(WIN32)
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/app.rc.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc"
+        @ONLY
+    )
+    list(APPEND SOURCES "${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc")
 endif()
 
 add_executable(BetterCastReceiver ${SOURCES} ${HEADERS} ${RESOURCES})
 
 target_include_directories(BetterCastReceiver PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"
     ${FFMPEG_ALL_INCLUDE_DIRS}
 )
 
@@ -195,12 +219,15 @@ endif()
 # Windows-specific settings
 if(WIN32)
     target_link_libraries(BetterCastReceiver PRIVATE ws2_32)
-    set_target_properties(BetterCastReceiver PROPERTIES WIN32_EXECUTABLE TRUE)
+    set_target_properties(BetterCastReceiver PROPERTIES
+        OUTPUT_NAME ExtendCast
+        WIN32_EXECUTABLE TRUE
+    )
 endif()
 
 # Install
 install(TARGETS BetterCastReceiver RUNTIME DESTINATION bin)
-install(FILES icon_256x256.png DESTINATION share/icons/hicolor/256x256/apps RENAME bettercast-receiver.png OPTIONAL)
+install(FILES icon_256x256.png DESTINATION share/icons/hicolor/256x256/apps RENAME extendcast.png OPTIONAL)
 
 # Install .desktop file directory (created at build time by CI)
 install(DIRECTORY DESTINATION share/applications)

@@ -8,6 +8,21 @@ extended-display experience.
 ExtendCast is not affiliated with or endorsed by the original BetterCast
 project. See [NOTICE.md](NOTICE.md) for attribution and modification details.
 
+## Repository Structure
+
+Each platform is kept as a top-level project:
+
+| Directory | Platform | Build system |
+|-----------|----------|--------------|
+| [`macOS/`](macOS/) | macOS sender + receiver | Swift Package Manager |
+| [`iOS/`](iOS/) | iOS/iPadOS receiver | Swift Package Manager + Xcode |
+| [`Android/`](Android/) | Android sender + receiver | Gradle |
+| [`Desktop/`](Desktop/) | Windows/Linux sender + receiver | CMake + Qt |
+| [`Shared/`](Shared/) | Branding and protocol documentation | Shared assets |
+
+The applications share a network protocol, not source-code dependencies, so
+each platform can be opened and built independently.
+
 ## Improvements over BetterCast
 
 ExtendCast substantially changes the macOS sender experience. The work focuses
@@ -242,7 +257,7 @@ audio, and auto-connect settings.
 |----------|------|------------|----------|
 | **macOS** | Sender + Receiver | P2P Direct / WiFi / Cable | Build from source |
 | **iOS / iPadOS** | Receiver | P2P Direct (AWDL) / WiFi | [bettercast.online](https://bettercast.online/#install) |
-| **Windows** | Receiver | WiFi | [bettercast.online](https://bettercast.online/#install) |
+| **Windows** | Sender + Receiver | WiFi / Cable | [GitHub Actions build](https://github.com/Ruobin521/ExtendCast/actions/workflows/build-windows-receiver.yml) |
 | **Linux** | Receiver | WiFi | [bettercast.online](https://bettercast.online/#install) |
 | **Android** | Receiver | WiFi / ADB USB / ADB WiFi | [bettercast.online](https://bettercast.online/#install) |
 
@@ -264,8 +279,8 @@ audio, and auto-connect settings.
 
 ### macOS (Sender + Receiver)
 
-1. Run `./make_app.sh` on an Apple Silicon Mac.
-2. Copy `ExtendCast.app` to `/Applications`.
+1. Run `./macOS/build.sh`.
+2. Copy `macOS/ExtendCast.app` to `/Applications`.
 3. Launch **ExtendCast** and grant the required permissions:
    - **Screen Recording** — to capture your display
    - **Accessibility** — to relay mouse and keyboard input from receivers
@@ -277,11 +292,14 @@ The receiver is stopped by default. Open **Receive Screen** and click
 
 ### iOS / iPadOS
 
-The iOS receiver is available via TestFlight. Visit [bettercast.online](https://bettercast.online/#install) for the install link.
+The receiver source and unsigned IPA packaging instructions are in
+[`iOS/`](iOS/). Installation requires Apple signing and provisioning.
 
 ### Windows
 
-Download the installer from [bettercast.online](https://bettercast.online/#install) and run `BetterCastReceiver.exe`. Both devices must be on the same WiFi network.
+Download the latest ExtendCast Windows installer and run `ExtendCast.exe`.
+The Windows build includes sender and receiver modes, with optional virtual
+display support provided by the bundled VDD driver.
 
 ### Linux
 
@@ -289,7 +307,9 @@ Download the AppImage from [bettercast.online](https://bettercast.online/#instal
 
 ### Android
 
-Visit [bettercast.online](https://bettercast.online/#install) for the latest APK. Supports WiFi and USB via ADB tunnel.
+Open [`Android/`](Android/) in Android Studio or run
+`cd Android && ./gradlew :app:assembleDebug`. It supports receiver and sender
+modes over WiFi or ADB.
 
 ## Networking
 
@@ -303,7 +323,9 @@ ExtendCast uses **TCP (port 51820)** for the primary video/audio stream and
 
 ### Wire Protocol
 
-Frames are sent as length-prefixed TCP messages with a 1-byte type tag:
+See [Shared/Protocol/PROTOCOL.md](Shared/Protocol/PROTOCOL.md) for the shared
+protocol reference. Frames are sent as length-prefixed TCP messages with a
+1-byte type tag:
 
 ```
 [4-byte big-endian length] [1-byte type] [payload]

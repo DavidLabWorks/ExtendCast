@@ -1,4 +1,4 @@
-# BetterCast Desktop Receiver — Build Instructions
+# ExtendCast Desktop — Build Instructions
 
 Cross-platform C++ receiver for Windows and Linux.
 
@@ -65,7 +65,7 @@ cmake --build .
 
 ## Usage
 
-1. Run `BetterCastReceiver` on the Windows/Linux machine
+1. Run `ExtendCast.exe` on Windows or `BetterCastReceiver` on Linux
 2. On the Mac sender, the receiver should appear via Bonjour auto-discovery
 3. If auto-discovery doesn't work, use manual connect:
    - Enter the Mac sender's IP and port (default: 51820) in the receiver UI
