@@ -28,16 +28,16 @@ and fixes for display identity, ColorSync, HiDPI, and session recovery.
 | Display previews | Full-resolution capture every two seconds | No automatic preview capture; optional previews are downscaled |
 | Capture buffering | Queue depth of 4 or 8 at foreground QoS | Queue depth of 3 using a lower-priority capture queue |
 | Receiver service | Starts automatically with the app | Starts only when requested or explicitly enabled at launch |
-| Background controls | Main window required | Menu-bar connect, disconnect, recent-device, and quit controls |
+| Background controls | Main window required | Menu-bar connect, disconnect, open, and quit controls |
 | Recovery | Capture can remain stale after wake or unlock | Restarts capture while preserving virtual displays |
 
 ### Device Management and macOS UI
 
-- A menu-bar controller shows connected, available, and recent devices without
+- A menu-bar controller shows connected and available devices without
   requiring the main window.
 
-- Devices can be connected or disconnected directly from the menu bar. Recent
-  devices can be refreshed, reconnected, or shown as unavailable.
+- Devices can be connected or disconnected from compact icon actions aligned
+  to the right side of each menu-bar row.
 
 - The sidebar now uses stable destinations for Devices, Recent, Connect,
   Receive Screen, Settings, and Logs instead of mixing navigation with a
@@ -221,8 +221,8 @@ and fixes for display identity, ColorSync, HiDPI, and session recovery.
 - Receiver listening is opt-in and includes a separate Start Listening at
   Launch preference.
 
-- The release build disables the upstream release checker, preventing unrelated
-  upstream versions from being presented as ExtendCast updates.
+- The release checker uses ExtendCast GitHub Releases and compares the complete
+  semantic version instead of presenting unrelated upstream updates.
 
 - The built-in-display brightness control was removed from streaming settings,
   keeping device pages focused on receiver and virtual-display behavior.
@@ -251,7 +251,7 @@ audio, and auto-connect settings.
 - **Multi-device** — Connect multiple receivers simultaneously, each with its own virtual display
 - **Per-device profiles** — Save display, network, quality, frame-rate, audio, and auto-connect settings independently
 - **Custom resolutions** — Create validated presets with pixel density and equivalent physical display size
-- **Menu-bar control** — Connect, disconnect, refresh recent devices, open the app, or quit without keeping the main window visible
+- **Menu-bar control** — Connect or disconnect devices, open the app, or quit without keeping the main window visible
 - **Cross-platform input** — Mouse and keyboard pass-through from any receiver back to the Mac
 - **Audio streaming** — Optional per-device AAC-LC audio forwarding (128 kbps stereo)
 - **Selectable frame rate** — Choose 30 or 60 FPS per receiver while bitrate, keyframe interval, and rate limiting adapt to the link
@@ -313,8 +313,9 @@ Frames are sent as length-prefixed TCP messages with a 1-byte type tag:
 
 ## Release Notes
 
-See [docs/release-notes/](docs/release-notes/) for the historical upstream
-release notes (v5–v8).
+See the [ExtendCast v1.0.0 release notes](docs/release-notes/v1.0.0.md).
+Historical upstream notes (v5–v8) remain available in
+[docs/release-notes/](docs/release-notes/).
 
 ## Support the Project
 

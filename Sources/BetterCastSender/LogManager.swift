@@ -24,15 +24,12 @@ class UpdateChecker: ObservableObject {
     static let shared = UpdateChecker()
 
     private static var isEnabled: Bool {
-        Bundle.main.object(forInfoDictionaryKey: "BetterCastEnableUpdates") as? Bool ?? true
+        Bundle.main.object(forInfoDictionaryKey: "ExtendCastEnableUpdates") as? Bool ?? true
     }
 
-    /// Reads version from Info.plist (CFBundleShortVersionString), prefixed with "v"
+    /// Reads the complete user-facing version from Info.plist.
     static var currentVersion: String {
-        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
-        // Extract major version number to match GitHub tag format (e.g., "8.0" → "v8")
-        let major = short.components(separatedBy: ".").first ?? short
-        return "v\(major)"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
     }
 
     static var displayVersion: String {
@@ -41,48 +38,92 @@ class UpdateChecker: ObservableObject {
         return "\(short) (\(build))"
     }
 
-    private static let repoOwner = "StephenLovino"
-    private static let repoName = "BetterCast"
+    private static let repoOwner = "Ruobin521"
+    private static let repoName = "ExtendCast"
 
     @Published var latestVersion: String?
     @Published var downloadURL: String?
     @Published var releaseNotes: String?
     @Published var updateAvailable = false
     @Published var checkedOnce = false
+    @Published var isChecking = false
 
-    /// Extracts the leading integer from a version tag like "v8", "V7", "v10.2" → 8, 7, 10
-    static func versionNumber(from tag: String) -> Int {
-        let digits = tag.drop(while: { !$0.isNumber })
-        return Int(digits.prefix(while: { $0.isNumber })) ?? 0
+    /// Extracts numeric components from tags such as "v1.2.3" or "release-1.2".
+    static func versionComponents(from value: String) -> [Int] {
+        guard let start = value.firstIndex(where: \.isNumber) else { return [] }
+        let numericVersion = value[start...].prefix { $0.isNumber || $0 == "." }
+        return numericVersion
+            .split(separator: ".", omittingEmptySubsequences: false)
+            .map { Int($0) ?? 0 }
+    }
+
+    static func isVersion(_ candidate: String, newerThan current: String) -> Bool {
+        let candidateComponents = versionComponents(from: candidate)
+        let currentComponents = versionComponents(from: current)
+        guard !candidateComponents.isEmpty, !currentComponents.isEmpty else { return false }
+
+        let componentCount = max(candidateComponents.count, currentComponents.count)
+        for index in 0..<componentCount {
+            let candidateValue = index < candidateComponents.count ? candidateComponents[index] : 0
+            let currentValue = index < currentComponents.count ? currentComponents[index] : 0
+            if candidateValue != currentValue {
+                return candidateValue > currentValue
+            }
+        }
+        return false
     }
 
     func checkForUpdates() {
-        guard Self.isEnabled else { return }
+        guard Self.isEnabled, !isChecking else { return }
+        isChecking = true
 
         let urlString = "https://api.github.com/repos/\(Self.repoOwner)/\(Self.repoName)/releases/latest"
-        guard let url = URL(string: urlString) else { return }
+        guard let url = URL(string: urlString) else {
+            isChecking = false
+            return
+        }
 
         var request = URLRequest(url: url)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("ExtendCast/\(Self.currentVersion)", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 10
 
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            guard let data = data, error == nil else { return }
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            guard
+                let data,
+                error == nil,
+                let httpResponse = response as? HTTPURLResponse,
+                (200..<300).contains(httpResponse.statusCode)
+            else {
+                DispatchQueue.main.async {
+                    self?.isChecking = false
+                }
+                return
+            }
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                DispatchQueue.main.async {
+                    self?.isChecking = false
+                }
+                return
+            }
 
             let tagName = json["tag_name"] as? String ?? ""
             let htmlURL = json["html_url"] as? String ?? ""
             let body = json["body"] as? String ?? ""
+            guard !tagName.isEmpty, !htmlURL.isEmpty else {
+                DispatchQueue.main.async {
+                    self?.isChecking = false
+                }
+                return
+            }
 
             DispatchQueue.main.async {
+                self?.isChecking = false
                 self?.latestVersion = tagName
                 self?.downloadURL = htmlURL
                 self?.releaseNotes = body
 
-                // Numeric comparison: only show update if remote version > local version
-                let remoteNum = Self.versionNumber(from: tagName)
-                let localNum = Self.versionNumber(from: Self.currentVersion)
-                self?.updateAvailable = remoteNum > localNum
+                self?.updateAvailable = Self.isVersion(tagName, newerThan: Self.currentVersion)
 
                 self?.checkedOnce = true
                 if self?.updateAvailable == true {
@@ -99,8 +140,8 @@ struct LogView: View {
     @ObservedObject var logManager = LogManager.shared
     @ObservedObject var updateChecker = UpdateChecker.shared
 
-    private static let repoOwner = "StephenLovino"
-    private static let repoName = "BetterCast"
+    private static let repoOwner = "Ruobin521"
+    private static let repoName = "ExtendCast"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -189,9 +230,6 @@ struct LogView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("Logs")
-        .onAppear {
-            updateChecker.checkForUpdates()
-        }
     }
 
     private func openReportIssue() {

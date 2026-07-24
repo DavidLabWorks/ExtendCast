@@ -42,7 +42,7 @@ struct BetterCastSenderApp: App {
                     : "ExtendCast — \(networkClient.connectedDisplays.count) connected"
             )
         }
-        .menuBarExtraStyle(.menu)
+        .menuBarExtraStyle(.window)
     }
 
     enum SidebarSelection: Hashable {
@@ -140,133 +140,126 @@ struct StatusBarMenuView: View {
     }
 
     var body: some View {
-        Section("Connected") {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "display.2")
+                    .foregroundStyle(.tint)
+                Text("ExtendCast")
+                    .font(.headline)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            deviceSectionTitle("Connected")
+
             if client.connectedDisplays.isEmpty {
-                Button("No connected devices") {}
-                    .disabled(true)
+                emptyDeviceRow("No connected devices")
             } else {
                 ForEach(client.connectedDisplays) { display in
-                    Button {
-                        client.disconnectConnection(display.id)
-                    } label: {
-                        Label(
-                            "\(display.name) — Disconnect",
-                            systemImage: "xmark.circle"
-                        )
+                    HStack(spacing: 10) {
+                        Image(systemName: "display")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16)
+                        Text(display.name)
+                            .lineLimit(1)
+                        Spacer(minLength: 12)
+                        Button {
+                            client.disconnectConnection(display.id)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.red)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Disconnect \(display.name)")
                     }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
                 }
             }
-        }
 
-        Section("Available Devices") {
+            Divider()
+                .padding(.top, 6)
+
+            deviceSectionTitle("Available Devices")
+
             if availableServices.isEmpty {
-                Button("No available devices") {}
-                    .disabled(true)
+                emptyDeviceRow("No available devices")
             } else {
                 ForEach(availableServices, id: \.name) { service in
-                    Button {
-                        client.connect(to: service)
-                    } label: {
-                        Label(
-                            client.isConnecting(to: service)
-                                ? "\(service.name) — Connecting…"
-                                : "\(service.name) — Connect",
-                            systemImage: client.isConnecting(to: service)
-                                ? "ellipsis.circle"
-                                : "display.badge.plus"
-                        )
+                    HStack(spacing: 10) {
+                        Image(systemName: "display")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16)
+                        Text(service.name)
+                            .lineLimit(1)
+                        Spacer(minLength: 12)
+
+                        if client.isConnecting(to: service) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .frame(width: 16, height: 16)
+                                .help("Connecting to \(service.name)")
+                        } else {
+                            Button {
+                                client.connect(to: service)
+                            } label: {
+                                Image(systemName: "plus.circle.fill")
+                                    .foregroundStyle(.tint)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Connect to \(service.name)")
+                        }
                     }
-                    .disabled(client.isConnecting(to: service))
-                }
-            }
-        }
-
-        Section("Recent") {
-            if client.manualConnectionHistory.isEmpty {
-                Button("No recent devices") {}
-                    .disabled(true)
-            } else {
-                ForEach(client.manualConnectionHistory) { item in
-                    recentConnectionButton(item)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
                 }
             }
 
-            Button {
-                client.refreshManualConnectionAvailability()
-            } label: {
-                Label(
-                    client.isRefreshingManualConnectionAvailability
-                        ? "Refreshing…"
-                        : "Refresh Recent",
-                    systemImage: "arrow.clockwise"
-                )
+            Divider()
+                .padding(.top, 6)
+
+            HStack(spacing: 8) {
+                Button {
+                    showMainWindow()
+                } label: {
+                    Label("Open ExtendCast", systemImage: "macwindow")
+                }
+
+                Spacer()
+
+                Button {
+                    client.quitApp()
+                } label: {
+                    Label("Quit", systemImage: "power")
+                }
             }
-            .disabled(
-                client.manualConnectionHistory.isEmpty
-                    || client.isRefreshingManualConnectionAvailability
-            )
+            .buttonStyle(.borderless)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
         }
-
-        Divider()
-
-        Button {
-            showMainWindow()
-        } label: {
-            Label("Open ExtendCast", systemImage: "macwindow")
-        }
-
-        Button {
-            client.quitApp()
-        } label: {
-            Label("Quit ExtendCast", systemImage: "power")
-        }
-        .onAppear {
-            client.refreshManualConnectionAvailabilityIfNeeded()
-        }
+        .frame(width: 300)
     }
 
-    @ViewBuilder
-    private func recentConnectionButton(_ item: ManualConnectionHistoryItem) -> some View {
-        if let connectionId = client.connectedDisplayId(for: item) {
-            Button {
-                client.disconnectConnection(connectionId)
-            } label: {
-                Label(
-                    "\(item.displayName) — Disconnect",
-                    systemImage: "xmark.circle"
-                )
-            }
-        } else {
-            switch client.manualConnectionAvailability[item.id] ?? .unknown {
-            case .available:
-                Button {
-                    client.connectRecentManualConnection(item)
-                } label: {
-                    Label(
-                        "\(item.displayName) — Connect",
-                        systemImage: "link.badge.plus"
-                    )
-                }
-            case .checking:
-                Button("\(item.displayName) — Checking…") {}
-                    .disabled(true)
-            case .unavailable:
-                Button("\(item.displayName) — Unavailable") {}
-                    .disabled(true)
-            case .permissionRequired:
-                Button {
-                    client.openLocalNetworkPrivacySettings()
-                } label: {
-                    Label(
-                        "\(item.displayName) — Allow Local Network",
-                        systemImage: "exclamationmark.triangle"
-                    )
-                }
-            case .unknown:
-                Button("\(item.displayName) — Unknown") {}
-                    .disabled(true)
-            }
-        }
+    private func deviceSectionTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.caption)
+            .fontWeight(.semibold)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
+    }
+
+    private func emptyDeviceRow(_ title: String) -> some View {
+        Text(title)
+            .font(.callout)
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func showMainWindow() {
@@ -1227,8 +1220,24 @@ struct DetailPanelView: View {
 
             Section("About") {
                 LabeledContent("Version") {
-                    Text("ExtendCast \(UpdateChecker.currentVersion)")
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Text("ExtendCast \(UpdateChecker.currentVersion)")
+                            .foregroundStyle(.secondary)
+
+                        Button {
+                            updateChecker.checkForUpdates()
+                        } label: {
+                            if updateChecker.isChecking {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(updateChecker.isChecking)
+                        .help("Check for Updates")
+                    }
                 }
 
                 if updateChecker.checkedOnce {
@@ -1256,7 +1265,6 @@ struct DetailPanelView: View {
         .navigationTitle("Settings")
         .onAppear {
             launchAtLoginManager.refresh()
-            updateChecker.checkForUpdates()
         }
         .sheet(item: $customResolutionEditorRequest) { request in
             CustomResolutionEditor(
