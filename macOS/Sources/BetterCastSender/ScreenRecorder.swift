@@ -48,11 +48,15 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
                 
                 if display == nil {
-                    LogManager.shared.log("ScreenRecorder: Target display \(targetID) NOT found after retries. Falling back to Main.")
+                    LogManager.shared.log(
+                        "ScreenRecorder: Target display \(targetID) not found after retries; " +
+                        "capture aborted to avoid streaming the main display"
+                    )
+                    return
                 }
             }
             
-            // Fallback to Main Display explicitly if target not found or not specified
+            // A nil target explicitly means mirror mode.
             if display == nil {
                  let content = try await SCShareableContent.current
                  // Use CGMainDisplayID to ensure we get the primary screen, not just 'first'

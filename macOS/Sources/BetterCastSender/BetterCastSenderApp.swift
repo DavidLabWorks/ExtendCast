@@ -2732,7 +2732,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     @Published var status: String = "Idle"
     @Published var foundServices: [DiscoveredService] = []
     @Published var connectedServices: [DiscoveredService] = []
-    private var connectingServiceNames: Set<String> = [] // Prevent double-connect race
+    private var connectionRegistry = ReceiverConnectionRegistry()
+    private var pendingConnectionsByID: [UUID: NWConnection] = [:]
     @Published var useVirtualDisplay: Bool = true {
         didSet { persistSettings() }
     }
@@ -2894,7 +2895,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         // receivers can connect in parallel.
         for service in services where isAutoConnectEnabled(for: service) {
             if connectedServices.contains(where: { $0.name == service.name })
-                || connectingServiceNames.contains(service.name) {
+                || isConnecting(to: service) {
                 continue
             }
             if service.name.contains("Android (USB)")
@@ -3302,7 +3303,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         guard enabled,
               !connectedServices.contains(where: { $0.name == service.name }),
-              !connectingServiceNames.contains(service.name) else {
+              !isConnecting(to: service) else {
             return
         }
 
@@ -3429,7 +3430,76 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     func isConnecting(to service: DiscoveredService) -> Bool {
-        connectingServiceNames.contains(service.name)
+        connectionRegistry.isPending(
+            receiverKey: ReceiverConnectionKey.unresolved(
+                serviceName: service.name,
+                endpoint: service.endpoint
+            )
+        )
+    }
+
+    private func beginConnectionAttempt(
+        for service: DiscoveredService,
+        connectionID: UUID
+    ) -> String? {
+        let receiverKey = ReceiverConnectionKey.unresolved(
+            serviceName: service.name,
+            endpoint: service.endpoint
+        )
+        guard connectionRegistry.begin(
+            connectionID: connectionID,
+            receiverKey: receiverKey
+        ) else {
+            LogManager.shared.log(
+                "Sender: Connection already active or pending for \(service.name)"
+            )
+            return nil
+        }
+        return receiverKey
+    }
+
+    private func trackPendingConnection(
+        _ connection: NWConnection,
+        connectionID: UUID
+    ) {
+        pendingConnectionsByID[connectionID] = connection
+    }
+
+    private func finishPendingConnection(
+        connectionID: UUID,
+        receiverKey: String
+    ) {
+        pendingConnectionsByID.removeValue(forKey: connectionID)
+        connectionRegistry.finishPending(
+            connectionID: connectionID,
+            receiverKey: receiverKey
+        )
+    }
+
+    private func admitReadyConnection(
+        _ connection: NWConnection,
+        connectionID: UUID,
+        pendingKey: String,
+        service: DiscoveredService
+    ) -> Bool {
+        pendingConnectionsByID.removeValue(forKey: connectionID)
+        let resolvedKey = ReceiverConnectionKey.resolved(
+            serviceName: service.name,
+            endpoint: service.endpoint,
+            remoteEndpoint: connection.currentPath?.remoteEndpoint
+        )
+        guard connectionRegistry.admitReady(
+            connectionID: connectionID,
+            pendingKey: pendingKey,
+            resolvedKey: resolvedKey
+        ) else {
+            LogManager.shared.log(
+                "Sender: Rejected duplicate or expired connection to \(service.name)"
+            )
+            connection.cancel()
+            return false
+        }
+        return true
     }
 
     func removeManualConnectionHistory(_ item: ManualConnectionHistoryItem) {
@@ -3539,7 +3609,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     if let service = self.service(for: item),
                        self.isAutoConnectEnabled(for: service),
                        !self.connectedServices.contains(where: { $0.name == service.name }),
-                       !self.connectingServiceNames.contains(service.name) {
+                       !self.isConnecting(to: service) {
                         LogManager.shared.log("Sender: Auto-connecting to available recent device \(service.name)")
                         self.connectRecentManualConnection(item)
                     }
@@ -3707,16 +3777,16 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     func connect(to service: DiscoveredService, restoringSavedSettings: Bool = true) {
-        // Check if already connected or currently connecting to this service
+        // Check the display name first for a fast UI-level duplicate guard.
         if connectedServices.contains(where: { $0.name == service.name }) {
             LogManager.shared.log("Sender: Already connected to \(service.name)")
             return
         }
-        if connectingServiceNames.contains(service.name) {
-            LogManager.shared.log("Sender: Already connecting to \(service.name) — ignoring duplicate")
-            return
-        }
-        connectingServiceNames.insert(service.name)
+        let connectionId = UUID()
+        guard let pendingKey = beginConnectionAttempt(
+            for: service,
+            connectionID: connectionId
+        ) else { return }
 
         let receiverSettings = restoringSavedSettings ? settings(for: service) : currentReceiverSettings()
         applyReceiverSettings(receiverSettings)
@@ -3799,7 +3869,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
 
         let connection = NWConnection(to: connectEndpoint, using: parameters)
-        let connectionId = UUID()
+        trackPendingConnection(connection, connectionID: connectionId)
 
         // Timeout: if connection is still not ready after 5s, retry without P2P
         // This handles cases where AWDL negotiation hangs
@@ -3809,7 +3879,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             // Only retry if still not connected (no pipeline created yet)
             if self.pipelines[connectionId] == nil && !connectionTimedOut {
                 connectionTimedOut = true
-                self.connectingServiceNames.remove(service.name)
+                self.finishPendingConnection(
+                    connectionID: connectionId,
+                    receiverKey: pendingKey
+                )
                 LogManager.shared.log("Sender: Connection to \(service.name) timed out — retrying via infrastructure")
                 connection.cancel()
 
@@ -3843,9 +3916,17 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 switch state {
                 case .ready:
                     timeoutWork.cancel() // Connection succeeded, cancel timeout
-                    self?.connectingServiceNames.remove(service.name)
+                    guard let self,
+                          self.admitReadyConnection(
+                            connection,
+                            connectionID: connectionId,
+                            pendingKey: pendingKey,
+                            service: service
+                          ) else {
+                        return
+                    }
 
-                    self?.rememberSuccessfulManualConnection(for: service)
+                    self.rememberSuccessfulManualConnection(for: service)
 
                     // Detect link type before creating pipeline
                     var isP2P = false
@@ -3884,27 +3965,30 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     let isLegacyReceiver = nameLower.hasPrefix("bettercast receiver")
                         && !nameLower.contains("android") && !nameLower.contains("windows") && !nameLower.contains("linux")
                     pipeline.supportsTypeByte = !isLegacyReceiver
-                    self?.pipelines[connectionId] = pipeline
-                    self?.connectedServices.append(service)
-                    self?.updateConnectedDisplays()
+                    self.pipelines[connectionId] = pipeline
+                    self.connectedServices.append(service)
+                    self.updateConnectedDisplays()
 
-                    let count = self?.pipelines.count ?? 0
-                    self?.status = "Connected to \(count) device(s)"
+                    let count = self.pipelines.count
+                    self.status = "Connected to \(count) device(s)"
                     LogManager.shared.log("Sender: Connected to \(service.name) (Total: \(count), P2P: \(isP2P), typeByte: \(pipeline.supportsTypeByte))")
 
                     // Start per-connection pipeline (each device gets its own display/encoder/recorder)
-                    self?.startPipeline(for: connectionId)
+                    self.startPipeline(for: connectionId)
 
                     // Start shared services on first connection
                     if count == 1 {
-                        self?.startHeartbeatMonitor()
-                        self?.startStatsTimer()
+                        self.startHeartbeatMonitor()
+                        self.startStatsTimer()
                     }
 
-                    self?.receive(on: connection, connectionId: connectionId)
+                    self.receive(on: connection, connectionId: connectionId)
                 case .failed(let error):
                     timeoutWork.cancel()
-                    self?.connectingServiceNames.remove(service.name)
+                    self?.finishPendingConnection(
+                        connectionID: connectionId,
+                        receiverKey: pendingKey
+                    )
                     LogManager.shared.log("Sender: Connection to \(service.name) failed: \(error)")
                     self?.removeConnection(connectionId)
 
@@ -4274,6 +4358,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             LogManager.shared.log("Sender: Already connected to \(service.name)")
             return
         }
+        let connectionId = UUID()
+        guard let pendingKey = beginConnectionAttempt(
+            for: service,
+            connectionID: connectionId
+        ) else { return }
 
         var receiverSettings = settings(for: service)
         if forceTCP {
@@ -4282,21 +4371,46 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         applyReceiverSettings(receiverSettings)
         saveSettings(receiverSettings, for: service)
 
-        // Mark as connecting to prevent auto-connect races during retry
-        connectingServiceNames.insert(service.name)
-
         let deviceCount = pipelines.count + 1
         self.status = "Connecting to \(service.name) (Device #\(deviceCount))..."
 
         let connection = NWConnection(to: service.endpoint, using: parameters)
-        let connectionId = UUID()
+        trackPendingConnection(connection, connectionID: connectionId)
+
+        let timeoutWork = DispatchWorkItem { [weak self, weak connection] in
+            guard let self, let connection,
+                  self.pipelines[connectionId] == nil else {
+                return
+            }
+            self.finishPendingConnection(
+                connectionID: connectionId,
+                receiverKey: pendingKey
+            )
+            connection.cancel()
+            LogManager.shared.log(
+                "Sender: Connection to \(service.name) timed out after 10 seconds"
+            )
+            if self.pipelines.isEmpty {
+                self.status = "Connection timed out"
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: timeoutWork)
 
         connection.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
                 switch state {
                 case .ready:
-                    self?.connectingServiceNames.remove(service.name)
-                    self?.rememberSuccessfulManualConnection(for: service)
+                    timeoutWork.cancel()
+                    guard let self,
+                          self.admitReadyConnection(
+                            connection,
+                            connectionID: connectionId,
+                            pendingKey: pendingKey,
+                            service: service
+                          ) else {
+                        return
+                    }
+                    self.rememberSuccessfulManualConnection(for: service)
                     // Detect link type
                     var isP2P = false
                     var isLoopback = false
@@ -4336,25 +4450,29 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     let isLegacyReceiver = nameLower.hasPrefix("bettercast receiver")
                         && !nameLower.contains("android") && !nameLower.contains("windows") && !nameLower.contains("linux")
                     pipeline.supportsTypeByte = !isLegacyReceiver
-                    self?.pipelines[connectionId] = pipeline
-                    self?.connectedServices.append(service)
-                    self?.updateConnectedDisplays()
+                    self.pipelines[connectionId] = pipeline
+                    self.connectedServices.append(service)
+                    self.updateConnectedDisplays()
 
-                    let count = self?.pipelines.count ?? 0
-                    self?.status = "Connected to \(count) device(s)"
+                    let count = self.pipelines.count
+                    self.status = "Connected to \(count) device(s)"
                     LogManager.shared.log("Sender: Connected to \(service.name) (Total: \(count), P2P: \(isP2P), typeByte: \(pipeline.supportsTypeByte))")
 
-                    self?.startPipeline(for: connectionId)
+                    self.startPipeline(for: connectionId)
 
                     if count == 1 {
-                        self?.startHeartbeatMonitor()
-                        self?.startStatsTimer()
+                        self.startHeartbeatMonitor()
+                        self.startStatsTimer()
                     }
 
-                    self?.receive(on: connection, connectionId: connectionId)
+                    self.receive(on: connection, connectionId: connectionId)
                 case .failed(let error):
+                    timeoutWork.cancel()
                     LogManager.shared.log("Sender: Connection to \(service.name) failed: \(error)")
-                    self?.connectingServiceNames.remove(service.name)
+                    self?.finishPendingConnection(
+                        connectionID: connectionId,
+                        receiverKey: pendingKey
+                    )
                     self?.removeConnection(connectionId)
 
                     let remaining = self?.pipelines.count ?? 0
@@ -4630,6 +4748,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         InputHandler.shared.removeDisplayBounds(for: connectionId)
 
         pipelines.removeValue(forKey: connectionId)
+        connectionRegistry.removeActive(connectionID: connectionId)
         connectedServices.removeAll { $0.name == pipeline.service.name }
 
         let remaining = pipelines.count
@@ -4645,6 +4764,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     func disconnect() {
+        pendingConnectionsByID.values.forEach { $0.cancel() }
+        pendingConnectionsByID.removeAll()
         for (id, pipeline) in pipelines {
             pipeline.screenRecorder?.stopCapture()
             pipeline.virtualDisplayManager?.destroyDisplay()
@@ -4652,6 +4773,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             InputHandler.shared.removeDisplayBounds(for: id)
         }
         pipelines.removeAll()
+        connectionRegistry.removeAll()
         connectedServices.removeAll()
         connectedDisplays.removeAll()
         status = "Disconnected"
@@ -4906,7 +5028,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     LogManager.shared.log("Sender: Virtual display created for \(serviceName) with ID \(displayID)")
                     LogManager.shared.log("Sender: Go to System Settings > Displays to arrange it")
                 } else {
-                    LogManager.shared.log("Sender: Failed to create virtual display for \(serviceName), using main screen")
+                    LogManager.shared.log(
+                        "Sender: Failed to create virtual display for \(serviceName); " +
+                        "pipeline stopped to avoid streaming the main screen"
+                    )
+                    status = "Virtual display unavailable for \(serviceName)"
+                    return
                 }
             }
 
