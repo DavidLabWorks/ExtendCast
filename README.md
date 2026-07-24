@@ -2,37 +2,261 @@
 
 ExtendCast is an independent GPLv3 project based on
 [StephenLovino/BetterCast](https://github.com/StephenLovino/BetterCast).
-It preserves the upstream internal filenames, build targets, and wire protocol
-for compatibility while developing a substantially customized macOS
+It focuses on a more configurable, responsive, and reliable macOS
 extended-display experience.
 
 ExtendCast is not affiliated with or endorsed by the original BetterCast
 project. See [NOTICE.md](NOTICE.md) for attribution and modification details.
 
+## Improvements over BetterCast
+
+ExtendCast substantially changes the macOS sender experience. The work focuses
+on per-device control, virtual-display correctness, lower background overhead,
+and fixes for display identity, ColorSync, HiDPI, and session recovery.
+
+### At a Glance
+
+| Area | Original BetterCast | ExtendCast |
+|------|---------------------|------------|
+| Device settings | Shared global settings | Persisted settings for each receiver |
+| Apply behavior | Restarts every active pipeline | Applies only to the selected device |
+| Auto-connect | One global switch | Independent setting for each receiver |
+| Frame rate | Chosen automatically by link type | Per-device 30 or 60 FPS control |
+| Resolutions | Fixed built-in presets | Add, edit, validate, and remove custom presets |
+| Display identity | Runtime serial based on connection order | Stable identity for each receiver and density mode |
+| HiDPI handling | Relies on the mode macOS restores | Verifies and selects the exact logical and backing-pixel mode |
+| Display previews | Full-resolution capture every two seconds | No automatic preview capture; optional previews are downscaled |
+| Capture buffering | Queue depth of 4 or 8 at foreground QoS | Queue depth of 3 using a lower-priority capture queue |
+| Receiver service | Starts automatically with the app | Starts only when requested or explicitly enabled at launch |
+| Background controls | Main window required | Menu-bar connect, disconnect, recent-device, and quit controls |
+| Recovery | Capture can remain stale after wake or unlock | Restarts capture while preserving virtual displays |
+
+### Device Management and macOS UI
+
+- A menu-bar controller shows connected, available, and recent devices without
+  requiring the main window.
+
+- Devices can be connected or disconnected directly from the menu bar. Recent
+  devices can be refreshed, reconnected, or shown as unavailable.
+
+- The sidebar now uses stable destinations for Devices, Recent, Connect,
+  Receive Screen, Settings, and Logs instead of mixing navigation with a
+  changing list of discovered devices.
+
+- The Devices page separates connected and available receivers into consistent
+  macOS-style cards with device-specific Settings and Disconnect actions.
+
+- Duplicate Bonjour P2P entries, synthetic ADB entries, active devices, and
+  saved manual addresses are filtered from the Available list.
+
+- Available receivers can be configured before connecting. The same settings
+  sections remain available after connection.
+
+- Connected-device pages include a compact status bar with the active
+  resolution, Apply or Apply & Reconnect, and Disconnect.
+
+- Apply is enabled only when the selected device has pending changes. Transport
+  changes reconnect that device; display and stream changes keep the network
+  connection when possible.
+
+- Manual IP connections have a dedicated page. Successful connections are
+  stored in a Recent page instead of being lost when the app closes.
+
+- Recent devices show Checking, Available, Unavailable, Connected, and Local
+  Network Off states, with direct access to the relevant privacy setting.
+
+- Settings use grouped native forms, aligned content widths, compact secondary
+  actions, and consistent destructive-button styling.
+
+- Launch at Login is managed through `SMAppService`, including the macOS
+  approval-required state and a shortcut to Login Items.
+
+### Per-Device Profiles and Custom Resolutions
+
+- Each receiver stores its own display mode, resolution, pixel density, Retina
+  state, bitrate, frame rate, audio setting, protocol, interface preference,
+  and auto-connect state.
+
+- Receiver profiles are restored before reconnecting, so one device no longer
+  overwrites the settings intended for another.
+
+- Auto-connect is tracked per receiver. Multiple saved receivers can reconnect
+  independently when they become available.
+
+- Custom resolutions can be added, edited, and removed. Validation covers pixel
+  bounds, even dimensions, duplicate sizes, labels, and a 72–500 PPI range.
+
+- Resolution choices combine built-in and custom presets, sort them by
+  dimensions, and preserve a selected custom value across launches.
+
+- PPI is translated into an equivalent diagonal display size. A setting such
+  as `2880 × 1920 at 267 PPI` is shown as approximately `13.0″`.
+
+- The custom editor explains that full PPI is used for Retina displays, while
+  standard-density mode advertises no more than 110 PPI.
+
+- Editing or deleting a custom resolution updates saved receiver profiles and
+  active settings that referenced it.
+
+### Virtual Display Stability and HiDPI Correctness
+
+- Virtual-display serial numbers are stable across launches instead of being
+  assigned from an in-memory counter that changes with connection order.
+
+- Identities are stored in a dedicated preferences domain and migrated from
+  earlier application domains, so application identifier changes do not create
+  a new monitor identity.
+
+- Receiver keys normalize discovery prefixes, letter case, whitespace, and
+  macOS duplicate-name suffixes such as ` (2)`.
+
+- Standard and Retina modes use separate stable identities. This prevents
+  macOS from restoring a cached 1× mode for a requested 2× display, or the
+  reverse.
+
+- The descriptor sets both serial fields, a nonzero vendor ID, and a stable
+  product ID before registering the display.
+
+- After registration, ExtendCast matches both logical dimensions and backing
+  pixels, then explicitly selects the requested 1× or 2× display mode.
+
+- Active mode diagnostics report logical size, backing-pixel size, refresh
+  rate, scale factor, and whether the result matches the requested density.
+
+- Standard mode caps the descriptor at 110 PPI to stop macOS from retaining an
+  unintended HiDPI scale. Retina mode uses the configured full density.
+
+- Virtual-display refresh rate follows the selected 30 or 60 FPS setting
+  instead of being fixed at 60 Hz.
+
+- Resolution and refresh-rate changes can update an existing display in place.
+  A display is recreated only when density changes or the in-place update fails.
+
+- Capture or encoder restarts reuse the existing virtual display. This preserves
+  display arrangement and avoids unnecessary monitor registration events.
+
+- Stable identities prevent the duplicate ICC-profile growth that previously
+  drove `colorsync.useragent` CPU usage and stalled the macOS Displays pane.
+
+- Seven regression tests cover identity migration, deterministic serials,
+  discovery aliases, duplicate suffixes, and separate Standard/Retina identity.
+
+### Performance and Responsiveness
+
+- ScreenCaptureKit requests the bi-planar `420v` pixel format directly, reducing
+  conversion work before VideoToolbox encoding.
+
+- The capture queue depth is fixed at three frames instead of four or eight,
+  reducing buffered surfaces, memory pressure, and capture latency.
+
+- Screen and audio sample handling runs at utility QoS instead of
+  user-initiated QoS, allowing keyboard, pointer, and foreground UI work to win
+  scheduling contention.
+
+- Automatic full-resolution display screenshots every two seconds were removed
+  from the main device workflow.
+
+- Optional display previews are captured only on demand and resized to at most
+  480 pixels before reaching SwiftUI, reducing WindowServer and UI overhead.
+
+- Applying settings restarts only the selected capture and encoder instead of
+  destroying every connected device pipeline.
+
+- In-place virtual-display updates avoid repeated display creation, ColorSync
+  scans, ICC generation, and System Settings refreshes.
+
+- The log view renders one selectable monospaced text block instead of hundreds
+  of independent SwiftUI text views.
+
+- Logs remain capped at 200 entries, and excess entries are removed in one
+  operation.
+
+- The receiver listener no longer starts by default, avoiding an unused network
+  listener and related background activity.
+
+### Networking and Connection Reliability
+
+- TCP and UDP Bonjour services are browsed simultaneously. A receiver's saved
+  protocol selects the matching endpoint when connecting.
+
+- Discovery is independent from the chosen route, while each receiver can use
+  Auto, P2P, Router, or Cable mode.
+
+- If AWDL negotiation times out, fallback now keeps the receiver's selected
+  TCP or UDP protocol instead of always switching the retry to TCP.
+
+- Route and protocol choices are stored per receiver, so changing one device
+  no longer changes discovery or connection behavior for every device.
+
+- Manual IP connections use TCP and can retain a saved interface preference.
+  Localhost remains unrestricted for ADB forwarding.
+
+- Recent manual devices are probed with a bounded timeout and one retry, which
+  handles routes that briefly remain unavailable while USB4, ARP, or link-local
+  networking settles.
+
+- Local-network privacy denial is detected separately from an offline device,
+  so the UI can present the correct recovery action.
+
+- Release metadata declares Bonjour use, local-network access, and client/server
+  network entitlements.
+
+- Frame rate is selectable per receiver. Bitrate, keyframe interval, and rate
+  limiting remain link-aware for AWDL, USB ADB, WiFi ADB, and router paths.
+
+### Recovery and Operational Fixes
+
+- Wake, login-session activation, and screen unlock events are coalesced into a
+  single capture recovery operation.
+
+- Recovery rebuilds ScreenCaptureKit and encoder state without destroying the
+  virtual monitor or losing its arrangement.
+
+- Input bounds are now refreshed after exact 1× or 2× mode selection, avoiding
+  coordinates based on the temporary mode macOS exposes during registration.
+
+- App services are started only once even if SwiftUI reconstructs or reveals the
+  main view multiple times.
+
+- Receiver listening is opt-in and includes a separate Start Listening at
+  Launch preference.
+
+- The release build disables the upstream release checker, preventing unrelated
+  upstream versions from being presented as ExtendCast updates.
+
+- The built-in-display brightness control was removed from streaming settings,
+  keeping device pages focused on receiver and virtual-display behavior.
+
 ## How It Works
 
-**BetterCast** is a single unified Mac app that does both jobs: it can **send** your screen to other devices (creating a virtual display per receiver) and **receive** screens from other Macs in a separate window. Receivers on iOS, Windows, Linux, and Android are dedicated apps.
+**ExtendCast** is a unified Mac app that can **send** your screen to other
+devices and **receive** screens from other Macs in a separate window. Each
+extended connection creates a dedicated virtual display.
 
-Each connected receiver gets its own virtual display with independent resolution, input handling, and optional audio streaming.
+Each receiver has independent display, connection, quality, frame-rate, input,
+audio, and auto-connect settings.
 
 ## Supported Platforms
 
 | Platform | Role | Connection | Download |
 |----------|------|------------|----------|
-| **macOS** | Sender + Receiver | P2P Direct / WiFi | [bettercast.online](https://bettercast.online/#install) |
+| **macOS** | Sender + Receiver | P2P Direct / WiFi / Cable | Build from source |
 | **iOS / iPadOS** | Receiver | P2P Direct (AWDL) / WiFi | [bettercast.online](https://bettercast.online/#install) |
 | **Windows** | Receiver | WiFi | [bettercast.online](https://bettercast.online/#install) |
 | **Linux** | Receiver | WiFi | [bettercast.online](https://bettercast.online/#install) |
-| **Android** | Receiver | WiFi / ADB USB | [bettercast.online](https://bettercast.online/#install) |
-
-> The macOS DMG is notarized and signed with an Apple Developer certificate.
+| **Android** | Receiver | WiFi / ADB USB / ADB WiFi | [bettercast.online](https://bettercast.online/#install) |
 
 ## Features
 
 - **Multi-device** — Connect multiple receivers simultaneously, each with its own virtual display
+- **Per-device profiles** — Save display, network, quality, frame-rate, audio, and auto-connect settings independently
+- **Custom resolutions** — Create validated presets with pixel density and equivalent physical display size
+- **Menu-bar control** — Connect, disconnect, refresh recent devices, open the app, or quit without keeping the main window visible
 - **Cross-platform input** — Mouse and keyboard pass-through from any receiver back to the Mac
 - **Audio streaming** — Optional per-device AAC-LC audio forwarding (128 kbps stereo)
-- **Adaptive quality** — Per-link tuning: AWDL P2P runs 60 FPS at full bitrate; WiFi infrastructure runs 30 FPS at the user-selected bitrate (default 20 Mbps) with shorter keyframe intervals for faster recovery on lossy links; ADB tunnels match P2P quality
+- **Selectable frame rate** — Choose 30 or 60 FPS per receiver while bitrate, keyframe interval, and rate limiting adapt to the link
+- **Stable virtual displays** — Preserve display identity, arrangement, density mode, and ColorSync state across capture restarts
+- **Session recovery** — Resume capture after wake or unlock without replacing the virtual monitor
 - **Zero-config for Apple devices** — iOS/Mac receivers are discovered automatically via AWDL (no WiFi network needed)
 - **mDNS discovery** — Windows/Linux/Android receivers are discovered automatically when on the same network
 
@@ -40,13 +264,16 @@ Each connected receiver gets its own virtual display with independent resolution
 
 ### macOS (Sender + Receiver)
 
-1. Download the latest DMG from [bettercast.online](https://bettercast.online/#install)
-2. Open the DMG and drag **BetterCast** to your Applications folder
-3. Launch **BetterCast** and grant the required permissions:
+1. Run `./make_app.sh` on an Apple Silicon Mac.
+2. Copy `ExtendCast.app` to `/Applications`.
+3. Launch **ExtendCast** and grant the required permissions:
    - **Screen Recording** — to capture your display
    - **Accessibility** — to relay mouse and keyboard input from receivers
+   - **Local Network** — to discover and connect to receivers
 
-The receiver is stopped by default to avoid unnecessary background activity. Open **Receive Screen** and click **Start Listening** when you want this Mac to accept incoming streams. Enable **Start Listening at Launch** there if you want it to start automatically with BetterCast. To send your screen, pick a discovered device from the sidebar.
+The receiver is stopped by default. Open **Receive Screen** and click
+**Start Listening** when this Mac should accept incoming streams. Enable
+**Start Listening at Launch** if receiver mode should start automatically.
 
 ### iOS / iPadOS
 
@@ -66,7 +293,9 @@ Visit [bettercast.online](https://bettercast.online/#install) for the latest APK
 
 ## Networking
 
-BetterCast uses **TCP (port 51820)** for the primary video/audio stream and **UDP (port 51821)** for chunked frame delivery. Service discovery uses mDNS (`_bettercast._tcp`).
+ExtendCast uses **TCP (port 51820)** for the primary video/audio stream and
+**UDP (port 51821)** for chunked frame delivery. Discovery browses both
+`_bettercast._tcp` and `_bettercast._udp`.
 
 - **Apple-to-Apple**: Uses AWDL (Apple Wireless Direct Link) for a direct P2P connection — no WiFi router needed
 - **All other platforms**: Requires both devices to be on the same WiFi/LAN network
@@ -82,17 +311,17 @@ Frames are sent as length-prefixed TCP messages with a 1-byte type tag:
   type 0x02 = AAC-LC audio (raw frames, no ADTS header)
 ```
 
-Legacy receivers (pre-1.3 iOS / Mac Swift) use a different framing without the type byte; the desktop receiver auto-detects the format on the first frame of each connection.
-
 ## Release Notes
 
-See [docs/release-notes/](docs/release-notes/) for per-version notes (v5–v8).
+See [docs/release-notes/](docs/release-notes/) for the historical upstream
+release notes (v5–v8).
 
 ## Support the Project
 
-BetterCast is free and open source. If you find it useful and want to support development, you can donate here:
+ExtendCast is free and open source.
 
-**[Donate on Whop](https://whop.com/bettercast/bettercast-donate/)**
+The original BetterCast project accepts donations through
+**[Whop](https://whop.com/bettercast/bettercast-donate/)**.
 
 ## Disclaimer
 
@@ -100,11 +329,12 @@ BetterCast is free and open source. If you find it useful and want to support de
 
 This software is provided "as is", without warranty of any kind, express or implied. We are not responsible for any damages to your devices, data loss, or other issues that may occur while using this application.
 
-BetterCast is fully open source. We encourage users to audit the code for safety and security. If you find any issues, please report them or contribute a fix.
+ExtendCast is fully open source. Users are encouraged to audit the code for
+safety and security, report issues, and contribute fixes.
 
 ## License & Contribution
 
-BetterCast is licensed under the **GNU General Public License v3.0 (GPLv3)**.
+ExtendCast is licensed under the **GNU General Public License v3.0 (GPLv3)**.
 
 ### Why GPLv3?
 We believe in the freedom of software and the collective benefit of open collaboration. We choose GPLv3 to specifically:
