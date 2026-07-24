@@ -22,11 +22,23 @@
 
 #import "VirtualDisplay.h"
 
-id createVirtualDisplay(int width, int height, int ppi, BOOL hiDPI, NSString *name, unsigned int serialNum) {
-
+static CGVirtualDisplaySettings *settingsForMode(int width, int height, BOOL hiDPI, double refreshRate) {
     CGVirtualDisplaySettings *settings = [[CGVirtualDisplaySettings alloc] init];
     settings.hiDPI = hiDPI;
+    settings.rotation = 0;
 
+    if (hiDPI) {
+        width /= 2;
+        height /= 2;
+    }
+    CGVirtualDisplayMode *mode = [[CGVirtualDisplayMode alloc] initWithWidth:width
+                                                                      height:height
+                                                                 refreshRate:MAX(15.0, MIN(refreshRate, 120.0))];
+    settings.modes = @[mode];
+    return settings;
+}
+
+id createVirtualDisplay(int width, int height, int ppi, BOOL hiDPI, NSString *name, unsigned int serialNum, double refreshRate) {
     CGVirtualDisplayDescriptor *descriptor = [[CGVirtualDisplayDescriptor alloc] init];
     descriptor.queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0);
     descriptor.name = name;
@@ -39,23 +51,24 @@ id createVirtualDisplay(int width, int height, int ppi, BOOL hiDPI, NSString *na
     descriptor.maxPixelsHigh = height;
     descriptor.maxPixelsWide = width;
     descriptor.sizeInMillimeters = CGSizeMake(25.4 * width / ppi, 25.4 * height / ppi);
+    // Newer macOS releases use both serial fields when restoring a display's
+    // saved mode. Match Chromium's current CGVirtualDisplay descriptor setup.
     descriptor.serialNum = serialNum;
-    descriptor.productID = serialNum;
-    descriptor.vendorID = 1;
+    descriptor.serialNumber = serialNum;
+    descriptor.productID = 0;
+    descriptor.vendorID = 505;
+    descriptor.terminationHandler = nil;
 
     CGVirtualDisplay *display = [[CGVirtualDisplay alloc] initWithDescriptor:descriptor];
-
-    if (settings.hiDPI) {
-        width /= 2;
-        height /= 2;
-    }
-    CGVirtualDisplayMode *mode = [[CGVirtualDisplayMode alloc] initWithWidth:width
-                                                                      height:height
-                                                                 refreshRate:60];
-    settings.modes = @[mode];
-
-    if (![display applySettings:settings])
+    if (![display applySettings:settingsForMode(width, height, hiDPI, refreshRate)])
         return nil;
 
     return display;
+}
+
+BOOL updateVirtualDisplay(id display, int width, int height, BOOL hiDPI, double refreshRate) {
+    if (![display isKindOfClass:[CGVirtualDisplay class]])
+        return NO;
+
+    return [(CGVirtualDisplay *)display applySettings:settingsForMode(width, height, hiDPI, refreshRate)];
 }

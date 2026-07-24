@@ -14,4 +14,5 @@
 
 #import <Foundation/Foundation.h>
 
-id createVirtualDisplay(int width, int height, int ppi, BOOL hiDPI, NSString *name, unsigned int serialNum);
+id createVirtualDisplay(int width, int height, int ppi, BOOL hiDPI, NSString *name, unsigned int serialNum, double refreshRate);
+BOOL updateVirtualDisplay(id display, int width, int height, BOOL hiDPI, double refreshRate);

@@ -1,6 +1,13 @@
-# BetterCast
+# ExtendCast
 
-BetterCast is an open-source screen extension app that turns almost any device into a wireless extra display for your Mac. Think Sidecar or AirPlay Receiver — but cross-platform and built for hardware Apple no longer supports.
+ExtendCast is an independent GPLv3 project based on
+[StephenLovino/BetterCast](https://github.com/StephenLovino/BetterCast).
+It preserves the upstream internal filenames, build targets, and wire protocol
+for compatibility while developing a substantially customized macOS
+extended-display experience.
+
+ExtendCast is not affiliated with or endorsed by the original BetterCast
+project. See [NOTICE.md](NOTICE.md) for attribution and modification details.
 
 ## How It Works
 
@@ -39,7 +46,7 @@ Each connected receiver gets its own virtual display with independent resolution
    - **Screen Recording** — to capture your display
    - **Accessibility** — to relay mouse and keyboard input from receivers
 
-The receiver auto-starts in the background — no need to "switch modes". To send your screen, pick a discovered device from the sidebar. To receive, just leave the app open and another Mac/iOS device will see you in their list.
+The receiver is stopped by default to avoid unnecessary background activity. Open **Receive Screen** and click **Start Listening** when you want this Mac to accept incoming streams. Enable **Start Listening at Launch** there if you want it to start automatically with BetterCast. To send your screen, pick a discovered device from the sidebar.
 
 ### iOS / iPadOS
 

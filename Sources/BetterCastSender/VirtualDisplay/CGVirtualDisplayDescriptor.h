@@ -35,6 +35,7 @@
 @property(nonatomic) unsigned int maxPixelsWide; // @synthesize maxPixelsWide=_maxPixelsWide;
 @property(nonatomic) struct CGSize sizeInMillimeters; // @synthesize sizeInMillimeters=_sizeInMillimeters;
 @property(nonatomic) unsigned int serialNum; // @synthesize serialNum=_serialNum;
+@property(nonatomic) unsigned int serialNumber;
 @property(nonatomic) unsigned int productID; // @synthesize productID=_productID;
 @property(nonatomic) unsigned int vendorID; // @synthesize vendorID=_vendorID;
 - (void)dealloc;
@@ -44,4 +45,3 @@
 - (void)setDispatchQueue:(id)arg1;
 
 @end
-

@@ -7,12 +7,16 @@ import IOKit.graphics
 
 @main
 struct BetterCastSenderApp: App {
+    static let mainWindowID = "main"
+
     @StateObject private var networkClient = NetworkClient()
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @AppStorage("hasCompletedTour") private var hasCompletedTour = false
+    @AppStorage("receiverListeningEnabled") private var receiverAutoStartEnabled = false
+    @State private var didStartAppServices = false
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: Self.mainWindowID) {
             if hasCompletedOnboarding {
                 mainView
             } else {
@@ -23,10 +27,28 @@ struct BetterCastSenderApp: App {
                 .background(Color(nsColor: .windowBackgroundColor))
             }
         }
+
+        MenuBarExtra {
+            StatusBarMenuView(client: networkClient)
+        } label: {
+            Image(
+                systemName: networkClient.connectedDisplays.isEmpty
+                    ? "display"
+                    : "display.2"
+            )
+            .accessibilityLabel(
+                networkClient.connectedDisplays.isEmpty
+                    ? "BetterCast — No connected displays"
+                    : "BetterCast — \(networkClient.connectedDisplays.count) connected"
+            )
+        }
+        .menuBarExtraStyle(.menu)
     }
 
     enum SidebarSelection: Hashable {
         case devices
+        case recent
+        case connect
         case receive
         case settings
         case device(UUID)
@@ -40,7 +62,9 @@ struct BetterCastSenderApp: App {
 
     private var mainView: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            SidebarView(client: networkClient, selection: $sidebarSelection)
+            SidebarView(selection: $sidebarSelection) {
+                networkClient.quitApp()
+            }
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 350)
         } detail: {
             DetailPanelView(client: networkClient, selection: $sidebarSelection, hasCompletedOnboarding: $hasCompletedOnboarding)
@@ -59,13 +83,12 @@ struct BetterCastSenderApp: App {
             }
         }
         .onAppear {
+            guard !didStartAppServices else { return }
+            didStartAppServices = true
             networkClient.checkScreenRecordingPermission()
             networkClient.startBrowsing()
-            // Auto-start receiver so incoming connections work immediately
-            let receiver = ReceiverManager.shared
-            if !receiver.isRunning {
-                receiver.start()
-            }
+            networkClient.startSavedAutoConnections()
+            startReceiverIfConfigured()
             UpdateChecker.shared.checkForUpdates()
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                 InputHandler.shared.checkAccessibility()
@@ -84,6 +107,177 @@ struct BetterCastSenderApp: App {
                 }
             }
         }
+    }
+
+    private func startReceiverIfConfigured() {
+        let receiver = ReceiverManager.shared
+        if receiverAutoStartEnabled, !receiver.isRunning {
+            receiver.start()
+        }
+    }
+}
+
+// MARK: - Menu Bar
+
+struct StatusBarMenuView: View {
+    @ObservedObject var client: NetworkClient
+    @Environment(\.openWindow) private var openWindow
+
+    private var availableServices: [DiscoveredService] {
+        client.foundServices.filter { service in
+            guard case .service = service.endpoint else { return false }
+            guard !client.connectedServices.contains(where: { $0.name == service.name }) else {
+                return false
+            }
+            if service.name.hasSuffix(" P2P"),
+               client.foundServices.contains(where: {
+                   $0.name == String(service.name.dropLast(4))
+               }) {
+                return false
+            }
+            return true
+        }
+    }
+
+    var body: some View {
+        Section("Connected") {
+            if client.connectedDisplays.isEmpty {
+                Button("No connected devices") {}
+                    .disabled(true)
+            } else {
+                ForEach(client.connectedDisplays) { display in
+                    Button {
+                        client.disconnectConnection(display.id)
+                    } label: {
+                        Label(
+                            "\(display.name) — Disconnect",
+                            systemImage: "xmark.circle"
+                        )
+                    }
+                }
+            }
+        }
+
+        Section("Available Devices") {
+            if availableServices.isEmpty {
+                Button("No available devices") {}
+                    .disabled(true)
+            } else {
+                ForEach(availableServices, id: \.name) { service in
+                    Button {
+                        client.connect(to: service)
+                    } label: {
+                        Label(
+                            client.isConnecting(to: service)
+                                ? "\(service.name) — Connecting…"
+                                : "\(service.name) — Connect",
+                            systemImage: client.isConnecting(to: service)
+                                ? "ellipsis.circle"
+                                : "display.badge.plus"
+                        )
+                    }
+                    .disabled(client.isConnecting(to: service))
+                }
+            }
+        }
+
+        Section("Recent") {
+            if client.manualConnectionHistory.isEmpty {
+                Button("No recent devices") {}
+                    .disabled(true)
+            } else {
+                ForEach(client.manualConnectionHistory) { item in
+                    recentConnectionButton(item)
+                }
+            }
+
+            Button {
+                client.refreshManualConnectionAvailability()
+            } label: {
+                Label(
+                    client.isRefreshingManualConnectionAvailability
+                        ? "Refreshing…"
+                        : "Refresh Recent",
+                    systemImage: "arrow.clockwise"
+                )
+            }
+            .disabled(
+                client.manualConnectionHistory.isEmpty
+                    || client.isRefreshingManualConnectionAvailability
+            )
+        }
+
+        Divider()
+
+        Button {
+            showMainWindow()
+        } label: {
+            Label("Open BetterCast", systemImage: "macwindow")
+        }
+
+        Button {
+            client.quitApp()
+        } label: {
+            Label("Quit BetterCast", systemImage: "power")
+        }
+        .onAppear {
+            client.refreshManualConnectionAvailabilityIfNeeded()
+        }
+    }
+
+    @ViewBuilder
+    private func recentConnectionButton(_ item: ManualConnectionHistoryItem) -> some View {
+        if let connectionId = client.connectedDisplayId(for: item) {
+            Button {
+                client.disconnectConnection(connectionId)
+            } label: {
+                Label(
+                    "\(item.displayName) — Disconnect",
+                    systemImage: "xmark.circle"
+                )
+            }
+        } else {
+            switch client.manualConnectionAvailability[item.id] ?? .unknown {
+            case .available:
+                Button {
+                    client.connectRecentManualConnection(item)
+                } label: {
+                    Label(
+                        "\(item.displayName) — Connect",
+                        systemImage: "link.badge.plus"
+                    )
+                }
+            case .checking:
+                Button("\(item.displayName) — Checking…") {}
+                    .disabled(true)
+            case .unavailable:
+                Button("\(item.displayName) — Unavailable") {}
+                    .disabled(true)
+            case .permissionRequired:
+                Button {
+                    client.openLocalNetworkPrivacySettings()
+                } label: {
+                    Label(
+                        "\(item.displayName) — Allow Local Network",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                }
+            case .unknown:
+                Button("\(item.displayName) — Unknown") {}
+                    .disabled(true)
+            }
+        }
+    }
+
+    private func showMainWindow() {
+        if let window = NSApplication.shared.windows.first(where: {
+            $0.canBecomeMain && !($0 is NSPanel)
+        }) {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            openWindow(id: BetterCastSenderApp.mainWindowID)
+        }
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 }
 
@@ -152,15 +346,8 @@ struct GuidedTourOverlay: View {
             anchorKey: nil
         ),
         TourStep(
-            title: "Overview",
-            description: "This is your dashboard. See all connected displays with live previews, manage connections, and use \"Arrange...\" to position displays in System Settings.",
-            icon: "rectangle.on.rectangle",
-            sidebarTarget: .devices,
-            anchorKey: "sidebar_overview"
-        ),
-        TourStep(
             title: "Device Settings",
-            description: "Click any connected device in the sidebar to adjust resolution, bitrate, Retina mode, and audio streaming for that specific display.",
+            description: "Open Devices to configure display mode, resolution, Retina, bitrate, frame rate, and audio for each receiver.",
             icon: "gearshape",
             sidebarTarget: .devices,
             anchorKey: "sidebar_devices_section"
@@ -174,7 +361,7 @@ struct GuidedTourOverlay: View {
         ),
         TourStep(
             title: "Settings",
-            description: "Configure global preferences like connection mode, auto-connect, and manage connected displays.",
+            description: "Configure app-wide permissions, setup tools, and app controls.",
             icon: "gearshape.2",
             sidebarTarget: .settings,
             anchorKey: "sidebar_settings"
@@ -721,67 +908,18 @@ extension DashboardCard {
 // MARK: - Sidebar (native List)
 
 struct SidebarView: View {
-    @ObservedObject var client: NetworkClient
     @Binding var selection: BetterCastSenderApp.SidebarSelection?
+    let quitAction: () -> Void
 
     var body: some View {
         List {
-            // Devices first — the main dashboard
-            Section("Devices") {
-                sidebarRow("Overview", icon: "rectangle.on.rectangle", tag: .devices)
-                    .tourAnchor("sidebar_overview")
-
-                if client.foundServices.isEmpty && client.connectedServices.isEmpty {
-                    HStack {
-                        ProgressView()
-                            .scaleEffect(0.7)
-                        Text("Searching...")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    ForEach(client.foundServices.filter { service in
-                        let isADBSynthetic = service.name.contains("Android (USB)") || service.name.contains("Android (WiFi ADB)")
-                        let hasMDNSAndroid = client.foundServices.contains(where: {
-                            $0.name.lowercased().contains("android") && !$0.name.contains("Android (USB)") && !$0.name.contains("Android (WiFi ADB)")
-                        })
-                        // Hide " P2P" entry when base device exists (merged into one entry)
-                        let isP2PDuplicate = service.name.hasSuffix(" P2P")
-                            && client.foundServices.contains(where: { $0.name == String(service.name.dropLast(4)) })
-                        return !(isADBSynthetic && hasMDNSAndroid) && !isP2PDuplicate
-                    }, id: \.name) { service in
-                        SidebarDeviceRow(service: service, client: client, selection: $selection)
-                    }
-                }
-
-                // Connected ADB tunnels not in foundServices
-                ForEach(client.connectedDisplays.filter { display in
-                    let inFoundServices = client.foundServices.contains(where: { $0.name == display.name })
-                    let isADBDuplicate = (display.name.contains("Android (USB)") || display.name.contains("Android (WiFi ADB)"))
-                        && client.foundServices.contains(where: { $0.name.lowercased().contains("android") })
-                    // Hide " P2P" connected entry when base device is also connected
-                    let isP2PConnected = display.name.hasSuffix(" P2P")
-                        && client.connectedDisplays.contains(where: { $0.name == String(display.name.dropLast(4)) })
-                    return !inFoundServices && !isADBDuplicate && !isP2PConnected
-                }) { display in
-                    sidebarRow(display.name, subtitle: display.resolution, icon: "display", tag: .device(display.id), iconTint: .green)
-                }
-            }
-            .tourAnchor("sidebar_devices_section")
-
-            // Manual Connect
-            Section("Connect") {
-                ManualConnectRow(client: client)
-            }
-
-            // Receive mode
-            Section("Receive") {
+            Section {
+                sidebarRow("Devices", icon: "display.2", tag: .devices)
+                    .tourAnchor("sidebar_devices_section")
+                sidebarRow("Recent", icon: "clock.arrow.circlepath", tag: .recent)
+                sidebarRow("Connect", icon: "link", tag: .connect)
                 sidebarRow("Receive Screen", icon: "display.and.arrow.down", tag: .receive)
                     .tourAnchor("sidebar_receive")
-            }
-
-            // Settings & Logs at the bottom
-            Section {
                 sidebarRow("Settings", icon: "gearshape", tag: .settings)
                     .tourAnchor("sidebar_settings")
                 sidebarRow("Logs", icon: "text.alignleft", tag: .logs)
@@ -792,15 +930,15 @@ struct SidebarView: View {
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
             HStack {
-                Spacer()
                 Button(role: .destructive) {
-                    client.quitApp()
+                    quitAction()
                 } label: {
                     Image(systemName: "power")
                         .font(.system(size: 11))
                 }
                 .buttonStyle(.borderless)
                 .help("Quit BetterCast")
+                Spacer()
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
@@ -816,7 +954,7 @@ struct SidebarView: View {
         tag: BetterCastSenderApp.SidebarSelection,
         iconTint: Color? = nil
     ) -> some View {
-        let isSelected = selection == tag
+        let isSelected = isSidebarSelectionActive(tag)
         let tint = iconTint ?? .accentColor
 
         Button {
@@ -849,138 +987,15 @@ struct SidebarView: View {
                 : nil
         )
     }
-}
 
-// MARK: - Sidebar Device Row
-
-struct SidebarDeviceRow: View {
-    let service: DiscoveredService
-    @ObservedObject var client: NetworkClient
-    @Binding var selection: BetterCastSenderApp.SidebarSelection?
-
-    private var isAndroid: Bool {
-        service.name.lowercased().contains("android")
-    }
-
-    /// Connected directly (same service name) or via ADB tunnel
-    private var isConnected: Bool {
-        if client.connectedServices.contains(where: { $0.name == service.name }) { return true }
-        // Android: also count ADB tunnel connections
-        if isAndroid {
-            return client.connectedDisplays.contains(where: {
-                $0.name.contains("Android (USB)") || $0.name.contains("Android (WiFi ADB)")
-            })
-        }
-        return false
-    }
-
-    /// Find the connected display ID for this device (direct or ADB)
-    private var connectedDisplayId: UUID? {
-        if let display = client.connectedDisplays.first(where: { $0.name == service.name }) {
-            return display.id
-        }
-        if isAndroid {
-            return client.connectedDisplays.first(where: {
-                $0.name.contains("Android (USB)") || $0.name.contains("Android (WiFi ADB)")
-            })?.id
-        }
-        return nil
-    }
-
-    /// Connection method label for connected Android devices
-    private var connectionMethod: String {
-        if client.connectedDisplays.contains(where: { $0.name.contains("Android (USB)") }) {
-            return "Connected (USB)"
-        }
-        if client.connectedDisplays.contains(where: { $0.name.contains("Android (WiFi ADB)") }) {
-            return "Connected (WiFi ADB)"
-        }
-        if client.connectedServices.contains(where: { $0.name == service.name }) {
-            return "Connected (WiFi)"
-        }
-        return "Available"
-    }
-
-    private var deviceIcon: String {
-        if isConnected { return "display" }
-        if isAndroid { return "apps.iphone" }
-        if service.name.lowercased().contains("windows") { return "pc" }
-        if service.name.lowercased().contains("linux") { return "desktopcomputer" }
-        return "display"
-    }
-
-    private var rowTag: BetterCastSenderApp.SidebarSelection {
-        isConnected
-            ? connectedDisplayId.map { .device($0) } ?? .discovered(service.name)
-            : .discovered(service.name)
-    }
-
-    private var isSelected: Bool { selection == rowTag }
-
-    var body: some View {
-        Button {
-            selection = rowTag
-        } label: {
-            HStack {
-                Label {
-                    VStack(alignment: .leading) {
-                        Text(service.name)
-                            .lineLimit(1)
-                        Text(isAndroid ? connectionMethod : (isConnected ? "Connected" : "Available"))
-                            .font(.caption)
-                            .foregroundStyle(isConnected ? .green : .secondary)
-                    }
-                } icon: {
-                    Image(systemName: deviceIcon)
-                        .foregroundColor(isSelected ? .accentColor : (isConnected ? .green : .secondary))
-                }
-                .foregroundColor(isSelected ? .accentColor : .primary)
-                Spacer()
-                if !isConnected && !isAndroid {
-                    Button {
-                        client.connect(to: service)
-                    } label: {
-                        Image(systemName: "link")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
-                    .tint(.accentColor)
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .listRowBackground(
-            isSelected
-                ? RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.1))
-                : nil
-        )
-    }
-}
-
-// MARK: - Manual Connect Row
-
-struct ManualConnectRow: View {
-    @ObservedObject var client: NetworkClient
-    @State private var expanded = false
-
-    var body: some View {
-        DisclosureGroup("Manual IP", isExpanded: $expanded) {
-            VStack(spacing: 8) {
-                TextField("IP / hostname", text: $client.manualHost)
-                    .textFieldStyle(.roundedBorder)
-                HStack {
-                    TextField("Port", text: $client.manualPort)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 70)
-                    Button("Connect") {
-                        client.connectManual()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(client.manualHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
+    private func isSidebarSelectionActive(_ tag: BetterCastSenderApp.SidebarSelection) -> Bool {
+        if selection == tag { return true }
+        guard tag == .devices else { return false }
+        switch selection {
+        case .device, .discovered:
+            return true
+        default:
+            return false
         }
     }
 }
@@ -1022,8 +1037,15 @@ struct ADBConnectRow: View {
 
 // MARK: - Detail Panel
 
+private struct CustomResolutionEditorRequest: Identifiable {
+    let id = UUID()
+    let resolution: VirtualDisplayManager.Resolution?
+}
+
 struct DetailPanelView: View {
     @ObservedObject var client: NetworkClient
+    @StateObject private var launchAtLoginManager = LaunchAtLoginManager()
+    @State private var customResolutionEditorRequest: CustomResolutionEditorRequest?
     @Binding var selection: BetterCastSenderApp.SidebarSelection?
     @Binding var hasCompletedOnboarding: Bool
     @AppStorage("hasCompletedTour") private var hasCompletedTour = false
@@ -1044,203 +1066,147 @@ struct DetailPanelView: View {
             }
         case .receive:
             ReceiverModeView()
+        case .recent:
+            RecentConnectionsView(client: client, selection: $selection)
+        case .connect:
+            ManualConnectView(client: client)
         case .logs:
             LogView()
                 .navigationTitle("Logs")
         case .settings:
             settingsForm
         case .devices, nil:
-            gettingStartedView
+            DevicesView(client: client, selection: $selection)
         }
     }
 
     // MARK: - Settings (native Form)
 
-    /// Discovered services that are not yet connected
-    private var availableDevices: [DiscoveredService] {
-        client.foundServices.filter { service in
-            !client.connectedServices.contains(where: { $0.name == service.name })
-        }
-    }
-
     private var settingsForm: some View {
         Form {
-            if !availableDevices.isEmpty {
-                Section("Devices") {
-                    ForEach(availableDevices) { service in
+            Section("General") {
+                SettingsActionRow(
+                    title: "Launch at Login",
+                    description: "Automatically open BetterCast after you sign in to this Mac."
+                ) {
+                    Toggle(
+                        "",
+                        isOn: Binding(
+                            get: { launchAtLoginManager.isEnabled },
+                            set: { launchAtLoginManager.setEnabled($0) }
+                        )
+                    )
+                    .labelsHidden()
+                }
+
+                if launchAtLoginManager.needsApproval {
+                    SettingsActionRow(
+                        title: "Approval Required",
+                        description: "Allow BetterCast under Open at Login in macOS System Settings."
+                    ) {
+                        Button("Open Login Items") {
+                            launchAtLoginManager.openSystemSettings()
+                        }
+                    }
+                }
+
+                if let errorMessage = launchAtLoginManager.errorMessage {
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+
+            Section("Custom Resolutions") {
+                if client.customResolutions.isEmpty {
+                    Text("No custom resolutions.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(client.customResolutions, id: \.self) { resolution in
                         HStack {
-                            Label {
-                                VStack(alignment: .leading) {
-                                    Text(service.name)
-                                        .lineLimit(1)
-                                    Text("Available")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            } icon: {
-                                Image(systemName: deviceIcon(for: service))
-                                    .foregroundStyle(.secondary)
-                            }
+                            Text(resolution.name)
+                            Text("\(resolution.ppi) PPI")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                             Spacer()
-                            Button("Connect") {
-                                client.connect(to: service)
+                            Button {
+                                customResolutionEditorRequest = CustomResolutionEditorRequest(
+                                    resolution: resolution
+                                )
+                            } label: {
+                                Image(systemName: "pencil")
                             }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
+                            .buttonStyle(.borderless)
+                            .help("Edit")
+
+                            Button(role: .destructive) {
+                                client.removeCustomResolution(resolution)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Delete")
                         }
                     }
                 }
-            }
 
-            Section {
-                HStack {
-                    Picker("Use as", selection: $client.useVirtualDisplay) {
-                        Text("Extended Display").tag(true)
-                        Text("Mirror Built-in").tag(false)
-                    }
-                    InfoTip(text: "Extended creates a separate virtual monitor. Mirror duplicates your main display.")
-                }
-
-                HStack {
-                    Picker("Resolution", selection: $client.selectedResolution) {
-                        ForEach(VirtualDisplayManager.defaultResolutions, id: \.self) { res in
-                            Text(res.name).tag(res)
-                        }
-                    }
-                    .disabled(!client.useVirtualDisplay)
-                    InfoTip(text: "Resolution of the virtual display. Higher resolutions use more bandwidth.")
-                }
-
-                HStack {
-                    Toggle("Retina (HiDPI)", isOn: $client.isRetina)
-                        .disabled(!client.useVirtualDisplay)
-                    InfoTip(text: "Doubles pixel density. Sharper text but uses more bandwidth.")
-                }
-
-                HStack {
-                    Slider(value: $client.displayBrightness, in: 0...1, step: 0.05) {
-                        Text("Brightness")
-                    }
-                    InfoTip(text: "Adjusts the brightness of your built-in display.")
-                }
-
-                HStack {
-                    Toggle("Audio Streaming", isOn: $client.audioStreamingEnabled)
-                    InfoTip(text: "Streams system audio to the receiver. Requires a compatible receiver.")
-                }
-
-                Button("Arrange Displays") {
-                    client.openDisplaySettings()
-                }
-            } header: {
-                Text("Display")
-            }
-
-            Section("Connection") {
-                HStack {
-                    Toggle("Auto-Connect", isOn: $client.autoConnect)
-                    InfoTip(text: "Automatically connect to discovered receivers when they appear on the network.")
-                }
-
-                HStack {
-                    Picker("Mode", selection: $client.interfacePreference) {
-                        ForEach(NetworkInterfacePreference.allCases) { pref in
-                            Text(pref.rawValue).tag(pref)
-                        }
-                    }
-                    .disabled(client.isConnected)
-                    InfoTip(text: "Auto: AWDL for Apple devices, WiFi for others. P2P: forces direct link. Router: uses your WiFi network. Cable: USB/Thunderbolt only.")
-                }
-
-                HStack {
-                    Picker("Protocol", selection: $client.connectionType) {
-                        Text("TCP (Recommended)").tag("TCP")
-                        Text("UDP (Faster, P2P only)").tag("UDP")
-                    }
-                    InfoTip(text: "TCP is reliable and works everywhere. UDP has lower latency but only works over P2P/AWDL.")
-                }
-
-                HStack {
-                    Picker("Quality", selection: $client.selectedQuality) {
-                        ForEach(StreamQuality.allCases) { quality in
-                            Text(quality.name).tag(quality)
-                        }
-                    }
-                    InfoTip(text: "Higher quality uses more bandwidth. Use Low/Medium on WiFi, High/Ultra on P2P or cable.")
-                }
-
-                if client.isConnected {
-                    LabeledContent("Transfer Speed") {
-                        Text(client.transferRate)
-                            .font(.system(.body, design: .monospaced))
-                            .foregroundStyle(.green)
-                    }
+                Button {
+                    customResolutionEditorRequest = CustomResolutionEditorRequest(
+                        resolution: nil
+                    )
+                } label: {
+                    Label("Add Resolution", systemImage: "plus")
                 }
             }
 
             Section("Controls") {
-                VStack(spacing: 8) {
-                    HStack(spacing: 10) {
-                        Button("Apply Settings") {
-                            if client.isConnected {
-                                client.updateStreamResolution()
-                            }
-                        }
-                        .disabled(!client.isConnected)
-
-                        Button("Screen Recording") {
-                            client.openPrivacySettings()
-                        }
-
-                        Button("Reset Permissions") {
-                            client.resetScreenCapturePermissions()
-                        }
-
-                        Button("Restart") {
-                            client.restartApp()
-                        }
+                SettingsActionRow(
+                    title: "Screen Recording",
+                    description: "Open macOS Privacy & Security to allow BetterCast to capture displays."
+                ) {
+                    Button("Open Settings") {
+                        client.openPrivacySettings()
                     }
+                }
 
-                    HStack(spacing: 10) {
-                        Button("Setup Wizard") {
-                            hasCompletedOnboarding = false
-                        }
+                SettingsActionRow(
+                    title: "Reset Screen Permission",
+                    description: "Clear the current screen-capture authorization if macOS is using an outdated permission record."
+                ) {
+                    Button("Reset") {
+                        client.resetScreenCapturePermissions()
+                    }
+                }
 
-                        Button("Replay Tour") {
-                            hasCompletedTour = false
-                            selection = .devices
-                        }
+                SettingsActionRow(
+                    title: "Restart BetterCast",
+                    description: "Quit and reopen the app to apply permission or system-level changes."
+                ) {
+                    Button("Restart") {
+                        client.restartApp()
+                    }
+                }
+
+                SettingsActionRow(
+                    title: "Setup Wizard",
+                    description: "Run the initial setup and permission checks again."
+                ) {
+                    Button("Open") {
+                        hasCompletedOnboarding = false
+                    }
+                }
+
+                SettingsActionRow(
+                    title: "Guided Tour",
+                    description: "Replay the walkthrough of devices, receiving, settings, and logs."
+                ) {
+                    Button("Replay") {
+                        hasCompletedTour = false
+                        selection = .devices
                     }
                 }
             }
 
-            if !client.connectedDisplays.isEmpty {
-                Section("Connected Displays") {
-                    ForEach(client.connectedDisplays) { display in
-                        HStack {
-                            Label {
-                                VStack(alignment: .leading) {
-                                    Text(display.name)
-                                    Text(display.resolution)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            } icon: {
-                                Image(systemName: "display")
-                                    .foregroundStyle(.green)
-                            }
-                            Spacer()
-                            Button("Disconnect") {
-                                client.disconnectConnection(display.id)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .tint(.red)
-                        }
-                    }
-                }
-            }
-            // About & Changelog
             Section("About") {
                 LabeledContent("Version") {
                     Text("BetterCast \(UpdateChecker.currentVersion)")
@@ -1267,151 +1233,367 @@ struct DetailPanelView: View {
                     }
                 }
             }
-
-            Section("What's New") {
-                ForEach(Changelog.entries) { entry in
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text(entry.version)
-                                .font(.system(size: 14, weight: .bold))
-                            Spacer()
-                            Text(entry.date)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        ForEach(entry.highlights, id: \.self) { item in
-                            HStack(alignment: .top, spacing: 6) {
-                                Text("\u{2022}")
-                                    .foregroundStyle(.secondary)
-                                Text(item)
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
         }
         .formStyle(.grouped)
         .navigationTitle("Settings")
-        .onAppear { updateChecker.checkForUpdates() }
+        .onAppear {
+            launchAtLoginManager.refresh()
+            updateChecker.checkForUpdates()
+        }
+        .sheet(item: $customResolutionEditorRequest) { request in
+            CustomResolutionEditor(
+                originalResolution: request.resolution,
+                existingResolutions: VirtualDisplayManager.defaultResolutions
+                    + client.customResolutions
+            ) { width, height, ppi, label in
+                client.saveCustomResolution(
+                    request.resolution,
+                    width: width,
+                    height: height,
+                    ppi: ppi,
+                    label: label
+                )
+            }
+        }
     }
 
     @ObservedObject private var updateChecker = UpdateChecker.shared
+}
 
-    private func deviceIcon(for service: DiscoveredService) -> String {
-        let name = service.name.lowercased()
-        if name.contains("android") { return "apps.iphone" }
-        if name.contains("windows") { return "pc" }
-        if name.contains("linux") { return "desktopcomputer" }
-        return "display"
-    }
+// MARK: - Primary Navigation Pages
 
-    // MARK: - Getting Started / Overview
+struct DevicesView: View {
+    @ObservedObject var client: NetworkClient
+    @Binding var selection: BetterCastSenderApp.SidebarSelection?
 
-    private var hasAnyDevices: Bool {
-        !client.foundServices.isEmpty || !client.connectedDisplays.isEmpty
-    }
-
-    private var gettingStartedView: some View {
-        VStack(spacing: 0) {
-            if !client.connectedDisplays.isEmpty {
-                // Display arrangement overview
-                DisplayOverviewView(client: client, selection: $selection)
-            } else if hasAnyDevices {
-                // Devices are visible in sidebar — show a nudge
-                VStack(spacing: 16) {
-                    Image(systemName: "arrow.left")
-                        .font(.system(size: 40, weight: .light))
-                        .foregroundStyle(.secondary)
-                    Text("Select a device from the sidebar to connect")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                // No devices found — onboarding empty state
-                VStack(spacing: 32) {
-                    Spacer()
-
-                    VStack(spacing: 12) {
-                        Image(systemName: "display.2")
-                            .font(.system(size: 56, weight: .thin))
-                            .foregroundStyle(.secondary)
-
-                        Text("No Devices Found")
-                            .font(.system(size: 24, weight: .bold))
-
-                        Text("To use BetterCast, you need the receiver app running on another device.")
-                            .font(.body)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: 400)
-                    }
-
-                    VStack(alignment: .leading, spacing: 16) {
-                        gettingStartedStep(
-                            number: 1,
-                            title: "Download the Receiver",
-                            subtitle: "Install BetterCast Receiver on your iPad, Android, Windows, Linux, or Mac."
-                        )
-                        gettingStartedStep(
-                            number: 2,
-                            title: "Connect to the Same Network",
-                            subtitle: "Make sure both devices are on the same Wi-Fi network."
-                        )
-                        gettingStartedStep(
-                            number: 3,
-                            title: "Open the Receiver App",
-                            subtitle: "Your device will appear automatically in the sidebar."
-                        )
-                    }
-                    .padding(.horizontal, 40)
-
-                    Button {
-                        if let url = URL(string: "https://bettercast.online/#install") {
-                            NSWorkspace.shared.open(url)
-                        }
-                    } label: {
-                        Label("Download Receiver App", systemImage: "arrow.down.circle.fill")
-                            .font(.headline)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .scaleEffect(0.7)
-                        Text("Searching for devices on your network...")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+    private var availableServices: [DiscoveredService] {
+        client.foundServices.filter { service in
+            let isADBSynthetic = service.name.contains("Android (USB)") || service.name.contains("Android (WiFi ADB)")
+            let hasMDNSAndroid = client.foundServices.contains {
+                $0.name.lowercased().contains("android")
+                    && !$0.name.contains("Android (USB)")
+                    && !$0.name.contains("Android (WiFi ADB)")
             }
+            let isP2PDuplicate = service.name.hasSuffix(" P2P")
+                && client.foundServices.contains { $0.name == String(service.name.dropLast(4)) }
+            let isAndroid = service.name.lowercased().contains("android")
+            let isConnected = client.connectedDisplays.contains {
+                $0.name == service.name
+                    || (isAndroid
+                        && ($0.name.contains("Android (USB)") || $0.name.contains("Android (WiFi ADB)")))
+            }
+            let isManualHistoryEntry: Bool
+            if case .hostPort(let host, let port) = service.endpoint {
+                isManualHistoryEntry = service.name == "\(host):\(port.rawValue)"
+            } else {
+                isManualHistoryEntry = false
+            }
+            return !(isADBSynthetic && hasMDNSAndroid)
+                && !isP2PDuplicate
+                && !isConnected
+                && !isManualHistoryEntry
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                if !client.connectedDisplays.isEmpty {
+                    DashboardCard {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Connected")
+                                .font(.system(size: 14, weight: .semibold))
+
+                            ForEach(client.connectedDisplays) { display in
+                                HStack(spacing: 12) {
+                                    Image(systemName: deviceIcon(for: display.name))
+                                        .font(.system(size: 20))
+                                        .foregroundStyle(.green)
+                                        .frame(width: 28)
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(display.name)
+                                            .font(.system(size: 13, weight: .medium))
+                                        Text(display.resolution)
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    Spacer()
+
+                                    Button("Settings") {
+                                        selection = .device(display.id)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+
+                                    Button("Disconnect") {
+                                        client.disconnectConnection(display.id)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    .tint(.red)
+                                }
+                                .padding(.vertical, 4)
+
+                                if display.id != client.connectedDisplays.last?.id {
+                                    Divider()
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !availableServices.isEmpty {
+                    DashboardCard {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Available")
+                                .font(.system(size: 14, weight: .semibold))
+
+                            ForEach(availableServices, id: \.name) { service in
+                                HStack(spacing: 12) {
+                                    Image(systemName: deviceIcon(for: service.name))
+                                        .font(.system(size: 20))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 28)
+
+                                    Text(service.name)
+                                        .font(.system(size: 13, weight: .medium))
+
+                                    Spacer()
+
+                                    Button("Configure") {
+                                        selection = .discovered(service.name)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.small)
+                                }
+                                .padding(.vertical, 4)
+
+                                if service.name != availableServices.last?.name {
+                                    Divider()
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if client.connectedDisplays.isEmpty && availableServices.isEmpty {
+                    DashboardCard {
+                        VStack(spacing: 12) {
+                            ProgressView()
+                            Text("Searching for devices on your network...")
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 28)
+                    }
+                }
+            }
+            .padding(20)
         }
         .navigationTitle("Devices")
     }
 
-    private func gettingStartedStep(number: Int, title: String, subtitle: String) -> some View {
-        HStack(alignment: .top, spacing: 14) {
-            Text("\(number)")
-                .font(.system(size: 14, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 28, height: 28)
-                .background(Circle().fill(Color.accentColor))
+    private func deviceIcon(for name: String) -> String {
+        let lower = name.lowercased()
+        if lower.contains("android") { return "apps.iphone" }
+        if lower.contains("ipad") || lower.contains("ios") { return "ipad" }
+        if lower.contains("windows") { return "pc" }
+        if lower.contains("linux") { return "desktopcomputer" }
+        return "display"
+    }
+}
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.headline)
-                Text(subtitle)
-                    .font(.subheadline)
+struct RecentConnectionsView: View {
+    @ObservedObject var client: NetworkClient
+    @Binding var selection: BetterCastSenderApp.SidebarSelection?
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                if client.manualConnectionHistory.isEmpty {
+                    DashboardCard {
+                        VStack(spacing: 12) {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .font(.system(size: 32, weight: .light))
+                                .foregroundStyle(.secondary)
+                            Text("No Recent Connections")
+                                .font(.headline)
+                            Text("Devices appear here after a successful manual connection.")
+                                .foregroundStyle(.secondary)
+                            Button("Connect Manually") {
+                                selection = .connect
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 28)
+                    }
+                } else {
+                    DashboardCard {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Text("Recent Connections")
+                                    .font(.system(size: 14, weight: .semibold))
+                                Spacer()
+                                Button {
+                                    client.refreshManualConnectionAvailability()
+                                } label: {
+                                    Label("Refresh", systemImage: "arrow.clockwise")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(client.isRefreshingManualConnectionAvailability)
+                            }
+
+                            ForEach(client.manualConnectionHistory) { item in
+                                HStack(spacing: 12) {
+                                    Image(systemName: "pc")
+                                        .font(.system(size: 20))
+                                        .foregroundStyle(connectionColor(for: item))
+                                        .frame(width: 28)
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(item.host)
+                                            .font(.system(size: 13, weight: .medium))
+                                        Text("Port \(item.port)")
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    Spacer()
+                                    connectionStatus(for: item)
+
+                                    if let display = connectedDisplay(for: item) {
+                                        Button("Settings") {
+                                            selection = .device(display.id)
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                    } else {
+                                        if client.manualConnectionAvailability[item.id] == .permissionRequired {
+                                            Button("Open Privacy") {
+                                                client.openLocalNetworkPrivacySettings()
+                                            }
+                                            .buttonStyle(.bordered)
+                                            .controlSize(.small)
+                                        } else {
+                                            Button("Settings") {
+                                                client.prepareRecentConnectionSettings(item)
+                                                selection = .discovered(item.displayName)
+                                            }
+                                            .buttonStyle(.bordered)
+                                            .controlSize(.small)
+
+                                            Button("Connect") {
+                                                client.connectRecentManualConnection(item)
+                                            }
+                                            .buttonStyle(.borderedProminent)
+                                            .controlSize(.small)
+                                            .disabled(client.manualConnectionAvailability[item.id] != .available)
+                                        }
+
+                                        Button {
+                                            client.removeManualConnectionHistory(item)
+                                        } label: {
+                                            Image(systemName: "trash")
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                        .tint(.red)
+                                        .help("Remove from Recent")
+                                    }
+                                }
+                                .padding(.vertical, 4)
+
+                                if item.id != client.manualConnectionHistory.last?.id {
+                                    Divider()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(20)
+        }
+        .navigationTitle("Recent")
+        .onAppear { client.refreshManualConnectionAvailabilityIfNeeded() }
+    }
+
+    @ViewBuilder
+    private func connectionStatus(for item: ManualConnectionHistoryItem) -> some View {
+        if connectedDisplay(for: item) != nil {
+            Label("Connected", systemImage: "circle.fill")
+                .foregroundStyle(.green)
+        } else {
+            switch client.manualConnectionAvailability[item.id] ?? .unknown {
+            case .unknown:
+                Text("Unknown")
                     .foregroundStyle(.secondary)
+            case .checking:
+                HStack(spacing: 5) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text("Checking")
+                }
+                .foregroundStyle(.secondary)
+            case .available:
+                Label("Available", systemImage: "circle.fill")
+                    .foregroundStyle(.green)
+            case .unavailable:
+                Label("Unavailable", systemImage: "circle.fill")
+                    .foregroundStyle(.red)
+            case .permissionRequired:
+                Label("Local Network Off", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
             }
         }
+    }
+
+    private func connectionColor(for item: ManualConnectionHistoryItem) -> Color {
+        if connectedDisplay(for: item) != nil { return .green }
+        switch client.manualConnectionAvailability[item.id] ?? .unknown {
+        case .available: return .green
+        case .unavailable: return .red
+        case .permissionRequired: return .orange
+        case .unknown, .checking: return .secondary
+        }
+    }
+
+    private func connectedDisplay(for item: ManualConnectionHistoryItem) -> ConnectedDisplayInfo? {
+        client.connectedDisplays.first { $0.name == item.displayName }
+    }
+}
+
+struct ManualConnectView: View {
+    @ObservedObject var client: NetworkClient
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("IP address or hostname", text: $client.manualHost)
+                    .textFieldStyle(.roundedBorder)
+
+                TextField("Port", text: $client.manualPort)
+                    .textFieldStyle(.roundedBorder)
+
+                Button("Connect") {
+                    client.connectManual()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(
+                    client.manualHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || UInt16(client.manualPort) == nil
+                )
+            } header: {
+                Text("Manual IP")
+            } footer: {
+                Text("Successful manual connections are saved in Recent.")
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle("Connect")
     }
 }
 
@@ -1430,26 +1612,17 @@ struct DisplayItem: Identifiable {
     var cgDisplayID: CGDirectDisplayID? = nil
 }
 
-/// Captures periodic screenshots for all active displays.
+/// Captures lightweight, on-demand previews for active displays.
 class DisplayThumbnailProvider: ObservableObject {
-    @Published var thumbnails: [String: NSImage] = [:] // keyed by DisplayItem.id
-    private var timer: Timer?
+    @Published private(set) var thumbnails: [String: NSImage] = [:] // keyed by DisplayItem.id
+    @Published private(set) var isRefreshing = false
+    private let captureQueue = DispatchQueue(label: "com.bettercast.display-thumbnails", qos: .utility)
 
-    func start(displays: [DisplayItem]) {
-        capture(displays: displays)
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.capture(displays: displays)
-        }
-    }
+    func refresh(displays: [DisplayItem]) {
+        guard !isRefreshing else { return }
+        isRefreshing = true
 
-    func stop() {
-        timer?.invalidate()
-        timer = nil
-    }
-
-    private func capture(displays: [DisplayItem]) {
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        captureQueue.async { [weak self] in
             var newThumbs: [String: NSImage] = [:]
 
             for display in displays {
@@ -1463,7 +1636,7 @@ class DisplayThumbnailProvider: ObservableObject {
                     let builtIn = onlineDisplays.prefix(Int(displayCount)).first { CGDisplayIsBuiltin($0) != 0 }
                     if let builtIn = builtIn {
                         if let cgImage = CGDisplayCreateImage(builtIn) {
-                            newThumbs[display.id] = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+                            newThumbs[display.id] = Self.makeThumbnail(from: cgImage)
                         }
                         continue
                     }
@@ -1474,14 +1647,44 @@ class DisplayThumbnailProvider: ObservableObject {
                 }
 
                 if let cgImage = CGDisplayCreateImage(displayID) {
-                    newThumbs[display.id] = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+                    newThumbs[display.id] = Self.makeThumbnail(from: cgImage)
                 }
             }
 
             DispatchQueue.main.async {
                 self?.thumbnails = newThumbs
+                self?.isRefreshing = false
             }
         }
+    }
+
+    private static func makeThumbnail(from image: CGImage) -> NSImage {
+        let maxDimension: CGFloat = 480
+        let sourceWidth = CGFloat(image.width)
+        let sourceHeight = CGFloat(image.height)
+        let scale = min(1, maxDimension / max(sourceWidth, sourceHeight))
+        let width = max(1, Int(sourceWidth * scale))
+        let height = max(1, Int(sourceHeight * scale))
+
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        }
+
+        context.interpolationQuality = .medium
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        guard let thumbnail = context.makeImage() else {
+            return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        }
+        return NSImage(cgImage: thumbnail, size: NSSize(width: width, height: height))
     }
 }
 
@@ -1541,6 +1744,19 @@ struct DisplayOverviewView: View {
                                 .font(.system(size: 14, weight: .semibold))
                             Spacer()
                             Button {
+                                thumbProvider.refresh(displays: displays)
+                            } label: {
+                                Label(
+                                    thumbProvider.thumbnails.isEmpty ? "Load Preview" : "Refresh Preview",
+                                    systemImage: "arrow.clockwise"
+                                )
+                                    .font(.system(size: 11))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .disabled(thumbProvider.isRefreshing)
+
+                            Button {
                                 openDisplaySettings()
                             } label: {
                                 Label("Arrange...", systemImage: "rectangle.3.group")
@@ -1561,87 +1777,6 @@ struct DisplayOverviewView: View {
                     selectedDisplayCard(selected)
                 }
 
-                // Connected devices list
-                DashboardCard {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Connected Devices")
-                            .font(.system(size: 14, weight: .semibold))
-
-                        ForEach(client.connectedDisplays) { display in
-                            HStack(spacing: 12) {
-                                Image(systemName: deviceIcon(for: display.name))
-                                    .font(.system(size: 20))
-                                    .foregroundStyle(.green)
-                                    .frame(width: 28)
-
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(display.name)
-                                        .font(.system(size: 13, weight: .medium))
-                                    Text(display.resolution)
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(.secondary)
-                                }
-
-                                Spacer()
-
-                                Button("Settings") {
-                                    selection = .device(display.id)
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-
-                                Button("Disconnect") {
-                                    client.disconnectConnection(display.id)
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .tint(.red)
-                            }
-                            .padding(.vertical, 4)
-
-                            if display.id != client.connectedDisplays.last?.id {
-                                Divider()
-                            }
-                        }
-                    }
-                }
-
-                // Discovered (not yet connected)
-                if !client.foundServices.isEmpty {
-                    let unconnected = client.foundServices.filter { svc in
-                        !client.connectedDisplays.contains(where: { $0.name == svc.name })
-                    }
-                    if !unconnected.isEmpty {
-                        DashboardCard {
-                            VStack(alignment: .leading, spacing: 12) {
-                                Text("Available Devices")
-                                    .font(.system(size: 14, weight: .semibold))
-
-                                ForEach(unconnected) { service in
-                                    HStack(spacing: 12) {
-                                        Image(systemName: "display")
-                                            .font(.system(size: 20))
-                                            .foregroundStyle(.secondary)
-                                            .frame(width: 28)
-
-                                        Text(service.name)
-                                            .font(.system(size: 13))
-
-                                        Spacer()
-
-                                        Button("Connect") {
-                                            client.connect(to: service)
-                                        }
-                                        .buttonStyle(.borderedProminent)
-                                        .controlSize(.small)
-                                    }
-                                    .padding(.vertical, 4)
-                                }
-                            }
-                        }
-                    }
-                }
-
                 // Transfer speed
                 if !client.connectedDisplays.isEmpty {
                     DashboardCard {
@@ -1659,12 +1794,7 @@ struct DisplayOverviewView: View {
             }
             .padding(20)
         }
-        .navigationTitle("Devices")
-        .onAppear { thumbProvider.start(displays: displays) }
-        .onDisappear { thumbProvider.stop() }
-        .onChange(of: client.connectedDisplays.count) { _ in
-            thumbProvider.start(displays: displays)
-        }
+        .navigationTitle("Overview")
     }
 
     // MARK: - Display Arrangement (draggable + live preview)
@@ -1842,14 +1972,6 @@ struct DisplayOverviewView: View {
         }
     }
 
-    private func deviceIcon(for name: String) -> String {
-        let lower = name.lowercased()
-        if lower.contains("android") { return "apps.iphone" }
-        if lower.contains("ipad") || lower.contains("ios") { return "ipad" }
-        if lower.contains("windows") { return "pc" }
-        if lower.contains("linux") { return "desktopcomputer" }
-        return "display"
-    }
 }
 
 // Helper to find the built-in screen
@@ -1870,42 +1992,41 @@ private extension NSScreen {
 struct DeviceDetailView: View {
     let display: ConnectedDisplayInfo
     @ObservedObject var client: NetworkClient
+    @ObservedObject private var transferStats: TransferStats
     @Binding var selection: BetterCastSenderApp.SidebarSelection?
+
+    init(
+        display: ConnectedDisplayInfo,
+        client: NetworkClient,
+        selection: Binding<BetterCastSenderApp.SidebarSelection?>
+    ) {
+        self.display = display
+        self.client = client
+        self.transferStats = client.transferStats
+        self._selection = selection
+    }
 
     var body: some View {
         Form {
-            Section("Resolution") {
-                HStack {
-                    Picker("Dimensions", selection: $client.selectedResolution) {
-                        ForEach(VirtualDisplayManager.defaultResolutions, id: \.self) { res in
-                            Text(res.name).tag(res)
-                        }
-                    }
-                    InfoTip(text: "Resolution of the virtual display. Higher resolutions use more bandwidth.")
-                }
+            DeviceStreamSettingsSections(
+                client: client,
+                audioStreaming: Binding(
+                    get: { display.audioEnabled },
+                    set: { client.setAudioEnabled($0, for: display.id) }
+                ),
+                autoConnect: Binding(
+                    get: { client.isAutoConnectEnabled(for: display.id) },
+                    set: { client.setAutoConnectEnabled($0, for: display.id) }
+                ),
+                modeDisabled: true,
+                protocolDisabled: true
+            )
 
-                HStack {
-                    Toggle("Retina (HiDPI)", isOn: $client.isRetina)
-                    InfoTip(text: "Doubles pixel density. Sharper text but uses more bandwidth.")
-                }
-            }
-
-            Section("Quality") {
-                HStack {
-                    Picker("Bitrate", selection: $client.selectedQuality) {
-                        ForEach(StreamQuality.allCases) { quality in
-                            Text(quality.name).tag(quality)
-                        }
-                    }
-                    InfoTip(text: "Higher quality uses more bandwidth. Use Low/Medium on WiFi, High/Ultra on P2P or cable.")
-                }
-
-                HStack {
-                    Toggle("Audio Streaming", isOn: Binding(
-                        get: { display.audioEnabled },
-                        set: { client.setAudioEnabled($0, for: display.id) }
-                    ))
-                    InfoTip(text: "Streams system audio to this receiver.")
+            Section("Arrangement") {
+                Button {
+                    client.openDisplaySettings()
+                } label: {
+                    Label("Arrange Displays…", systemImage: "rectangle.3.group")
                 }
             }
 
@@ -1921,7 +2042,7 @@ struct DeviceDetailView: View {
                 }
 
                 LabeledContent("Transfer Speed") {
-                    Text(client.transferRate)
+                    Text(transferStats.rate)
                         .font(.system(.body, design: .monospaced))
                         .foregroundStyle(.green)
                 }
@@ -1936,7 +2057,7 @@ struct DeviceDetailView: View {
 
                     Button("Disconnect") {
                         client.disconnectConnection(display.id)
-                        selection = .settings
+                        selection = .devices
                     }
                     .tint(.red)
                 }
@@ -1944,6 +2065,240 @@ struct DeviceDetailView: View {
         }
         .formStyle(.grouped)
         .navigationTitle(display.name)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    selection = .devices
+                } label: {
+                    Label("Devices", systemImage: "chevron.left")
+                }
+                .help("Back to Devices")
+            }
+        }
+        .onAppear {
+            client.loadSettings(for: display.id)
+        }
+    }
+}
+
+/// The complete set of settings owned by one sender-to-receiver stream.
+/// Shared by connected and discovered device pages so both stay in sync.
+struct DeviceStreamSettingsSections: View {
+    @ObservedObject var client: NetworkClient
+    @Binding var audioStreaming: Bool
+    @Binding var autoConnect: Bool
+    let modeDisabled: Bool
+    let protocolDisabled: Bool
+
+    var body: some View {
+        Group {
+            Section("Connection") {
+                HStack {
+                    Toggle("Auto-Connect", isOn: $autoConnect)
+                    InfoTip(text: "Connect to this device automatically whenever it becomes available.")
+                }
+
+                HStack {
+                    Picker("Mode", selection: $client.interfacePreference) {
+                        ForEach(NetworkInterfacePreference.allCases) { preference in
+                            Text(preference.rawValue).tag(preference)
+                        }
+                    }
+                    .disabled(modeDisabled)
+                    InfoTip(text: "Auto chooses the best path. P2P forces WiFi Direct, Router uses the local network, and Cable restricts traffic to USB/Thunderbolt networking.")
+                }
+
+                HStack {
+                    Picker("Protocol", selection: $client.connectionType) {
+                        Text("TCP (Recommended)").tag("TCP")
+                        Text("UDP (Faster, P2P only)").tag("UDP")
+                    }
+                    .disabled(protocolDisabled)
+                    InfoTip(text: "TCP is reliable and works everywhere. UDP can reduce latency on P2P links but may lose frames.")
+                }
+            }
+
+            Section("Display") {
+                HStack {
+                    Picker("Use as", selection: $client.useVirtualDisplay) {
+                        Text("Extended Display").tag(true)
+                        Text("Mirror Built-in").tag(false)
+                    }
+                    InfoTip(text: "Extended creates a separate virtual monitor. Mirror duplicates your main display.")
+                }
+
+                HStack {
+                    Picker("Dimensions", selection: $client.selectedResolution) {
+                        ForEach(client.availableResolutions, id: \.self) { resolution in
+                            Text(resolution.name).tag(resolution)
+                        }
+                    }
+                    .disabled(!client.useVirtualDisplay)
+                    InfoTip(text: "Resolution of the virtual display. Higher resolutions use more bandwidth.")
+                }
+
+                HStack {
+                    Toggle("Retina (HiDPI)", isOn: $client.isRetina)
+                        .disabled(!client.useVirtualDisplay)
+                    InfoTip(text: "Doubles pixel density. Sharper text but uses more bandwidth.")
+                }
+            }
+
+            Section("Quality") {
+                HStack {
+                    Picker("Bitrate", selection: $client.selectedQuality) {
+                        ForEach(StreamQuality.allCases) { quality in
+                            Text(quality.name).tag(quality)
+                        }
+                    }
+                    InfoTip(text: "Higher quality uses more bandwidth. Use Low/Medium on WiFi, High/Ultra on P2P or cable.")
+                }
+
+                HStack {
+                    Picker("Frame Rate", selection: $client.selectedFPS) {
+                        Text("30 FPS").tag(30)
+                        Text("60 FPS").tag(60)
+                    }
+                    InfoTip(text: "Higher frame rates improve motion smoothness but require more encoding and network bandwidth.")
+                }
+
+                HStack {
+                    Toggle("Audio Streaming", isOn: $audioStreaming)
+                    InfoTip(text: "Streams system audio to the receiver.")
+                }
+            }
+        }
+    }
+}
+
+struct CustomResolutionEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var width: Int
+    @State private var height: Int
+    @State private var ppi: Int
+    @State private var label: String
+    let originalResolution: VirtualDisplayManager.Resolution?
+    let existingResolutions: [VirtualDisplayManager.Resolution]
+    let onSave: (Int, Int, Int, String) -> Void
+
+    init(
+        originalResolution: VirtualDisplayManager.Resolution?,
+        existingResolutions: [VirtualDisplayManager.Resolution],
+        onSave: @escaping (Int, Int, Int, String) -> Void
+    ) {
+        self._width = State(initialValue: originalResolution?.width ?? 1600)
+        self._height = State(initialValue: originalResolution?.height ?? 1000)
+        self._ppi = State(initialValue: originalResolution?.ppi ?? 220)
+        let originalName = originalResolution?.name ?? ""
+        if let openingParenthesis = originalName.lastIndex(of: "("),
+           originalName.hasSuffix(")") {
+            let labelStart = originalName.index(after: openingParenthesis)
+            let labelEnd = originalName.index(before: originalName.endIndex)
+            self._label = State(initialValue: String(originalName[labelStart..<labelEnd]))
+        } else {
+            self._label = State(initialValue: "")
+        }
+        self.originalResolution = originalResolution
+        self.existingResolutions = existingResolutions
+        self.onSave = onSave
+    }
+
+    private var trimmedLabel: String {
+        label.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isLabelValid: Bool {
+        !trimmedLabel.isEmpty
+            && !trimmedLabel.contains("(")
+            && !trimmedLabel.contains(")")
+    }
+
+    private var isValid: Bool {
+        (640...7680).contains(width)
+            && (480...4320).contains(height)
+            && width.isMultiple(of: 2)
+            && height.isMultiple(of: 2)
+            && (72...500).contains(ppi)
+            && isLabelValid
+    }
+
+    private var isDuplicate: Bool {
+        existingResolutions.contains {
+            $0.width == width
+                && $0.height == height
+                && $0 != originalResolution
+        }
+    }
+
+    private var validationMessage: String {
+        if isDuplicate {
+            return "This resolution already exists."
+        }
+        if !(640...7680).contains(width) || !(480...4320).contains(height) {
+            return "Width: 640–7680 pixels. Height: 480–4320 pixels."
+        }
+        if !width.isMultiple(of: 2) || !height.isMultiple(of: 2) {
+            return "Width and height must both be even numbers."
+        }
+        if !(72...500).contains(ppi) {
+            return "PPI must be between 72 and 500."
+        }
+        if trimmedLabel.isEmpty {
+            return "Label is required."
+        }
+        if trimmedLabel.contains("(") || trimmedLabel.contains(")") {
+            return "Label cannot contain parentheses."
+        }
+        return "The option will appear as \(width) x \(height) (\(trimmedLabel)), \(ppi) PPI."
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(originalResolution == nil ? "Add Custom Resolution" : "Edit Custom Resolution")
+                .font(.title2.bold())
+
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
+                GridRow {
+                    Text("Width")
+                    TextField("Width", value: $width, format: .number.grouping(.never))
+                        .textFieldStyle(.roundedBorder)
+                }
+                GridRow {
+                    Text("Height")
+                    TextField("Height", value: $height, format: .number.grouping(.never))
+                        .textFieldStyle(.roundedBorder)
+                }
+                GridRow {
+                    Text("PPI")
+                    TextField("PPI", value: $ppi, format: .number.grouping(.never))
+                        .textFieldStyle(.roundedBorder)
+                }
+                GridRow {
+                    Text("Label")
+                    TextField("Required", text: $label)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+
+            Text(validationMessage)
+                .font(.caption)
+                .foregroundStyle(!isValid || isDuplicate ? .red : .secondary)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    dismiss()
+                }
+                Button("Save") {
+                    onSave(width, height, ppi, trimmedLabel)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!isValid || isDuplicate)
+            }
+        }
+        .padding(24)
+        .frame(width: 420)
     }
 }
 
@@ -1954,6 +2309,11 @@ struct DiscoveredDeviceView: View {
 
     private var isAndroid: Bool {
         service.name.lowercased().contains("android")
+    }
+
+    private var isManualConnection: Bool {
+        if case .hostPort = service.endpoint { return true }
+        return false
     }
 
     /// Check if this device is connected via any method (direct or ADB)
@@ -2033,7 +2393,11 @@ struct DiscoveredDeviceView: View {
                     }
                     Spacer()
                     Button("Connect") {
-                        client.connect(to: service)
+                        if isManualConnection {
+                            client.connectManualService(service)
+                        } else {
+                            client.connect(to: service, restoringSavedSettings: false)
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
@@ -2049,74 +2413,32 @@ struct DiscoveredDeviceView: View {
                 }
             }
 
-            Section("Resolution") {
-                HStack {
-                    Picker("Dimensions", selection: $client.selectedResolution) {
-                        ForEach(VirtualDisplayManager.defaultResolutions, id: \.self) { res in
-                            Text(res.name).tag(res)
-                        }
-                    }
-                    InfoTip(text: "Resolution of the virtual display. Higher resolutions use more bandwidth.")
-                }
-
-                HStack {
-                    Toggle("Retina (HiDPI)", isOn: $client.isRetina)
-                    InfoTip(text: "Doubles pixel density. Sharper text but uses more bandwidth.")
-                }
-            }
-
-            Section("Quality") {
-                HStack {
-                    Picker("Bitrate", selection: $client.selectedQuality) {
-                        ForEach(StreamQuality.allCases) { quality in
-                            Text(quality.name).tag(quality)
-                        }
-                    }
-                    InfoTip(text: "Higher quality uses more bandwidth. Use Low/Medium on WiFi, High/Ultra on P2P or cable.")
-                }
-
-                HStack {
-                    Toggle("Audio Streaming", isOn: $client.audioStreamingEnabled)
-                    InfoTip(text: "Streams system audio to the receiver. Requires a compatible receiver.")
-                }
-            }
+            DeviceStreamSettingsSections(
+                client: client,
+                audioStreaming: $client.audioStreamingEnabled,
+                autoConnect: Binding(
+                    get: { client.isAutoConnectEnabled(for: service) },
+                    set: { client.setAutoConnectEnabled($0, for: service) }
+                ),
+                modeDisabled: false,
+                protocolDisabled: isManualConnection
+            )
         }
         .formStyle(.grouped)
         .navigationTitle(service.name)
-    }
-}
-
-// MARK: - Display Brightness Control
-
-enum DisplayBrightnessControl {
-    static func setBrightness(_ brightness: Double) {
-        let value = max(0, min(1, brightness))
-        var iterator: io_iterator_t = 0
-        let result = IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IODisplayConnect"), &iterator)
-        guard result == kIOReturnSuccess else { return }
-        defer { IOObjectRelease(iterator) }
-
-        var service = IOIteratorNext(iterator)
-        while service != 0 {
-            IODisplaySetFloatParameter(service, 0, kIODisplayBrightnessKey as CFString, Float(value))
-            IOObjectRelease(service)
-            service = IOIteratorNext(iterator)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    selection = .devices
+                } label: {
+                    Label("Devices", systemImage: "chevron.left")
+                }
+                .help("Back to Devices")
+            }
         }
-    }
-
-    static func getBrightness() -> Double {
-        var iterator: io_iterator_t = 0
-        let result = IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IODisplayConnect"), &iterator)
-        guard result == kIOReturnSuccess else { return 0.5 }
-        defer { IOObjectRelease(iterator) }
-
-        var brightness: Float = 0.5
-        let service = IOIteratorNext(iterator)
-        if service != 0 {
-            IODisplayGetFloatParameter(service, 0, kIODisplayBrightnessKey as CFString, &brightness)
-            IOObjectRelease(service)
+        .onAppear {
+            client.loadSettings(for: service)
         }
-        return Double(brightness)
     }
 }
 
@@ -2145,20 +2467,27 @@ struct InfoTip: View {
     }
 }
 
-// MARK: - Settings Row
+// MARK: - Settings Action Row
 
-struct SettingsRow<Content: View>: View {
-    let label: String
+struct SettingsActionRow<Content: View>: View {
+    let title: String
+    let description: String
     @ViewBuilder let content: Content
 
     var body: some View {
-        HStack {
-            Text(label)
-                .font(.system(size: 13))
-                .foregroundStyle(.primary)
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                Text(description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Spacer()
             content
         }
+        .padding(.vertical, 3)
     }
 }
 
@@ -2179,13 +2508,34 @@ struct DiscoveredService: Identifiable {
     let endpoint: NWEndpoint
 }
 
+struct ManualConnectionHistoryItem: Codable, Hashable, Identifiable {
+    let host: String
+    let port: UInt16
+
+    var id: String {
+        "\(host.lowercased()):\(port)"
+    }
+
+    var displayName: String {
+        "\(host):\(port)"
+    }
+}
+
+enum ManualConnectionAvailability: Equatable {
+    case unknown
+    case checking
+    case available
+    case unavailable
+    case permissionRequired
+}
+
 enum StreamQuality: Int, CaseIterable, Identifiable {
     case low = 5_000_000
     case medium = 10_000_000
     case high = 20_000_000
     case ultra = 50_000_000
     case extreme = 100_000_000
-    
+
     var id: Int { self.rawValue }
     var name: String {
         switch self {
@@ -2207,12 +2557,28 @@ enum NetworkInterfacePreference: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 }
 
+struct ReceiverSettings: Codable, Equatable {
+    var resolutionWidth: Int
+    var resolutionHeight: Int
+    var resolutionPPI: Int
+    var resolutionName: String
+    var retinaEnabled: Bool
+    var qualityRawValue: Int
+    var fps: Int
+    var useVirtualDisplay: Bool
+    var audioStreamingEnabled: Bool
+    // Optional for backward compatibility with profiles saved before build 37.
+    var connectionType: String?
+    var interfacePreferenceRawValue: String?
+}
+
 // Per-connection pipeline: each device gets its own virtual display, screen capture, and encoder
 struct ConnectionPipeline {
     let id: UUID
     let connection: NWConnection
     let service: DiscoveredService
     var lastHeartbeat: Date
+    var settings: ReceiverSettings
 
     // Per-connection components (isolated pipeline)
     var virtualDisplayManager: VirtualDisplayManager?
@@ -2224,10 +2590,6 @@ struct ConnectionPipeline {
     var isP2P: Bool = false
     // Loopback connections (ADB tunnel via lo0) — high bandwidth, skip backpressure
     var isLoopback: Bool = false
-    // TCP backpressure: skip frames while a send is still in flight
-    var sendInProgress: Bool = false
-    // Time-based send pacing for WiFi ADB (prevents kernel buffer bloat)
-    var lastSendTimeNs: UInt64 = 0
     // WiFi ADB vs USB ADB — WiFi has much less bandwidth, needs throttling
     var isWiFiADB: Bool = false
     // ADB/localhost connections always use TCP framing regardless of global protocol setting
@@ -2239,18 +2601,49 @@ struct ConnectionPipeline {
     var reportedScreenHeight: Int? = nil
 }
 
+final class TransferStats: ObservableObject {
+    @Published var rate = "0 Mbps"
+}
+
 class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegate {
-    private var browser: NWBrowser?
+    private enum PreferenceKey {
+        static let resolutionWidth = "senderResolutionWidth"
+        static let resolutionHeight = "senderResolutionHeight"
+        static let resolutionPPI = "senderResolutionPPI"
+        static let resolutionName = "senderResolutionName"
+        static let customResolutions = "senderCustomResolutionsV1"
+        static let retina = "senderRetina"
+        static let quality = "senderQuality"
+        static let fps = "senderFPS"
+        static let useVirtualDisplay = "senderUseVirtualDisplay"
+        static let audioStreaming = "senderAudioStreaming"
+        static let connectionType = "senderConnectionType"
+        static let interfacePreference = "senderInterfacePreference"
+        static let autoConnectReceiverKeys = "senderAutoConnectReceiverKeysV1"
+        static let manualHost = "senderManualHost"
+        static let manualPort = "senderManualPort"
+        static let receiverProfiles = "senderReceiverProfilesV1"
+        static let manualConnectionHistory = "senderManualConnectionHistoryV1"
+    }
+
+    private var browsers: [String: NWBrowser] = [:]
+    private var discoveredServicesByProtocol: [String: [String: DiscoveredService]] = [:]
     private var pipelines: [UUID: ConnectionPipeline] = [:]
+    private var receiverProfiles: [String: ReceiverSettings] = [:]
+    @Published private var autoConnectReceiverKeys: Set<String> = []
+    private var manualAvailabilityProbes: [String: NWConnection] = [:]
+    private var manualAvailabilityProbeGeneration = UUID()
+    private var lastManualAvailabilityRefresh: Date?
 
     @Published var status: String = "Idle"
     @Published var foundServices: [DiscoveredService] = []
     @Published var connectedServices: [DiscoveredService] = []
     private var connectingServiceNames: Set<String> = [] // Prevent double-connect race
-    @Published var useVirtualDisplay: Bool = true // Toggle between mirroring and extended display
-    @Published var audioStreamingEnabled: Bool = true // Master toggle for audio streaming
-    @Published var displayBrightness: Float = Float(DisplayBrightnessControl.getBrightness()) {
-        didSet { DisplayBrightnessControl.setBrightness(Double(displayBrightness)) }
+    @Published var useVirtualDisplay: Bool = true {
+        didSet { persistSettings() }
+    }
+    @Published var audioStreamingEnabled: Bool = true {
+        didSet { persistSettings() }
     }
     @Published var connectedDisplays: [ConnectedDisplayInfo] = [] // Per-device display info
 
@@ -2274,132 +2667,234 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
     // Fragmentation State
     private var udpFrameId: UInt32 = 0
-    
+
     // Transfer Stats
-    @Published var transferRate: String = "0 Mbps"
+    let transferStats = TransferStats()
+    var transferRate: String { transferStats.rate }
     private var bytesSentWindow: Int = 0
     private var lastStatsTime: Date = Date()
-    
-    // Settings
-    @Published var selectedResolution: VirtualDisplayManager.Resolution = VirtualDisplayManager.defaultResolutions[1]
-    @Published var isRetina: Bool = false
-    @Published var connectionType: String = "TCP" {
-        didSet {
-            // Restart browsing if type changes
-            browser?.cancel()
-            startBrowsing()
-        }
-    }
-    
-    @Published var selectedQuality: StreamQuality = .high
-    
-    // Manual Interface Toggle — default Auto so Windows/Linux/Android receivers work out of the box
-    @Published var interfacePreference: NetworkInterfacePreference = .auto
 
-    // Auto-connect: automatically connect to discovered receivers
-    @Published var autoConnect: Bool = false
+    // Settings
+    @Published var selectedResolution: VirtualDisplayManager.Resolution = VirtualDisplayManager.defaultResolutions[1] {
+        didSet { persistSettings() }
+    }
+    @Published private(set) var customResolutions: [VirtualDisplayManager.Resolution] = []
+    @Published var isRetina: Bool = false {
+        didSet { persistSettings() }
+    }
+    @Published var connectionType: String = "TCP" {
+        didSet { persistSettings() }
+    }
+
+    @Published var selectedQuality: StreamQuality = .high {
+        didSet { persistSettings() }
+    }
+    @Published var selectedFPS: Int = 60 {
+        didSet { persistSettings() }
+    }
+
+    // Manual Interface Toggle — default Auto so Windows/Linux/Android receivers work out of the box
+    @Published var interfacePreference: NetworkInterfacePreference = .auto {
+        didSet { persistSettings() }
+    }
 
     // Manual connection
-    @Published var manualHost: String = ""
-    @Published var manualPort: String = "51820"
+    @Published var manualHost: String = "" {
+        didSet { persistSettings() }
+    }
+    @Published var manualPort: String = "51820" {
+        didSet { persistSettings() }
+    }
+    @Published private(set) var manualConnectionHistory: [ManualConnectionHistoryItem] = []
+    @Published private(set) var manualConnectionAvailability: [String: ManualConnectionAvailability] = [:]
+    @Published private(set) var isRefreshingManualConnectionAvailability = false
 
     var isConnected: Bool { !pipelines.isEmpty }
 
 
     func startBrowsing() {
-        // Browsing params should match connection params ideally to filter results,
-        // but often we want to SEE everything even if we can't connect.
-        // For now, let's keep browsing "Auto" (responsiveData) but Connect strictly.
-        // Actually, if we force P2P, we should probably browse P2P.
-        
-        let typeVal: String
+        browsers.values.forEach { $0.cancel() }
+        browsers.removeAll()
+        discoveredServicesByProtocol.removeAll()
+        startBrowser(protocolType: "TCP")
+        startBrowser(protocolType: "UDP")
+    }
+
+    private func startBrowser(protocolType: String) {
+        let serviceType: String
         let parameters: NWParameters
-        
-         switch connectionType {
-        case "UDP":
-            typeVal = "_bettercast._udp"
+        if protocolType == "UDP" {
+            serviceType = "_bettercast._udp"
             parameters = NWParameters.udp
-        default: // TCP
-            typeVal = "_bettercast._tcp"
+        } else {
+            serviceType = "_bettercast._tcp"
             let tcpOptions = NWProtocolTCP.Options()
             tcpOptions.enableKeepalive = true
             tcpOptions.noDelay = true
             parameters = NWParameters(tls: nil, tcp: tcpOptions)
         }
-        
-        configureParameters(parameters) // Apply user pref
-        
-        // Scan for the appropriate service type
-        LogManager.shared.log("Sender: Browsing for \(typeVal)...")
-        
-        let browser = NWBrowser(for: .bonjour(type: typeVal, domain: nil), using: parameters)
-        self.browser = browser
-        
+        // Discovery stays unrestricted. The selected per-device mode is applied
+        // only when that receiver is connected.
+        parameters.includePeerToPeer = true
+        LogManager.shared.log("Sender: Browsing for \(serviceType)...")
+
+        let browser = NWBrowser(
+            for: .bonjour(type: serviceType, domain: nil),
+            using: parameters
+        )
+        browsers[protocolType] = browser
+
         browser.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
                 switch state {
                 case .ready:
-                    self?.status = "Browsing (\(self?.connectionType ?? "?"))..."
+                    self?.status = "Browsing..."
                 case .failed(let error):
-                    self?.status = "Browsing failed: \(error.localizedDescription)"
+                    self?.status = "\(protocolType) browsing failed: \(error.localizedDescription)"
                 default:
                     break
                 }
             }
         }
-        
-        browser.browseResultsChangedHandler = { [weak self] results, changes in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                // Build list from mDNS browse results
-                var services = results.compactMap { result -> DiscoveredService? in
-                    if case .service(let name, _, _, _) = result.endpoint {
-                        return DiscoveredService(name: name, endpoint: result.endpoint)
-                    }
-                    return nil
-                }
-                // Preserve manual connections that aren't from mDNS
-                for existing in self.foundServices {
-                    if case .hostPort = existing.endpoint,
-                       !services.contains(where: { $0.name == existing.name }) {
-                        services.append(existing)
-                    }
-                }
-                self.foundServices = services
 
-                // Auto-connect to newly discovered services
-                if self.autoConnect {
-                    for service in services {
-                        if !self.connectedServices.contains(where: { $0.name == service.name })
-                            && !self.connectingServiceNames.contains(service.name) {
-                            // Skip ADB synthetic entries
-                            if service.name.contains("Android (USB)") || service.name.contains("Android (WiFi ADB)") { continue }
-                            // Skip " P2P" duplicate — sender uses P2P automatically for Apple devices
-                            if service.name.hasSuffix(" P2P") && services.contains(where: { $0.name == String(service.name.dropLast(4)) }) { continue }
-                            LogManager.shared.log("Sender: Auto-connecting to \(service.name)")
-                            self.connect(to: service)
-                        }
+        browser.browseResultsChangedHandler = { [weak self] results, _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                var servicesByName: [String: DiscoveredService] = [:]
+                for result in results {
+                    if case .service(let name, _, _, _) = result.endpoint {
+                        servicesByName[name] = DiscoveredService(
+                            name: name,
+                            endpoint: result.endpoint
+                        )
                     }
                 }
+                self.discoveredServicesByProtocol[protocolType] = servicesByName
+                self.rebuildFoundServices()
             }
         }
 
         browser.start(queue: .main)
     }
-    
+
+    private func rebuildFoundServices() {
+        let manualServices = foundServices.filter {
+            if case .hostPort = $0.endpoint { return true }
+            return false
+        }
+        var servicesByName = discoveredServicesByProtocol["UDP"] ?? [:]
+        // Prefer TCP for display and identity. connect(to:) selects the endpoint
+        // that matches the receiver's saved protocol.
+        for (name, service) in discoveredServicesByProtocol["TCP"] ?? [:] {
+            servicesByName[name] = service
+        }
+        var services = servicesByName.values.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+        for service in manualServices where !services.contains(where: { $0.name == service.name }) {
+            services.append(service)
+        }
+        foundServices = services
+
+        // Each receiver owns its auto-connect preference. Multiple available
+        // receivers can connect in parallel.
+        for service in services where isAutoConnectEnabled(for: service) {
+            if connectedServices.contains(where: { $0.name == service.name })
+                || connectingServiceNames.contains(service.name) {
+                continue
+            }
+            if service.name.contains("Android (USB)")
+                || service.name.contains("Android (WiFi ADB)") {
+                continue
+            }
+            if service.name.hasSuffix(" P2P")
+                && services.contains(where: { $0.name == String(service.name.dropLast(4)) }) {
+                continue
+            }
+            LogManager.shared.log("Sender: Auto-connecting to \(service.name)")
+            connect(to: service)
+        }
+    }
+
     // Heartbeat
     private var lastHeartbeatTime: Date = Date()
     private var heartbeatTimer: Timer?
     private var connectionRefusedCount: Int = 0
-    
+
     // Hard-Lock AWDL Logic
     private let interfaceMonitor = NWPathMonitor()
     private var cachedAWDLInterface: NWInterface?
     private var cachedInfraInterface: NWInterface?
-    
+    private var workspaceSessionObservers: [NSObjectProtocol] = []
+    private var distributedSessionObservers: [NSObjectProtocol] = []
+    private var sessionRecoveryWorkItem: DispatchWorkItem?
+
     init() {
+        let defaults = UserDefaults.standard
+        if let customResolutionData = defaults.data(forKey: PreferenceKey.customResolutions),
+           let savedCustomResolutions = try? JSONDecoder().decode(
+               [VirtualDisplayManager.Resolution].self,
+               from: customResolutionData
+           ) {
+            customResolutions = savedCustomResolutions
+        }
+        let savedWidth = defaults.integer(forKey: PreferenceKey.resolutionWidth)
+        let savedHeight = defaults.integer(forKey: PreferenceKey.resolutionHeight)
+        if let savedResolution = VirtualDisplayManager.defaultResolutions.first(where: {
+            $0.width == savedWidth && $0.height == savedHeight
+        }) {
+            selectedResolution = savedResolution
+        } else if savedWidth > 0, savedHeight > 0 {
+            let savedPPI = defaults.integer(forKey: PreferenceKey.resolutionPPI)
+            selectedResolution = VirtualDisplayManager.Resolution(
+                width: savedWidth,
+                height: savedHeight,
+                ppi: savedPPI > 0 ? savedPPI : 220,
+                hiDPI: false,
+                name: defaults.string(forKey: PreferenceKey.resolutionName)
+                    ?? "\(savedWidth) x \(savedHeight) (Custom)"
+            )
+        }
+        if defaults.object(forKey: PreferenceKey.retina) != nil {
+            isRetina = defaults.bool(forKey: PreferenceKey.retina)
+        }
+        if let savedQuality = StreamQuality(rawValue: defaults.integer(forKey: PreferenceKey.quality)) {
+            selectedQuality = savedQuality
+        }
+        let savedFPS = defaults.integer(forKey: PreferenceKey.fps)
+        if savedFPS == 30 || savedFPS == 60 {
+            selectedFPS = savedFPS
+        }
+        if defaults.object(forKey: PreferenceKey.useVirtualDisplay) != nil {
+            useVirtualDisplay = defaults.bool(forKey: PreferenceKey.useVirtualDisplay)
+        }
+        if defaults.object(forKey: PreferenceKey.audioStreaming) != nil {
+            audioStreamingEnabled = defaults.bool(forKey: PreferenceKey.audioStreaming)
+        }
+        if let savedConnectionType = defaults.string(forKey: PreferenceKey.connectionType),
+           savedConnectionType == "TCP" || savedConnectionType == "UDP" {
+            connectionType = savedConnectionType
+        }
+        if let rawInterfacePreference = defaults.string(forKey: PreferenceKey.interfacePreference),
+           let savedInterfacePreference = NetworkInterfacePreference(rawValue: rawInterfacePreference) {
+            interfacePreference = savedInterfacePreference
+        }
+        autoConnectReceiverKeys = Set(
+            defaults.stringArray(forKey: PreferenceKey.autoConnectReceiverKeys) ?? []
+        )
+        manualHost = defaults.string(forKey: PreferenceKey.manualHost) ?? ""
+        manualPort = defaults.string(forKey: PreferenceKey.manualPort) ?? "51820"
+        if let profilesData = defaults.data(forKey: PreferenceKey.receiverProfiles),
+           let profiles = try? JSONDecoder().decode([String: ReceiverSettings].self, from: profilesData) {
+            receiverProfiles = profiles
+        }
+        if let historyData = defaults.data(forKey: PreferenceKey.manualConnectionHistory),
+           let history = try? JSONDecoder().decode([ManualConnectionHistoryItem].self, from: historyData) {
+            manualConnectionHistory = history
+        }
+
         LogManager.shared.log("Sender: App Starting")
-        
+
         // We can't monitor recursively in init easily, but we can start it.
         interfaceMonitor.pathUpdateHandler = { [weak self] path in
             for interface in path.availableInterfaces {
@@ -2407,15 +2902,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 if interface.name.contains("awdl") || interface.name.contains("llw") {
                     let isNew = (self?.cachedAWDLInterface == nil)
                     self?.cachedAWDLInterface = interface
-                    
+
                     if isNew {
                          LogManager.shared.log("Network: Found P2P Interface: \(interface.name) (\(interface.type))")
-                         // Restart browsing on this interface so we get the Link-Local Address
-                         // If we don't, we might try to connect to the Router IP via AWDL, which fails.
-                         if self?.interfacePreference == .p2pOnly {
-                             LogManager.shared.log("Network: Restarting Browser to force discovery via \(interface.name)...")
-                             self?.startBrowsing()
-                         }
                     }
                 }
                 // Cache Infra WiFi (en0 typically) — only log on first discovery
@@ -2429,26 +2918,635 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             }
         }
         interfaceMonitor.start(queue: .global())
+        startSessionLifecycleMonitoring()
     }
 
-    private func configureParameters(_ parameters: NWParameters) {
-        parameters.includePeerToPeer = true // Always allow discovery at least
-        
-        // Use cached AWDL if available (especially for Browser)
-        if interfacePreference == .p2pOnly, let awdl = cachedAWDLInterface {
+    deinit {
+        sessionRecoveryWorkItem?.cancel()
+        workspaceSessionObservers.forEach {
+            NSWorkspace.shared.notificationCenter.removeObserver($0)
+        }
+        distributedSessionObservers.forEach {
+            DistributedNotificationCenter.default().removeObserver($0)
+        }
+        interfaceMonitor.cancel()
+        heartbeatTimer?.invalidate()
+    }
+
+    private func startSessionLifecycleMonitoring() {
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        let resumeNotifications: [(Notification.Name, String, TimeInterval)] = [
+            (NSWorkspace.sessionDidBecomeActiveNotification, "session became active", 1.0),
+            (NSWorkspace.didWakeNotification, "system woke", 3.0)
+        ]
+        for (name, reason, delay) in resumeNotifications {
+            let observer = workspaceCenter.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.scheduleCaptureRecovery(reason: reason, delay: delay)
+            }
+            workspaceSessionObservers.append(observer)
+        }
+
+        let unlockObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsUnlocked"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.scheduleCaptureRecovery(reason: "screen unlocked", delay: 1.0)
+        }
+        distributedSessionObservers.append(unlockObserver)
+    }
+
+    private func scheduleCaptureRecovery(reason: String, delay: TimeInterval) {
+        guard !pipelines.isEmpty else { return }
+
+        // macOS commonly emits wake, session-active and screen-unlocked events
+        // together. Coalesce them so one unlock causes one capture restart.
+        sessionRecoveryWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.recoverCaptureAfterSessionResume(reason: reason)
+        }
+        sessionRecoveryWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func recoverCaptureAfterSessionResume(reason: String) {
+        let connectionIds = Array(pipelines.keys)
+        guard !connectionIds.isEmpty else { return }
+
+        LogManager.shared.log(
+            "Sender: \(reason.capitalized); restarting capture for " +
+            "\(connectionIds.count) display(s) while preserving virtual displays"
+        )
+
+        for connectionId in connectionIds {
+            pipelines[connectionId]?.screenRecorder?.stopCapture()
+            pipelines[connectionId]?.screenRecorder = nil
+            pipelines[connectionId]?.videoEncoder = nil
+            pipelines[connectionId]?.audioEncoder = nil
+        }
+
+        // Give ScreenCaptureKit a short window to tear down the stale stream
+        // before starting its replacement. startPipeline reuses the existing
+        // VirtualDisplayManager and its stable display identity.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self else { return }
+            for connectionId in connectionIds where self.pipelines[connectionId] != nil {
+                self.startPipeline(for: connectionId)
+            }
+        }
+    }
+
+    private func currentReceiverSettings() -> ReceiverSettings {
+        ReceiverSettings(
+            resolutionWidth: selectedResolution.width,
+            resolutionHeight: selectedResolution.height,
+            resolutionPPI: selectedResolution.ppi,
+            resolutionName: selectedResolution.name,
+            retinaEnabled: isRetina,
+            qualityRawValue: selectedQuality.rawValue,
+            fps: selectedFPS,
+            useVirtualDisplay: useVirtualDisplay,
+            audioStreamingEnabled: audioStreamingEnabled,
+            connectionType: connectionType,
+            interfacePreferenceRawValue: interfacePreference.rawValue
+        )
+    }
+
+    var availableResolutions: [VirtualDisplayManager.Resolution] {
+        var resolutions = VirtualDisplayManager.defaultResolutions + customResolutions
+        if !resolutions.contains(selectedResolution) {
+            resolutions.append(selectedResolution)
+        }
+        return resolutions
+    }
+
+    private func persistCustomResolutions() {
+        if let data = try? JSONEncoder().encode(customResolutions) {
+            UserDefaults.standard.set(data, forKey: PreferenceKey.customResolutions)
+        }
+    }
+
+    private func replaceCachedResolution(
+        _ original: VirtualDisplayManager.Resolution,
+        with replacement: VirtualDisplayManager.Resolution
+    ) {
+        for key in Array(receiverProfiles.keys) {
+            guard var settings = receiverProfiles[key],
+                  settings.resolutionWidth == original.width,
+                  settings.resolutionHeight == original.height else {
+                continue
+            }
+            settings.resolutionWidth = replacement.width
+            settings.resolutionHeight = replacement.height
+            settings.resolutionPPI = replacement.ppi
+            settings.resolutionName = replacement.name
+            receiverProfiles[key] = settings
+        }
+
+        for id in Array(pipelines.keys) {
+            guard var settings = pipelines[id]?.settings,
+                  settings.resolutionWidth == original.width,
+                  settings.resolutionHeight == original.height else {
+                continue
+            }
+            settings.resolutionWidth = replacement.width
+            settings.resolutionHeight = replacement.height
+            settings.resolutionPPI = replacement.ppi
+            settings.resolutionName = replacement.name
+            pipelines[id]?.settings = settings
+        }
+
+        persistReceiverProfiles()
+    }
+
+    func saveCustomResolution(
+        _ original: VirtualDisplayManager.Resolution?,
+        width: Int,
+        height: Int,
+        ppi: Int,
+        label: String
+    ) {
+        let trimmedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (640...7680).contains(width), (480...4320).contains(height) else {
+            return
+        }
+        guard width.isMultiple(of: 2), height.isMultiple(of: 2) else { return }
+        guard (72...500).contains(ppi) else { return }
+        guard !trimmedLabel.isEmpty,
+              !trimmedLabel.contains("("),
+              !trimmedLabel.contains(")") else {
+            return
+        }
+        guard !VirtualDisplayManager.defaultResolutions.contains(where: {
+            $0.width == width && $0.height == height
+        }) else {
+            return
+        }
+        guard !customResolutions.contains(where: {
+            $0.width == width
+                && $0.height == height
+                && $0 != original
+        }) else {
+            return
+        }
+
+        let resolution = VirtualDisplayManager.Resolution(
+            width: width,
+            height: height,
+            ppi: ppi,
+            hiDPI: false,
+            name: "\(width) x \(height) (\(trimmedLabel))"
+        )
+
+        if let original,
+           let index = customResolutions.firstIndex(of: original) {
+            customResolutions[index] = resolution
+            replaceCachedResolution(original, with: resolution)
+            if selectedResolution == original {
+                selectedResolution = resolution
+            }
+        } else {
+            customResolutions.append(resolution)
+        }
+
+        persistCustomResolutions()
+    }
+
+    func removeCustomResolution(_ resolution: VirtualDisplayManager.Resolution) {
+        guard customResolutions.contains(resolution) else { return }
+        customResolutions.removeAll { $0 == resolution }
+        persistCustomResolutions()
+
+        let fallback = VirtualDisplayManager.defaultResolutions[1]
+        replaceCachedResolution(resolution, with: fallback)
+        if selectedResolution == resolution {
+            selectedResolution = fallback
+        }
+    }
+
+    private func applyReceiverSettings(_ settings: ReceiverSettings) {
+        if let resolution = VirtualDisplayManager.defaultResolutions.first(where: {
+            $0.width == settings.resolutionWidth && $0.height == settings.resolutionHeight
+        }) {
+            selectedResolution = resolution
+        } else {
+            selectedResolution = VirtualDisplayManager.Resolution(
+                width: settings.resolutionWidth,
+                height: settings.resolutionHeight,
+                ppi: settings.resolutionPPI,
+                hiDPI: false,
+                name: settings.resolutionName
+            )
+        }
+        isRetina = settings.retinaEnabled
+        selectedQuality = StreamQuality(rawValue: settings.qualityRawValue) ?? .high
+        selectedFPS = settings.fps == 30 ? 30 : 60
+        useVirtualDisplay = settings.useVirtualDisplay
+        audioStreamingEnabled = settings.audioStreamingEnabled
+        if let savedConnectionType = settings.connectionType,
+           savedConnectionType == "TCP" || savedConnectionType == "UDP" {
+            connectionType = savedConnectionType
+        }
+        if let rawPreference = settings.interfacePreferenceRawValue,
+           let savedPreference = NetworkInterfacePreference(rawValue: rawPreference) {
+            interfacePreference = savedPreference
+        }
+    }
+
+    private func receiverProfileKey(for service: DiscoveredService) -> String {
+        switch service.endpoint {
+        case .hostPort(let host, let port):
+            return "host:\(String(describing: host).lowercased()):\(port.rawValue)"
+        case .service(let name, _, _, _):
+            let normalizedName = name
+                .replacingOccurrences(of: #" \(\d+\)$"#, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            return "service:\(normalizedName)"
+        default:
+            return "name:\(service.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())"
+        }
+    }
+
+    func isAutoConnectEnabled(for service: DiscoveredService) -> Bool {
+        autoConnectReceiverKeys.contains(receiverProfileKey(for: service))
+    }
+
+    func isAutoConnectEnabled(for connectionId: UUID) -> Bool {
+        guard let service = pipelines[connectionId]?.service else { return false }
+        return isAutoConnectEnabled(for: service)
+    }
+
+    func setAutoConnectEnabled(_ enabled: Bool, for service: DiscoveredService) {
+        let key = receiverProfileKey(for: service)
+        if enabled {
+            autoConnectReceiverKeys.insert(key)
+            // Persist any Mode/Protocol edits made on the same device page
+            // before auto-connect attempts to use them.
+            var updatedSettings = currentReceiverSettings()
+            if case .hostPort = service.endpoint {
+                updatedSettings.connectionType = "TCP"
+            }
+            saveSettings(updatedSettings, for: service)
+        } else {
+            autoConnectReceiverKeys.remove(key)
+        }
+        persistAutoConnectReceiverKeys()
+
+        guard enabled,
+              !connectedServices.contains(where: { $0.name == service.name }),
+              !connectingServiceNames.contains(service.name) else {
+            return
+        }
+
+        if case .hostPort = service.endpoint {
+            if let item = manualConnectionHistory.first(where: { $0.displayName == service.name }) {
+                if manualConnectionAvailability[item.id] == .available {
+                    connectRecentManualConnection(item)
+                } else {
+                    refreshManualConnectionAvailability()
+                }
+            }
+        } else if foundServices.contains(where: { $0.name == service.name }) {
+            LogManager.shared.log("Sender: Auto-connect enabled for available device \(service.name)")
+            connect(to: service)
+        }
+    }
+
+    func setAutoConnectEnabled(_ enabled: Bool, for connectionId: UUID) {
+        guard let service = pipelines[connectionId]?.service else { return }
+        setAutoConnectEnabled(enabled, for: service)
+    }
+
+    private func persistAutoConnectReceiverKeys() {
+        UserDefaults.standard.set(
+            autoConnectReceiverKeys.sorted(),
+            forKey: PreferenceKey.autoConnectReceiverKeys
+        )
+    }
+
+    private func settings(for service: DiscoveredService) -> ReceiverSettings {
+        receiverProfiles[receiverProfileKey(for: service)] ?? currentReceiverSettings()
+    }
+
+    private func persistReceiverProfiles() {
+        guard let data = try? JSONEncoder().encode(receiverProfiles) else {
+            LogManager.shared.log("Sender: Failed to encode saved receiver settings")
+            return
+        }
+        UserDefaults.standard.set(data, forKey: PreferenceKey.receiverProfiles)
+    }
+
+    private func saveSettings(_ settings: ReceiverSettings, for service: DiscoveredService) {
+        receiverProfiles[receiverProfileKey(for: service)] = settings
+        persistReceiverProfiles()
+        LogManager.shared.log("Sender: Saved settings for \(service.name)")
+    }
+
+    func loadSettings(for service: DiscoveredService) {
+        let key = receiverProfileKey(for: service)
+        guard var settings = receiverProfiles[key] else { return }
+        if case .hostPort = service.endpoint {
+            settings.connectionType = "TCP"
+        }
+        applyReceiverSettings(settings)
+        LogManager.shared.log("Sender: Loaded saved settings for \(service.name)")
+    }
+
+    func loadSettings(for connectionId: UUID) {
+        guard let pipeline = pipelines[connectionId] else { return }
+        applyReceiverSettings(pipeline.settings)
+    }
+
+    private func service(for item: ManualConnectionHistoryItem) -> DiscoveredService? {
+        guard let port = NWEndpoint.Port(rawValue: item.port) else { return nil }
+        return DiscoveredService(
+            name: item.displayName,
+            endpoint: .hostPort(host: NWEndpoint.Host(item.host), port: port)
+        )
+    }
+
+    private func rememberManualConnection(host: String, port: UInt16) {
+        let item = ManualConnectionHistoryItem(host: host, port: port)
+        manualConnectionHistory.removeAll { $0.id == item.id }
+        manualConnectionHistory.insert(item, at: 0)
+        if manualConnectionHistory.count > 10 {
+            manualConnectionHistory.removeLast(manualConnectionHistory.count - 10)
+        }
+        if let data = try? JSONEncoder().encode(manualConnectionHistory) {
+            UserDefaults.standard.set(data, forKey: PreferenceKey.manualConnectionHistory)
+        }
+    }
+
+    func selectManualConnection(_ item: ManualConnectionHistoryItem) {
+        manualHost = item.host
+        manualPort = String(item.port)
+        guard let service = service(for: item) else { return }
+        loadSettings(for: service)
+    }
+
+    func prepareRecentConnectionSettings(_ item: ManualConnectionHistoryItem) {
+        selectManualConnection(item)
+        guard let service = service(for: item) else { return }
+        if !foundServices.contains(where: { $0.name == service.name }) {
+            foundServices.append(service)
+        }
+    }
+
+    func connectRecentManualConnection(_ item: ManualConnectionHistoryItem) {
+        selectManualConnection(item)
+        connectManual()
+    }
+
+    func connectedDisplayId(for item: ManualConnectionHistoryItem) -> UUID? {
+        pipelines.first { _, pipeline in
+            guard case .hostPort(let host, let port) = pipeline.service.endpoint else {
+                return false
+            }
+            return String(describing: host).caseInsensitiveCompare(item.host) == .orderedSame
+                && port.rawValue == item.port
+        }?.key
+    }
+
+    func isConnecting(to service: DiscoveredService) -> Bool {
+        connectingServiceNames.contains(service.name)
+    }
+
+    func removeManualConnectionHistory(_ item: ManualConnectionHistoryItem) {
+        guard !pipelines.values.contains(where: { $0.service.name == item.displayName }) else {
+            return
+        }
+
+        if let probe = manualAvailabilityProbes.removeValue(forKey: item.id) {
+            probe.stateUpdateHandler = nil
+            probe.cancel()
+        }
+        manualConnectionAvailability.removeValue(forKey: item.id)
+        manualConnectionHistory.removeAll { $0.id == item.id }
+        foundServices.removeAll { $0.name == item.displayName }
+        if let service = service(for: item) {
+            autoConnectReceiverKeys.remove(receiverProfileKey(for: service))
+            persistAutoConnectReceiverKeys()
+        }
+
+        if let data = try? JSONEncoder().encode(manualConnectionHistory) {
+            UserDefaults.standard.set(data, forKey: PreferenceKey.manualConnectionHistory)
+        }
+        isRefreshingManualConnectionAvailability = !manualAvailabilityProbes.isEmpty
+    }
+
+    func openLocalNetworkPrivacySettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_LocalNetwork"
+        ) else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    func refreshManualConnectionAvailability() {
+        lastManualAvailabilityRefresh = Date()
+        manualAvailabilityProbes.values.forEach { $0.cancel() }
+        manualAvailabilityProbes.removeAll()
+        manualAvailabilityProbeGeneration = UUID()
+        let generation = manualAvailabilityProbeGeneration
+
+        guard !manualConnectionHistory.isEmpty else {
+            manualConnectionAvailability.removeAll()
+            isRefreshingManualConnectionAvailability = false
+            return
+        }
+
+        isRefreshingManualConnectionAvailability = true
+        for item in manualConnectionHistory {
+            manualConnectionAvailability[item.id] = .checking
+            startManualAvailabilityProbe(item, attempt: 1, generation: generation)
+        }
+    }
+
+    func refreshManualConnectionAvailabilityIfNeeded() {
+        guard !isRefreshingManualConnectionAvailability else { return }
+        if let lastManualAvailabilityRefresh,
+           Date().timeIntervalSince(lastManualAvailabilityRefresh) < 15 {
+            return
+        }
+        refreshManualConnectionAvailability()
+    }
+
+    func startSavedAutoConnections() {
+        let hasSavedManualAutoConnect = manualConnectionHistory.contains { item in
+            guard let service = service(for: item) else { return false }
+            return isAutoConnectEnabled(for: service)
+        }
+        if hasSavedManualAutoConnect {
+            refreshManualConnectionAvailability()
+        }
+    }
+
+    private func startManualAvailabilityProbe(
+        _ item: ManualConnectionHistoryItem,
+        attempt: Int,
+        generation: UUID
+    ) {
+        guard generation == manualAvailabilityProbeGeneration else { return }
+        guard let port = NWEndpoint.Port(rawValue: item.port) else {
+            manualConnectionAvailability[item.id] = .unavailable
+            isRefreshingManualConnectionAvailability =
+                manualConnectionAvailability.values.contains(.checking)
+            return
+        }
+
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.connectionTimeout = 3
+        let parameters = NWParameters(tls: nil, tcp: tcpOptions)
+        let connection = NWConnection(
+            host: NWEndpoint.Host(item.host),
+            port: port,
+            using: parameters
+        )
+        manualAvailabilityProbes[item.id] = connection
+
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            DispatchQueue.main.async {
+                guard let self, let connection,
+                      generation == self.manualAvailabilityProbeGeneration,
+                      self.manualAvailabilityProbes[item.id] === connection else {
+                    return
+                }
+                switch state {
+                case .ready:
+                    self.finishManualAvailabilityProbe(item.id, result: .available)
+                    if let service = self.service(for: item),
+                       self.isAutoConnectEnabled(for: service),
+                       !self.connectedServices.contains(where: { $0.name == service.name }),
+                       !self.connectingServiceNames.contains(service.name) {
+                        LogManager.shared.log("Sender: Auto-connecting to available recent device \(service.name)")
+                        self.connectRecentManualConnection(item)
+                    }
+                case .waiting(let error), .failed(let error):
+                    if self.isLocalNetworkPermissionError(error) {
+                        self.finishManualAvailabilityProbe(
+                            item.id,
+                            result: .permissionRequired
+                        )
+                    } else {
+                        self.retryOrFinishManualAvailabilityProbe(
+                            item,
+                            attempt: attempt,
+                            generation: generation
+                        )
+                    }
+                default:
+                    break
+                }
+            }
+        }
+        connection.start(queue: .global(qos: .utility))
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self, weak connection] in
+            guard let self, let connection,
+                  generation == self.manualAvailabilityProbeGeneration,
+                  self.manualAvailabilityProbes[item.id] === connection else {
+                return
+            }
+            self.retryOrFinishManualAvailabilityProbe(
+                item,
+                attempt: attempt,
+                generation: generation
+            )
+        }
+    }
+
+    private func isLocalNetworkPermissionError(_ error: NWError) -> Bool {
+        // Network.framework surfaces local-network privacy denial as the
+        // DNS-SD kDNSServiceErr_PolicyDenied value, not necessarily as text.
+        if case .dns(let code) = error, code == -65_570 {
+            return true
+        }
+
+        let description = String(describing: error).lowercased()
+        return description.contains("policy denied")
+            || description.contains("local network prohibited")
+            || description.contains("prohibited")
+    }
+
+    private func retryOrFinishManualAvailabilityProbe(
+        _ item: ManualConnectionHistoryItem,
+        attempt: Int,
+        generation: UUID
+    ) {
+        guard let connection = manualAvailabilityProbes.removeValue(forKey: item.id) else {
+            return
+        }
+        connection.stateUpdateHandler = nil
+        connection.cancel()
+
+        if attempt < 2 {
+            // USB4/link-local routes can briefly report "no route" while ARP settles.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.startManualAvailabilityProbe(
+                    item,
+                    attempt: attempt + 1,
+                    generation: generation
+                )
+            }
+        } else {
+            manualConnectionAvailability[item.id] = .unavailable
+            isRefreshingManualConnectionAvailability =
+                manualConnectionAvailability.values.contains(.checking)
+        }
+    }
+
+    private func finishManualAvailabilityProbe(
+        _ id: String,
+        result: ManualConnectionAvailability
+    ) {
+        guard let connection = manualAvailabilityProbes.removeValue(forKey: id) else { return }
+        connection.stateUpdateHandler = nil
+        connection.cancel()
+        manualConnectionAvailability[id] = result
+        isRefreshingManualConnectionAvailability = !manualAvailabilityProbes.isEmpty
+    }
+
+    private func persistSettings() {
+        let defaults = UserDefaults.standard
+        defaults.set(selectedResolution.width, forKey: PreferenceKey.resolutionWidth)
+        defaults.set(selectedResolution.height, forKey: PreferenceKey.resolutionHeight)
+        defaults.set(selectedResolution.ppi, forKey: PreferenceKey.resolutionPPI)
+        defaults.set(selectedResolution.name, forKey: PreferenceKey.resolutionName)
+        defaults.set(isRetina, forKey: PreferenceKey.retina)
+        defaults.set(selectedQuality.rawValue, forKey: PreferenceKey.quality)
+        defaults.set(selectedFPS, forKey: PreferenceKey.fps)
+        defaults.set(useVirtualDisplay, forKey: PreferenceKey.useVirtualDisplay)
+        defaults.set(audioStreamingEnabled, forKey: PreferenceKey.audioStreaming)
+        defaults.set(connectionType, forKey: PreferenceKey.connectionType)
+        defaults.set(interfacePreference.rawValue, forKey: PreferenceKey.interfacePreference)
+        defaults.set(manualHost, forKey: PreferenceKey.manualHost)
+        defaults.set(manualPort, forKey: PreferenceKey.manualPort)
+    }
+
+    private func configureParameters(
+        _ parameters: NWParameters,
+        preference: NetworkInterfacePreference
+    ) {
+        parameters.includePeerToPeer = true
+
+        if preference == .p2pOnly, let awdl = cachedAWDLInterface {
              LogManager.shared.log("Parameters: Binding to P2P Interface \(awdl.name) ✅")
              parameters.requiredInterface = awdl
              parameters.serviceClass = .interactiveVideo
              parameters.prohibitedInterfaceTypes = [.loopback, .wiredEthernet]
              return // Skip the rest
         }
-        
-        switch interfacePreference {
+
+        switch preference {
         case .auto:
-            parameters.requiredInterfaceType = .wifi
-            parameters.serviceClass = .responsiveData
-            parameters.prohibitedInterfaceTypes = []
-            
+            parameters.serviceClass = .interactiveVideo
+
         case .p2pOnly:
              // Direct binding to AWDL interface
              if let awdl = cachedAWDLInterface {
@@ -2457,28 +3555,28 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                  // Since we require a specific interface, prohibited list is irrelevant/redundant
              } else {
                  LogManager.shared.log("Sender: AWDL Interface not found yet. Falling back to Prohibition Strategy (Banning Infra). ⚠️")
-                 
+
                  // Ban the interface object directly, NOT the type
                  if let infra = cachedInfraInterface {
                       LogManager.shared.log("Sender: Banning Infra Interface: \(infra.name) 🚫")
                       parameters.prohibitedInterfaces = [infra]
                  } else {
                       LogManager.shared.log("Sender: Infra Interface not found either? Falling back to Type prohibition (Risky).")
-                      // If we can't find en0 object, we can't ban it specifically. 
+                      // If we can't find en0 object, we can't ban it specifically.
                       // Fallback to banning Wired/Loopback only.
                  }
-                 
+
                  parameters.serviceClass = .interactiveVideo
              }
-             
+
              // Always ban these types
              parameters.prohibitedInterfaceTypes = [.loopback, .wiredEthernet]
              parameters.preferNoProxies = true
-            
+
         case .routerOnly:
             parameters.serviceClass = .interactiveVideo
-            parameters.prohibitedInterfaceTypes = [.loopback]
-            // Allow standard routing
+            parameters.requiredInterfaceType = .wifi
+            parameters.includePeerToPeer = false
 
         case .wiredCable:
             // USB-C / Thunderbolt Bridge / Ethernet cable direct connection
@@ -2491,8 +3589,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             LogManager.shared.log("Parameters: Wired/Cable mode - WiFi/P2P disabled, using Ethernet/Thunderbolt Bridge")
         }
     }
-    
-    func connect(to service: DiscoveredService) {
+
+    func connect(to service: DiscoveredService, restoringSavedSettings: Bool = true) {
         // Check if already connected or currently connecting to this service
         if connectedServices.contains(where: { $0.name == service.name }) {
             LogManager.shared.log("Sender: Already connected to \(service.name)")
@@ -2504,6 +3602,14 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
         connectingServiceNames.insert(service.name)
 
+        let receiverSettings = restoringSavedSettings ? settings(for: service) : currentReceiverSettings()
+        applyReceiverSettings(receiverSettings)
+        saveSettings(receiverSettings, for: service)
+        let selectedConnectionType = receiverSettings.connectionType ?? connectionType
+        let selectedInterfacePreference = receiverSettings.interfacePreferenceRawValue
+            .flatMap { NetworkInterfacePreference(rawValue: $0) }
+            ?? interfacePreference
+
         let deviceCount = pipelines.count + 1
         self.status = "Connecting to \(service.name) (Device #\(deviceCount))..."
 
@@ -2514,7 +3620,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         let isAppleReceiver = !isManualIP && !nameLower.contains("android") && !nameLower.contains("windows") && !nameLower.contains("linux")
 
         let parameters: NWParameters
-        switch connectionType {
+        switch selectedConnectionType {
         case "UDP":
             parameters = NWParameters.udp
         default: // TCP
@@ -2525,11 +3631,15 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             parameters = NWParameters(tls: nil, tcp: tcpOptions)
             parameters.serviceClass = .interactiveVideo
         }
+        configureParameters(parameters, preference: selectedInterfacePreference)
 
         // For Apple devices, prefer the P2P endpoint if available (AWDL low-latency)
-        var connectEndpoint = service.endpoint
-        if isAppleReceiver {
-            if let p2pService = foundServices.first(where: { $0.name == service.name + " P2P" }) {
+        var connectEndpoint = discoveredServicesByProtocol[selectedConnectionType]?[service.name]?.endpoint
+            ?? service.endpoint
+        let allowsAppleP2P = selectedInterfacePreference == .auto
+            || selectedInterfacePreference == .p2pOnly
+        if isAppleReceiver && allowsAppleP2P {
+            if let p2pService = discoveredServicesByProtocol[selectedConnectionType]?[service.name + " P2P"] {
                 // Use the P2P-advertised endpoint for AWDL connection
                 connectEndpoint = p2pService.endpoint
                 parameters.includePeerToPeer = true
@@ -2561,10 +3671,15 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 }
             }
         } else {
-            // Non-Apple devices: skip P2P, go straight to infrastructure
-            parameters.includePeerToPeer = false
+            // Automatic non-Apple connections use infrastructure. Explicit
+            // per-device P2P mode keeps its AWDL restriction.
+            if selectedInterfacePreference == .auto {
+                parameters.includePeerToPeer = false
+            }
             parameters.serviceClass = .interactiveVideo
-            LogManager.shared.log("Sender: Non-Apple receiver — using infrastructure for \(service.name)")
+            LogManager.shared.log(
+                "Sender: Connecting \(service.name) via \(selectedInterfacePreference.rawValue) / \(selectedConnectionType)"
+            )
         }
 
         let connection = NWConnection(to: connectEndpoint, using: parameters)
@@ -2582,14 +3697,27 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 LogManager.shared.log("Sender: Connection to \(service.name) timed out — retrying via infrastructure")
                 connection.cancel()
 
-                // Retry with plain TCP (no interface restrictions)
-                let tcpOptions = NWProtocolTCP.Options()
-                tcpOptions.enableKeepalive = true
-                tcpOptions.noDelay = true
-                tcpOptions.connectionTimeout = 10
-                let fallbackParams = NWParameters(tls: nil, tcp: tcpOptions)
+                // Retry the same protocol without interface restrictions.
+                let fallbackParams: NWParameters
+                if selectedConnectionType == "UDP" {
+                    fallbackParams = NWParameters.udp
+                } else {
+                    let tcpOptions = NWProtocolTCP.Options()
+                    tcpOptions.enableKeepalive = true
+                    tcpOptions.noDelay = true
+                    tcpOptions.connectionTimeout = 10
+                    fallbackParams = NWParameters(tls: nil, tcp: tcpOptions)
+                }
                 fallbackParams.serviceClass = .interactiveVideo
-                self.connectWithParameters(service: service, parameters: fallbackParams, forceTCP: false)
+                let fallbackService = DiscoveredService(
+                    name: service.name,
+                    endpoint: connectEndpoint
+                )
+                self.connectWithParameters(
+                    service: fallbackService,
+                    parameters: fallbackParams,
+                    forceTCP: false
+                )
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: timeoutWork)
@@ -2600,6 +3728,15 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 case .ready:
                     timeoutWork.cancel() // Connection succeeded, cancel timeout
                     self?.connectingServiceNames.remove(service.name)
+
+                    if case .hostPort(let host, let port) = service.endpoint,
+                       service.name == "\(host):\(port.rawValue)" {
+                        self?.rememberManualConnection(
+                            host: String(describing: host),
+                            port: port.rawValue
+                        )
+                        self?.manualConnectionAvailability[service.name.lowercased()] = .available
+                    }
 
                     // Detect link type before creating pipeline
                     var isP2P = false
@@ -2625,7 +3762,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         id: connectionId,
                         connection: connection,
                         service: service,
-                        lastHeartbeat: Date()
+                        lastHeartbeat: Date(),
+                        settings: receiverSettings
                     )
                     pipeline.isP2P = isP2P
                     pipeline.isLoopback = isLoopback
@@ -2686,7 +3824,6 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             LogManager.shared.log("Sender: Invalid port '\(manualPort)'")
             return
         }
-
         let endpoint = NWEndpoint.hostPort(
             host: NWEndpoint.Host(host),
             port: port
@@ -2698,8 +3835,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             foundServices.append(service)
         }
 
-        // For manual connections, use plain TCP with no interface restrictions
-        // This allows localhost/ADB forwarding to work regardless of Mode setting
+        // Manual IP connections use TCP. Localhost stays unrestricted for ADB;
+        // other hosts honor the saved per-device interface mode.
         let isLocalhost = host == "localhost" || host == "127.0.0.1"
 
         if isLocalhost {
@@ -2711,17 +3848,30 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             LogManager.shared.log("Sender: Manual connect to \(host):\(portNum) (localhost/ADB mode, no interface restrictions)")
             connectWithParameters(service: service, parameters: parameters, forceTCP: true)
         } else {
-            // Non-localhost manual connect: use plain TCP without interface restrictions
-            // This ensures connections to Windows/Linux receivers on the LAN work
-            // regardless of the Mode setting (which may force P2P/AWDL)
             let tcpOptions = NWProtocolTCP.Options()
             tcpOptions.enableKeepalive = true
             tcpOptions.noDelay = true
             let parameters = NWParameters(tls: nil, tcp: tcpOptions)
-            parameters.serviceClass = .interactiveVideo
-            LogManager.shared.log("Sender: Manual connect to \(host):\(portNum) (LAN mode, no interface restrictions)")
-            connectWithParameters(service: service, parameters: parameters, forceTCP: false)
+            let receiverSettings = settings(for: service)
+            let preference = receiverSettings.interfacePreferenceRawValue
+                .flatMap { NetworkInterfacePreference(rawValue: $0) }
+                ?? interfacePreference
+            configureParameters(parameters, preference: preference)
+            LogManager.shared.log(
+                "Sender: Manual connect to \(host):\(portNum) via \(preference.rawValue) / TCP"
+            )
+            connectWithParameters(service: service, parameters: parameters, forceTCP: true)
         }
+    }
+
+    func connectManualService(_ service: DiscoveredService) {
+        guard case .hostPort(let host, let port) = service.endpoint else {
+            connect(to: service, restoringSavedSettings: false)
+            return
+        }
+        manualHost = String(describing: host)
+        manualPort = String(port.rawValue)
+        connectManual()
     }
 
     // MARK: - ADB Wireless
@@ -3016,6 +4166,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             return
         }
 
+        var receiverSettings = settings(for: service)
+        if forceTCP {
+            receiverSettings.connectionType = "TCP"
+        }
+        applyReceiverSettings(receiverSettings)
+        saveSettings(receiverSettings, for: service)
+
         // Mark as connecting to prevent auto-connect races during retry
         connectingServiceNames.insert(service.name)
 
@@ -3053,7 +4210,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         id: connectionId,
                         connection: connection,
                         service: service,
-                        lastHeartbeat: Date()
+                        lastHeartbeat: Date(),
+                        settings: receiverSettings
                     )
                     pipeline.isP2P = isP2P
                     pipeline.isLoopback = isLoopback
@@ -3138,7 +4296,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             NSWorkspace.shared.open(url)
         }
     }
-    
+
     func resetScreenCapturePermissions() {
         LogManager.shared.log("Permissions: Resetting ScreenCapture and Accessibility permissions...")
 
@@ -3190,16 +4348,16 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             openPrivacySettings()
         }
     }
-    
+
     func quitApp() {
         NSApplication.shared.terminate(nil)
     }
-    
+
     func restartApp() {
         let url = URL(fileURLWithPath: Bundle.main.bundlePath)
         let config = NSWorkspace.OpenConfiguration()
         config.createsNewApplicationInstance = true
-        
+
         NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in
             if error == nil {
                 DispatchQueue.main.async {
@@ -3210,7 +4368,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             }
         }
     }
-    
+
     // MARK: - Dynamic Updates
     private var updateDebounceWork: DispatchWorkItem?
 
@@ -3228,25 +4386,44 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         // Seamlessly update resolution while keeping connections alive.
         LogManager.shared.log("Sender: Updating Resolution dynamically for all pipelines...")
 
-        // 1. Stop all pipeline components
+        // 1. Stop stream components while preserving the virtual display identity.
         for (id, pipeline) in pipelines {
+            var updatedSettings = currentReceiverSettings()
+            updatedSettings.audioStreamingEnabled =
+                connectedDisplays.first(where: { $0.id == id })?.audioEnabled
+                ?? updatedSettings.audioStreamingEnabled
+            pipelines[id]?.settings = updatedSettings
+            saveSettings(updatedSettings, for: pipeline.service)
+
             pipeline.screenRecorder?.stopCapture()
-            pipeline.virtualDisplayManager?.destroyDisplay()
-            InputHandler.shared.removeDisplayBounds(for: id)
             pipelines[id]?.screenRecorder = nil
             pipelines[id]?.videoEncoder = nil
-            pipelines[id]?.virtualDisplayManager = nil
+            pipelines[id]?.audioEncoder = nil
+
+            if updatedSettings.useVirtualDisplay, let displayManager = pipeline.virtualDisplayManager {
+                let resolution = virtualDisplayResolution(for: id)
+                if !displayManager.updateDisplay(resolution: resolution, refreshRate: updatedSettings.fps) {
+                    displayManager.destroyDisplay()
+                    pipelines[id]?.virtualDisplayManager = nil
+                    InputHandler.shared.removeDisplayBounds(for: id)
+                    LogManager.shared.log("Sender: In-place display update failed; will recreate for \(pipeline.service.name)")
+                }
+            } else if let displayManager = pipeline.virtualDisplayManager {
+                displayManager.destroyDisplay()
+                pipelines[id]?.virtualDisplayManager = nil
+                InputHandler.shared.removeDisplayBounds(for: id)
+            }
         }
 
-        // 2. Restart all pipelines with new settings
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+        // 2. Restart stream components with the new settings.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             guard let self = self else { return }
             for id in self.pipelines.keys {
                 self.startPipeline(for: id)
             }
         }
     }
-    
+
     func startHeartbeatMonitor() {
         heartbeatTimer?.invalidate()
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -3269,7 +4446,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             }
         }
     }
-    
+
     func removeConnection(_ connectionId: UUID) {
         guard let pipeline = pipelines[connectionId] else { return }
 
@@ -3335,35 +4512,38 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 name: pipeline.service.name,
                 resolution: res,
                 displayBounds: bounds,
-                audioEnabled: connectedDisplays.first(where: { $0.id == id })?.audioEnabled ?? audioStreamingEnabled,
+                audioEnabled: connectedDisplays.first(where: { $0.id == id })?.audioEnabled
+                    ?? pipeline.settings.audioStreamingEnabled,
                 cgDisplayID: pipeline.virtualDisplayManager?.displayID
             )
         }
     }
-    
+
     private func startStatsTimer() {
         // Simple timer to update transfer rate UI
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
             guard let self = self else { timer.invalidate(); return }
             if self.pipelines.isEmpty { timer.invalidate(); return }
-            
+
             let bytes = self.bytesSentWindow
             self.bytesSentWindow = 0
-            
+
             let mbps = Double(bytes * 8) / 1_000_000.0
-            self.transferRate = String(format: "%.1f Mbps", mbps)
+            self.transferStats.rate = String(format: "%.1f Mbps", mbps)
         }
     }
-    
+
     private func receive(on connection: NWConnection, connectionId: UUID) {
-        let useTCP = (pipelines[connectionId]?.forceTCP == true) || connectionType != "UDP"
+        let pipelineConnectionType = pipelines[connectionId]?.settings.connectionType ?? "TCP"
+        let useTCP = (pipelines[connectionId]?.forceTCP == true)
+            || pipelineConnectionType != "UDP"
         if useTCP {
              receiveTCP(on: connection, connectionId: connectionId)
          } else {
              receiveUDP(on: connection, connectionId: connectionId)
          }
     }
-    
+
     private func receiveTCP(on connection: NWConnection, connectionId: UUID) {
         // Don't schedule receives on dead connections
         guard pipelines[connectionId] != nil else { return }
@@ -3455,7 +4635,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             self?.receiveUDP(on: connection, connectionId: connectionId)
         }
     }
-    
+
     // Handle screen info from iOS receiver (command 777)
     // Receiver reports its native screen dimensions so we can match the aspect ratio
     private func handleScreenInfo(for connectionId: UUID, width: Int, height: Int) {
@@ -3494,8 +4674,30 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
 
+    private func virtualDisplayResolution(for connectionId: UUID) -> VirtualDisplayManager.Resolution {
+        let pipeline = pipelines[connectionId]
+        let settings = pipeline?.settings ?? currentReceiverSettings()
+        let serviceName = pipeline?.service.name ?? "unknown"
+        let width = pipeline?.reportedScreenWidth.flatMap { $0 > 0 ? $0 : nil } ?? settings.resolutionWidth
+        let height = pipeline?.reportedScreenHeight.flatMap { $0 > 0 ? $0 : nil } ?? settings.resolutionHeight
+        // High physical PPI can make macOS retain a 2x backing scale even when
+        // CGVirtualDisplaySettings.hiDPI is disabled. Advertise standard DPI for
+        // non-Retina modes so the requested 1x logical mode is selected.
+        let descriptorPPI = settings.retinaEnabled
+            ? settings.resolutionPPI
+            : min(settings.resolutionPPI, 110)
+
+        return VirtualDisplayManager.Resolution(
+            width: width,
+            height: height,
+            ppi: descriptorPPI,
+            hiDPI: settings.retinaEnabled,
+            name: "BetterCast Display (\(serviceName))"
+        )
+    }
+
     func startPipeline(for connectionId: UUID) {
-        guard pipelines[connectionId] != nil else { return }
+        guard let pipelineSettings = pipelines[connectionId]?.settings else { return }
 
         let serviceName = pipelines[connectionId]?.service.name ?? "unknown"
         LogManager.shared.log("Sender: Starting pipeline for \(serviceName)...")
@@ -3503,59 +4705,63 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         var targetDisplayID: CGDirectDisplayID? = nil
 
         // Create virtual display if enabled
-        if useVirtualDisplay {
-            LogManager.shared.log("Sender: Creating virtual display for \(serviceName)...")
-            let displayManager = VirtualDisplayManager()
+        if pipelineSettings.useVirtualDisplay {
+            let resolution = virtualDisplayResolution(for: connectionId)
 
-            // Use receiver-reported screen dimensions if available (matches device aspect ratio)
-            let res: (width: Int, height: Int, ppi: Int)
-            if let rw = pipelines[connectionId]?.reportedScreenWidth,
-               let rh = pipelines[connectionId]?.reportedScreenHeight, rw > 0 && rh > 0 {
-                res = (width: rw, height: rh, ppi: selectedResolution.ppi)
-                LogManager.shared.log("Sender: Using device-reported resolution \(rw)x\(rh) for \(serviceName)")
-            } else {
-                res = (width: selectedResolution.width, height: selectedResolution.height, ppi: selectedResolution.ppi)
-            }
-            let resolution = VirtualDisplayManager.Resolution(
-                width: res.width,
-                height: res.height,
-                ppi: isRetina ? min(220, res.ppi * 2) : res.ppi,
-                hiDPI: isRetina,
-                name: "BetterCast Display (\(serviceName))"
-            )
-
-            if let displayID = displayManager.createDisplay(resolution: resolution) {
+            if let displayManager = pipelines[connectionId]?.virtualDisplayManager,
+               let displayID = displayManager.displayID {
                 targetDisplayID = displayID
-                pipelines[connectionId]?.virtualDisplayManager = displayManager
+                LogManager.shared.log("Sender: Reusing virtual display for \(serviceName) with ID \(displayID)")
+            } else {
+                LogManager.shared.log("Sender: Creating virtual display for \(serviceName)...")
+                // Keep one stable macOS display identity per density mode.
+                // This prevents macOS from restoring a cached 1x/2x mode from
+                // the other setting while preserving layout within each mode.
+                let densityIdentity = resolution.hiDPI ? "retina" : "standard"
+                let displayManager = VirtualDisplayManager(identity: "\(serviceName)|\(densityIdentity)")
+                if let displayID = displayManager.createDisplay(
+                    resolution: resolution,
+                    refreshRate: pipelineSettings.fps
+                ) {
+                    targetDisplayID = displayID
+                    pipelines[connectionId]?.virtualDisplayManager = displayManager
+                    LogManager.shared.log("Sender: Virtual display created for \(serviceName) with ID \(displayID)")
+                    LogManager.shared.log("Sender: Go to System Settings > Displays to arrange it")
+                } else {
+                    LogManager.shared.log("Sender: Failed to create virtual display for \(serviceName), using main screen")
+                }
+            }
 
-                // Update InputHandler with this connection's display bounds
-                // Retry with increasing delays — macOS may take time to register the virtual display
+            // Update InputHandler with this connection's display bounds.
+            if let displayID = targetDisplayID {
                 func pollDisplayBounds(attempt: Int) {
                     let bounds = CGDisplayBounds(displayID)
                     if bounds.width > 0 && bounds.height > 0 {
-                        InputHandler.shared.updateDisplayBounds(bounds: bounds, for: connectionId)
-                        LogManager.shared.log("Sender: Virtual display for \(serviceName) bounds: \(bounds) (attempt \(attempt))")
+                        let displayManager = self.pipelines[connectionId]?.virtualDisplayManager
+                        displayManager?.selectRequestedMode()
+                        let selectedBounds = CGDisplayBounds(displayID)
+                        InputHandler.shared.updateDisplayBounds(bounds: selectedBounds, for: connectionId)
+                        LogManager.shared.log("Sender: Virtual display for \(serviceName) bounds: \(selectedBounds) (attempt \(attempt))")
+                        displayManager?.logCurrentMode()
                         self.updateConnectedDisplays()
                     } else if attempt < 10 {
-                        // Retry after increasing delay (0.5s, 1s, 1.5s, ...)
                         DispatchQueue.main.asyncAfter(deadline: .now() + Double(attempt) * 0.5) {
                             pollDisplayBounds(attempt: attempt + 1)
                         }
                     } else {
-                        // Fallback: use the resolution we requested
-                        let fallbackBounds = CGRect(x: 0, y: 0, width: res.width, height: res.height)
+                        let fallbackBounds = CGRect(
+                            x: 0,
+                            y: 0,
+                            width: resolution.width,
+                            height: resolution.height
+                        )
                         InputHandler.shared.updateDisplayBounds(bounds: fallbackBounds, for: connectionId)
                         LogManager.shared.log("Sender: Virtual display bounds unavailable after retries, using fallback: \(fallbackBounds)")
                     }
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     pollDisplayBounds(attempt: 1)
                 }
-
-                LogManager.shared.log("Sender: Virtual display created for \(serviceName) with ID \(displayID)")
-                LogManager.shared.log("Sender: Go to System Settings > Displays to arrange it")
-            } else {
-                LogManager.shared.log("Sender: Failed to create virtual display for \(serviceName), using main screen")
             }
         } else {
             LogManager.shared.log("Sender: Using main screen (mirroring mode) for \(serviceName)")
@@ -3570,20 +4776,19 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             captureWidth = rw
             captureHeight = rh
         } else {
-            let scale = isRetina ? 2 : 1
-            captureWidth = selectedResolution.width * scale
-            captureHeight = selectedResolution.height * scale
+            captureWidth = pipelineSettings.resolutionWidth
+            captureHeight = pipelineSettings.resolutionHeight
         }
 
         // Adaptive quality: P2P gets full, loopback (ADB) gets medium-high, infrastructure gets capped
         let isP2P = pipelines[connectionId]?.isP2P ?? false
         let isLoopback = pipelines[connectionId]?.isLoopback ?? false
-        let fps: Int
+        var fps: Int
         let bitrate: Int
         let keyframeInterval: Double
         if isP2P {
             fps = 60  // AWDL can't sustain 120fps at typical bitrates; 60fps = 2x bits per frame
-            bitrate = selectedQuality.rawValue
+            bitrate = pipelineSettings.qualityRawValue
             keyframeInterval = 10.0 // P2P is reliable, long interval is fine
         } else if isLoopback {
             let isWiFiADB = pipelines[connectionId]?.isWiFiADB ?? false
@@ -3591,13 +4796,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 // WiFi ADB — receiver queues all frames (no drops), so 60fps is safe.
                 // Bitrate capped to fit WiFi bandwidth; shorter KF interval for faster recovery.
                 fps = 60
-                bitrate = min(selectedQuality.rawValue, 10_000_000) // Cap at 10 Mbps
+                bitrate = min(pipelineSettings.qualityRawValue, 10_000_000) // Cap at 10 Mbps
                 keyframeInterval = 3.0
                 LogManager.shared.log("Sender: WiFi ADB mode — \(fps) FPS / \(bitrate / 1_000_000) Mbps / KF every 3s for \(serviceName)")
             } else {
                 // USB ADB — ~280Mbps, plenty of headroom
                 fps = 60
-                bitrate = selectedQuality.rawValue
+                bitrate = pipelineSettings.qualityRawValue
                 keyframeInterval = 10.0
                 LogManager.shared.log("Sender: USB ADB mode — \(fps) FPS / \(bitrate / 1_000_000) Mbps / KF every 10s for \(serviceName)")
             }
@@ -3606,13 +4811,18 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             // 30 FPS matches actual WiFi throughput — avoids frame drops that cause glitching.
             // Each frame gets 2x bit budget vs 60 FPS = sharper motion.
             fps = 30
-            bitrate = selectedQuality.rawValue  // Use full user-selected bitrate
+            bitrate = pipelineSettings.qualityRawValue  // Use full user-selected bitrate
             keyframeInterval = 2.0  // Short interval for fast error recovery over WiFi
             LogManager.shared.log("Sender: Infrastructure mode — \(fps) FPS / \(bitrate / 1_000_000) Mbps / KF every 2s for \(serviceName)")
         }
 
+        fps = pipelineSettings.fps
+        LogManager.shared.log("Sender: Frame rate override \(fps) FPS (user setting)")
+
         let hasReportedDims = pipelines[connectionId]?.reportedScreenWidth != nil
-        LogManager.shared.log("Sender: Pipeline \(serviceName): \(captureWidth)x\(captureHeight)\(hasReportedDims ? " (device)" : "") @ \(selectedQuality.name) [\(fps) FPS, P2P: \(isP2P)]")
+        let qualityName = StreamQuality(rawValue: pipelineSettings.qualityRawValue)?.name
+            ?? "\(pipelineSettings.qualityRawValue / 1_000_000) Mbps"
+        LogManager.shared.log("Sender: Pipeline \(serviceName): \(captureWidth)x\(captureHeight)\(hasReportedDims ? " (device)" : "") @ \(qualityName) [\(fps) FPS, P2P: \(isP2P)]")
 
         // P2P: tight 0.1s rate limit window prevents AWDL buffer bloat
         // Infrastructure: loose 1.0s window lets the encoder handle burst scenes naturally
@@ -3622,7 +4832,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         pipelines[connectionId]?.videoEncoder = encoder
 
         // Audio encoder (if audio streaming enabled for this connection)
-        let audioEnabled = connectedDisplays.first(where: { $0.id == connectionId })?.audioEnabled ?? audioStreamingEnabled
+        let audioEnabled = connectedDisplays.first(where: { $0.id == connectionId })?.audioEnabled
+            ?? pipelineSettings.audioStreamingEnabled
         var audioEnc: AudioEncoder? = nil
         if audioEnabled {
             let ae = AudioEncoder(connectionId: connectionId)
@@ -3647,7 +4858,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             await recorder.startCapture()
         }
     }
-    
+
     // VideoEncoderDelegate - Send to the specific connection that owns this encoder
     private var encodedFrameCount: Int = 0
 
@@ -3656,21 +4867,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         encodedFrameCount += 1
         if encodedFrameCount <= 3 || encodedFrameCount % 300 == 0 {
-            LogManager.shared.log("Sender: Sending frame #\(encodedFrameCount) (\(data.count) bytes, KF: \(isKeyframe), sendInProgress: \(pipeline.sendInProgress)) to \(pipeline.service.name)")
+            LogManager.shared.log("Sender: Sending frame #\(encodedFrameCount) (\(data.count) bytes, KF: \(isKeyframe)) to \(pipeline.service.name)")
         }
 
         // Determine if this connection uses TCP framing (ADB/localhost always TCP, else follow global)
-        let useTCP = pipeline.forceTCP || connectionType != "UDP"
-
-        // TCP backpressure: skip P-frame if previous send still in flight.
-        // NEVER drop keyframes — the decoder needs them to recover.
-        // P2P / Loopback: no backpressure (reliable links).
-        // Infrastructure only: completion-based backpressure.
-        if !pipeline.isP2P && !pipeline.isLoopback && useTCP && !isKeyframe {
-            if pipeline.sendInProgress {
-                return
-            }
-        }
+        let pipelineConnectionType = pipeline.settings.connectionType ?? "TCP"
+        let useTCP = pipeline.forceTCP || pipelineConnectionType != "UDP"
 
         if !useTCP {
             let mtu = 1000
@@ -3751,21 +4953,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
             bytesSentWindow += packet.count
 
-            // Mark send in progress for backpressure (infrastructure only)
-            if !pipeline.isP2P {
-                pipelines[connectionId]?.sendInProgress = true
-                pipelines[connectionId]?.lastSendTimeNs = DispatchTime.now().uptimeNanoseconds
-            }
-
-            pipeline.connection.send(content: packet, completion: .contentProcessed { [weak self] error in
-                DispatchQueue.main.async { [weak self] in
-                    self?.pipelines[connectionId]?.sendInProgress = false
-                }
+            // Preserve every encoded TCP frame. Dropping a P-frame here would break
+            // the H.264 reference chain and cause decoder concealment/ghosting.
+            pipeline.connection.send(content: packet, completion: .contentProcessed { error in
                 if let error = error {
                     LogManager.shared.log("Sender: TCP Send Error to \(pipeline.service.name): \(error)")
-                    DispatchQueue.main.async { [weak self] in
-                        self?.pipelines[connectionId]?.sendInProgress = false
-                    }
                 }
             })
         }

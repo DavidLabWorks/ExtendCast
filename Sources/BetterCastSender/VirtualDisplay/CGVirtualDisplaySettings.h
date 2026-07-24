@@ -13,9 +13,9 @@
 }
 
 @property(nonatomic) unsigned int hiDPI; // @synthesize hiDPI=_hiDPI;
+@property(nonatomic) unsigned int rotation;
 - (void)dealloc;
 - (id)init;
 @property(retain, nonatomic) NSArray *modes;
 
 @end
-

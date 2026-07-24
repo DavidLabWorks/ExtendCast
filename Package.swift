@@ -4,7 +4,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "BetterCast",
+    name: "ExtendCast",
     platforms: [
         .macOS(.v14), // Target modern macOS for ScreenCaptureKit
         .iOS(.v13)    // Target iOS 13+ for Receiver
@@ -34,7 +34,8 @@ let package = Package(
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("Network"),
                 .linkedFramework("CoreGraphics"),
-                .linkedFramework("AVFoundation")
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("ServiceManagement")
             ]
         ),
         .executableTarget(

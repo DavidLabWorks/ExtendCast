@@ -1,6 +1,7 @@
 import Foundation
 import ScreenCaptureKit
 import CoreMedia
+import CoreVideo
 
 class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
@@ -12,6 +13,13 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private var width: Int
     private var height: Int
     private var captureFPS: Int32
+    private let sampleHandlerQueue = DispatchQueue(
+        label: "com.bettercast.screen-recorder",
+        // Keep continuous capture work below foreground input/UI work. Video
+        // quality and frame cadence are unchanged; macOS may schedule a late
+        // frame after interactive work instead of making typing feel blocked.
+        qos: .utility
+    )
 
     init(videoEncoder: VideoEncoder, targetDisplayID: CGDirectDisplayID? = nil, width: Int = 1920, height: Int = 1080, captureFPS: Int32 = 120) {
         self.videoEncoder = videoEncoder
@@ -66,19 +74,23 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             config.width = width
             config.height = height
             config.minimumFrameInterval = CMTime(value: 1, timescale: captureFPS)
-            config.queueDepth = captureFPS > 60 ? 8 : 4
+            config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            config.queueDepth = 3
             config.capturesAudio = captureAudio
 
             let stream = SCStream(filter: filter, configuration: config, delegate: self)
-            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: .global(qos: .userInitiated))
+            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleHandlerQueue)
             if captureAudio {
-                try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: .global(qos: .userInitiated))
+                try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: sampleHandlerQueue)
                 LogManager.shared.log("ScreenRecorder: Audio capture enabled")
             }
             
             try await stream.startCapture()
             self.stream = stream
-            LogManager.shared.log("ScreenRecorder: Started capture for display \(display.displayID)")
+            LogManager.shared.log(
+                "ScreenRecorder: Started capture for display \(display.displayID) " +
+                "(\(width)x\(height) @ \(captureFPS) FPS, 420v, queueDepth=3)"
+            )
 
         } catch {
             LogManager.shared.log("ScreenRecorder: Failed to start capture: \(error.localizedDescription)")

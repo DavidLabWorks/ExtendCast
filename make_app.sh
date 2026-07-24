@@ -3,29 +3,30 @@
 # Exit on error
 set -e
 
-VERSION="v8"
+VERSION="v15.1-custom"
 
-# Code signing identity (Developer ID Application certificate)
-# Set to "-" for ad-hoc signing (local use), or your Developer ID for distribution
-SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: STEPHEN JAN LOVINO (TQ8F92XYBL)}"
-
-# Apple ID for notarization (set via environment or here)
-APPLE_ID="${APPLE_ID:-}"
-TEAM_ID="TQ8F92XYBL"
+# Stable local signing identity. Override with SIGN_IDENTITY=- for ad-hoc builds.
+SIGN_IDENTITY="${SIGN_IDENTITY:-Apple Development: ruobin521@gmail.com (JWP5TQ78Q7)}"
 
 echo "============================================"
-echo "  Building BetterCast $VERSION (Universal Binary)"
+echo "  Building BetterCast $VERSION (Apple Silicon)"
 echo "============================================"
-swift build -c release --arch arm64 --arch x86_64
+mkdir -p ".build/module-cache" ".build/swiftpm-cache" ".build/swiftpm-config" ".build/swiftpm-security"
+CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache" \
+SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/module-cache" \
+swift build -c release --product BetterCastSender --arch arm64 \
+    --disable-sandbox \
+    --cache-path ".build/swiftpm-cache" \
+    --config-path ".build/swiftpm-config" \
+    --security-path ".build/swiftpm-security" \
+    --manifest-cache local
 
 # Define Paths
-BUILD_DIR=".build/apple/Products/Release"
+BUILD_DIR=".build/arm64-apple-macosx/release"
 APP_NAME="BetterCast.app"
-DMG_NAME="BetterCast.dmg"
-DMG_STAGING="dmg_staging"
 
-# Clean old artifacts
-rm -rf "$APP_NAME" "BetterCastSender.app" "$DMG_STAGING" "$DMG_NAME"
+# Clean the previous app and any legacy packaging artifacts.
+rm -rf "$APP_NAME" "BetterCastSender.app" "dmg_staging" "BetterCast.dmg" "BetterCast-v15.1-custom.zip"
 
 # ============================================
 # BetterCast App (unified sender + receiver)
@@ -33,7 +34,7 @@ rm -rf "$APP_NAME" "BetterCastSender.app" "$DMG_STAGING" "$DMG_NAME"
 echo "Creating $APP_NAME..."
 mkdir -p "$APP_NAME/Contents/MacOS"
 mkdir -p "$APP_NAME/Contents/Resources"
-# Binary is still named BetterCastSender from the Swift package target
+# Binary is still named BetterCastSender from the Swift package target.
 cp "$BUILD_DIR/BetterCastSender" "$APP_NAME/Contents/MacOS/BetterCastSender"
 cp "BetterCastSender-Info.plist" "$APP_NAME/Contents/Info.plist"
 cp "assets/branding/BetterCastIcon.icns" "$APP_NAME/Contents/Resources/AppIcon.icns"
@@ -41,57 +42,14 @@ cp "assets/branding/BetterCastIcon.icns" "$APP_NAME/Contents/Resources/AppIcon.i
 # Code sign with entitlements
 codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" --entitlements "BetterCastSender-Release.entitlements" "$APP_NAME"
 
-# ============================================
-# Create DMG
-# ============================================
-echo "Creating DMG..."
-mkdir -p "$DMG_STAGING"
-cp -R "$APP_NAME" "$DMG_STAGING/"
-
-# Create a symlink to /Applications for drag-to-install
-ln -s /Applications "$DMG_STAGING/Applications"
-
-# Create DMG from staging folder
-hdiutil create -volname "BetterCast" \
-    -srcfolder "$DMG_STAGING" \
-    -ov -format UDZO \
-    "$DMG_NAME"
-
-# Clean up staging
-rm -rf "$DMG_STAGING"
-
-# Sign the DMG itself (required for Gatekeeper to accept it)
-echo "Signing DMG..."
-codesign --force --sign "$SIGN_IDENTITY" "$DMG_NAME"
-
-# ============================================
-# Notarize DMG (if Apple ID is set)
-# ============================================
-if [ -n "$APPLE_ID" ]; then
-    echo "Notarizing DMG..."
-    xcrun notarytool submit "$DMG_NAME" \
-        --apple-id "$APPLE_ID" \
-        --team-id "$TEAM_ID" \
-        --password "$APP_PASSWORD" \
-        --wait
-
-    echo "Stapling notarization ticket..."
-    xcrun stapler staple "$DMG_NAME"
-else
-    echo ""
-    echo "Skipping notarization (set APPLE_ID and APP_PASSWORD to enable)"
-fi
-
 echo ""
 echo "============================================"
 echo "  Build Complete!"
 echo "============================================"
 echo "App:"
 echo "  - $APP_NAME (signed: $SIGN_IDENTITY)"
-echo "DMG:"
-echo "  - $DMG_NAME"
 echo ""
 echo "Installation:"
-echo "  1. Open the DMG and drag BetterCast to Applications"
+echo "  1. Copy BetterCast.app to Applications"
 echo "  2. Grant Screen Recording permission when prompted"
 echo "  3. Grant Accessibility permission when prompted"

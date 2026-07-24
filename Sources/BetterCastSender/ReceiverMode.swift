@@ -231,11 +231,27 @@ class ReceiverManager: ObservableObject {
 struct ReceiverModeView: View {
     @ObservedObject private var manager = ReceiverManager.shared
     @ObservedObject private var listener = ReceiverManager.shared.networkListener
+    @AppStorage("receiverListeningEnabled") private var receiverAutoStartEnabled = false
     @State private var cachedLocalIPs: String = ""
 
     var body: some View {
         ScrollView {
             VStack(spacing: 20) {
+                DashboardCard {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Start Listening at Launch")
+                                .font(.system(size: 14, weight: .semibold))
+                            Text("Automatically start receiver listening when BetterCast opens.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $receiverAutoStartEnabled)
+                            .labelsHidden()
+                    }
+                }
+
                 // Status header
                 DashboardCard {
                     VStack(spacing: 12) {
@@ -294,7 +310,6 @@ struct ReceiverModeView: View {
                     }
                 }
 
-                // Start/Stop button
                 if manager.isRunning {
                     Button(role: .destructive) {
                         manager.stop()
@@ -394,13 +409,13 @@ struct ReceiverModeView: View {
     private var statusTitle: String {
         if isConnected { return "Receiving" }
         if manager.isRunning { return "Waiting for Connection" }
-        return "Receiver Mode"
+        return "Not Listening"
     }
 
     private var statusSubtitle: String {
         if isConnected { return "Video is playing in a separate window." }
         if manager.isRunning { return "Listening for incoming connections..." }
-        return "Start listening to receive screen streams from other BetterCast senders."
+        return "Start listening when you want this Mac to receive a screen."
     }
 
     private func refreshLocalIPs() {

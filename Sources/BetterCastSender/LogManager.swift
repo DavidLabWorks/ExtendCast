@@ -2,14 +2,16 @@ import SwiftUI
 
 class LogManager: ObservableObject {
     static let shared = LogManager()
+    private static let maximumLogCount = 200
+
     @Published var logs: [String] = []
 
     func log(_ message: String) {
         DispatchQueue.main.async {
             let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
             self.logs.append("[\(timestamp)] \(message)")
-            if self.logs.count > 200 {
-                self.logs.removeFirst()
+            if self.logs.count > Self.maximumLogCount {
+                self.logs.removeFirst(self.logs.count - Self.maximumLogCount)
             }
             print(message)
         }
@@ -20,6 +22,10 @@ class LogManager: ObservableObject {
 
 class UpdateChecker: ObservableObject {
     static let shared = UpdateChecker()
+
+    private static var isEnabled: Bool {
+        Bundle.main.object(forInfoDictionaryKey: "BetterCastEnableUpdates") as? Bool ?? true
+    }
 
     /// Reads version from Info.plist (CFBundleShortVersionString), prefixed with "v"
     static var currentVersion: String {
@@ -51,6 +57,8 @@ class UpdateChecker: ObservableObject {
     }
 
     func checkForUpdates() {
+        guard Self.isEnabled else { return }
+
         let urlString = "https://api.github.com/repos/\(Self.repoOwner)/\(Self.repoName)/releases/latest"
         guard let url = URL(string: urlString) else { return }
 
@@ -83,44 +91,6 @@ class UpdateChecker: ObservableObject {
             }
         }.resume()
     }
-}
-
-// MARK: - Changelog
-
-struct Changelog {
-    struct Entry: Identifiable {
-        let id = UUID()
-        let version: String
-        let date: String
-        let highlights: [String]
-    }
-
-    static let entries: [Entry] = [
-        Entry(version: "v8", date: "2026-03-30", highlights: [
-            "Unified sender + receiver in a single app",
-            "Apple Music-style sidebar with tinted selection",
-            "Guided onboarding tour with spotlight highlights",
-            "In-app update checker via GitHub Releases",
-            "Report Issue button with auto-attached logs",
-            "Display arrangement overview with live thumbnails",
-            "Receiver video opens in separate window",
-        ]),
-        Entry(version: "v7", date: "2026-03-23", highlights: [
-            "Android ADB wireless auto-reconnect",
-            "Orientation fix for rotated displays",
-            "Receiver UI improvements",
-        ]),
-        Entry(version: "v6", date: "2026-03-19", highlights: [
-            "Android sender mode via MediaProjection + ADB",
-            "Windows sender Phase 1",
-            "DMG signing improvements",
-        ]),
-        Entry(version: "v5", date: "2026-03-15", highlights: [
-            "TCP heartbeat + flow control fixes",
-            "Audio streaming pipeline (sender AAC → receiver)",
-            "Desktop receiver with Qt6 + FFmpeg",
-        ]),
-    ]
 }
 
 // MARK: - Log View
@@ -208,15 +178,11 @@ struct LogView: View {
             .padding(.bottom, 6)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(logManager.logs, id: \.self) { log in
-                        Text(log)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                    }
-                }
+                Text(logManager.logs.joined(separator: "\n"))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
                 .padding(.horizontal, 16)
                 .padding(.bottom, 10)
             }
