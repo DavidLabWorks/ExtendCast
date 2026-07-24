@@ -197,7 +197,7 @@ struct LogView: View {
     private func openReportIssue() {
         let systemInfo = [
             "macOS \(ProcessInfo.processInfo.operatingSystemVersionString)",
-            "BetterCast \(UpdateChecker.currentVersion)",
+            "ExtendCast \(UpdateChecker.currentVersion)",
             "Chip: \(ProcessInfo.processInfo.processorCount) cores"
         ].joined(separator: ", ")
 

@@ -38,8 +38,8 @@ struct BetterCastSenderApp: App {
             )
             .accessibilityLabel(
                 networkClient.connectedDisplays.isEmpty
-                    ? "BetterCast — No connected displays"
-                    : "BetterCast — \(networkClient.connectedDisplays.count) connected"
+                    ? "ExtendCast — No connected displays"
+                    : "ExtendCast — \(networkClient.connectedDisplays.count) connected"
             )
         }
         .menuBarExtraStyle(.menu)
@@ -212,13 +212,13 @@ struct StatusBarMenuView: View {
         Button {
             showMainWindow()
         } label: {
-            Label("Open BetterCast", systemImage: "macwindow")
+            Label("Open ExtendCast", systemImage: "macwindow")
         }
 
         Button {
             client.quitApp()
         } label: {
-            Label("Quit BetterCast", systemImage: "power")
+            Label("Quit ExtendCast", systemImage: "power")
         }
         .onAppear {
             client.refreshManualConnectionAvailabilityIfNeeded()
@@ -339,8 +339,8 @@ struct GuidedTourOverlay: View {
 
     private let steps: [TourStep] = [
         TourStep(
-            title: "Welcome to BetterCast",
-            description: "Let's take a quick tour of the app. BetterCast turns any device into a wireless extended display for your Mac.",
+            title: "Welcome to ExtendCast",
+            description: "Let's take a quick tour of the app. ExtendCast turns any device into a wireless extended display for your Mac.",
             icon: "hand.wave.fill",
             sidebarTarget: nil,
             anchorKey: nil
@@ -354,7 +354,7 @@ struct GuidedTourOverlay: View {
         ),
         TourStep(
             title: "Receive Screen",
-            description: "BetterCast can also receive streams from other Macs. Start listening here and incoming video opens in a separate window.",
+            description: "ExtendCast can also receive streams from other Macs. Start listening here and incoming video opens in a separate window.",
             icon: "display.and.arrow.down",
             sidebarTarget: .receive,
             anchorKey: "sidebar_receive"
@@ -574,7 +574,7 @@ struct OnboardingView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 18))
                     .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
 
-                Text("Welcome to BetterCast")
+                Text("Welcome to ExtendCast")
                     .font(.system(size: 26, weight: .bold))
 
                 Text("A few permissions are needed to get started")
@@ -670,7 +670,7 @@ struct OnboardingView: View {
             icon: "record.circle",
             iconColor: .red,
             title: "Screen Recording",
-            description: "BetterCast needs Screen Recording permission to capture your display and stream it to receivers.",
+            description: "ExtendCast needs Screen Recording permission to capture your display and stream it to receivers.",
             isGranted: screenRecordingGranted,
             actionTitle: "Open Screen Recording Settings",
             action: {
@@ -691,7 +691,7 @@ struct OnboardingView: View {
             icon: "hand.point.up.left",
             iconColor: .blue,
             title: "Accessibility",
-            description: "Accessibility permission lets BetterCast relay mouse and keyboard input from your receivers back to this Mac.",
+            description: "Accessibility permission lets ExtendCast relay mouse and keyboard input from your receivers back to this Mac.",
             isGranted: accessibilityGranted,
             actionTitle: "Open Accessibility Settings",
             action: {
@@ -905,6 +905,26 @@ extension DashboardCard {
     }
 }
 
+struct CompactDisconnectButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(Color.red.opacity(isEnabled ? 1 : 0.45))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.red.opacity(configuration.isPressed ? 0.12 : 0.06))
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(Color.red.opacity(0.08), lineWidth: 0.5)
+            }
+    }
+}
+
 // MARK: - Sidebar (native List)
 
 struct SidebarView: View {
@@ -926,7 +946,7 @@ struct SidebarView: View {
                     .tourAnchor("sidebar_logs")
             }
         }
-        .navigationTitle("BetterCast")
+        .navigationTitle("ExtendCast")
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
             HStack {
@@ -937,7 +957,7 @@ struct SidebarView: View {
                         .font(.system(size: 11))
                 }
                 .buttonStyle(.borderless)
-                .help("Quit BetterCast")
+                .help("Quit ExtendCast")
                 Spacer()
             }
             .padding(.horizontal, 16)
@@ -1087,7 +1107,7 @@ struct DetailPanelView: View {
             Section("General") {
                 SettingsActionRow(
                     title: "Launch at Login",
-                    description: "Automatically open BetterCast after you sign in to this Mac."
+                    description: "Automatically open ExtendCast after you sign in to this Mac."
                 ) {
                     Toggle(
                         "",
@@ -1102,7 +1122,7 @@ struct DetailPanelView: View {
                 if launchAtLoginManager.needsApproval {
                     SettingsActionRow(
                         title: "Approval Required",
-                        description: "Allow BetterCast under Open at Login in macOS System Settings."
+                        description: "Allow ExtendCast under Open at Login in macOS System Settings."
                     ) {
                         Button("Open Login Items") {
                             launchAtLoginManager.openSystemSettings()
@@ -1124,10 +1144,8 @@ struct DetailPanelView: View {
                 } else {
                     ForEach(client.customResolutions, id: \.self) { resolution in
                         HStack {
-                            Text(resolution.name)
-                            Text("\(resolution.ppi) PPI")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            Text("\(resolution.name) · \(resolution.displaySizeLabel)")
+                                .lineLimit(1)
                             Spacer()
                             Button {
                                 customResolutionEditorRequest = CustomResolutionEditorRequest(
@@ -1162,7 +1180,7 @@ struct DetailPanelView: View {
             Section("Controls") {
                 SettingsActionRow(
                     title: "Screen Recording",
-                    description: "Open macOS Privacy & Security to allow BetterCast to capture displays."
+                    description: "Open macOS Privacy & Security to allow ExtendCast to capture displays."
                 ) {
                     Button("Open Settings") {
                         client.openPrivacySettings()
@@ -1179,7 +1197,7 @@ struct DetailPanelView: View {
                 }
 
                 SettingsActionRow(
-                    title: "Restart BetterCast",
+                    title: "Restart ExtendCast",
                     description: "Quit and reopen the app to apply permission or system-level changes."
                 ) {
                     Button("Restart") {
@@ -1209,7 +1227,7 @@ struct DetailPanelView: View {
 
             Section("About") {
                 LabeledContent("Version") {
-                    Text("BetterCast \(UpdateChecker.currentVersion)")
+                    Text("ExtendCast \(UpdateChecker.currentVersion)")
                         .foregroundStyle(.secondary)
                 }
 
@@ -1330,9 +1348,7 @@ struct DevicesView: View {
                                     Button("Disconnect") {
                                         client.disconnectConnection(display.id)
                                     }
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.small)
-                                    .tint(.red)
+                                    .buttonStyle(CompactDisconnectButtonStyle())
                                 }
                                 .padding(.vertical, 4)
 
@@ -1362,10 +1378,10 @@ struct DevicesView: View {
 
                                     Spacer()
 
-                                    Button("Configure") {
+                                    Button("Settings") {
                                         selection = .discovered(service.name)
                                     }
-                                    .buttonStyle(.borderedProminent)
+                                    .buttonStyle(.bordered)
                                     .controlSize(.small)
                                 }
                                 .padding(.vertical, 4)
@@ -2006,6 +2022,69 @@ struct DeviceDetailView: View {
         self._selection = selection
     }
 
+    private var applyButton: some View {
+        Button {
+            if client.applySettings(for: display.id) {
+                selection = .devices
+            }
+        } label: {
+            Text(client.pendingSettingsRequireReconnect(for: display.id) ? "Apply & Reconnect" : "Apply")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.blue)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(Color.primary.opacity(0.14), lineWidth: 0.5)
+                }
+        }
+        .buttonStyle(.plain)
+        .disabled(!client.hasPendingSettings(for: display.id))
+        .opacity(client.hasPendingSettings(for: display.id) ? 1 : 0.45)
+        .help("Apply Settings")
+    }
+
+    private var disconnectButton: some View {
+        Button("Disconnect") {
+            client.disconnectConnection(display.id)
+            selection = .devices
+        }
+        .buttonStyle(CompactDisconnectButtonStyle())
+    }
+
+    private var connectionStatusBar: some View {
+        Form {
+            Section {
+                HStack(spacing: 10) {
+                    Circle()
+                        .fill(.green)
+                        .frame(width: 8, height: 8)
+
+                    Text("Connected")
+                        .font(.system(size: 13, weight: .semibold))
+
+                    Text(display.resolution)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    applyButton
+                    disconnectButton
+                }
+                .padding(.vertical, 2)
+            }
+        }
+        .formStyle(.grouped)
+        .scrollDisabled(true)
+        .frame(height: 82)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
     var body: some View {
         Form {
             DeviceStreamSettingsSections(
@@ -2018,8 +2097,8 @@ struct DeviceDetailView: View {
                     get: { client.isAutoConnectEnabled(for: display.id) },
                     set: { client.setAutoConnectEnabled($0, for: display.id) }
                 ),
-                modeDisabled: true,
-                protocolDisabled: true
+                modeDisabled: false,
+                protocolDisabled: client.isProtocolLocked(for: display.id)
             )
 
             Section("Arrangement") {
@@ -2048,22 +2127,11 @@ struct DeviceDetailView: View {
                 }
             }
 
-            Section {
-                HStack(spacing: 10) {
-                    Button("Apply Settings") {
-                        client.updateStreamResolution()
-                    }
-                    .buttonStyle(.borderedProminent)
-
-                    Button("Disconnect") {
-                        client.disconnectConnection(display.id)
-                        selection = .devices
-                    }
-                    .tint(.red)
-                }
-            }
         }
         .formStyle(.grouped)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            connectionStatusBar
+        }
         .navigationTitle(display.name)
         .toolbar {
             ToolbarItem(placement: .navigation) {
@@ -2114,7 +2182,11 @@ struct DeviceStreamSettingsSections: View {
                         Text("UDP (Faster, P2P only)").tag("UDP")
                     }
                     .disabled(protocolDisabled)
-                    InfoTip(text: "TCP is reliable and works everywhere. UDP can reduce latency on P2P links but may lose frames.")
+                    InfoTip(
+                        text: protocolDisabled
+                            ? "Manual IP and ADB connections use TCP. Other connection settings remain editable while connected."
+                            : "TCP is reliable and works everywhere. UDP can reduce latency on P2P links but may lose frames."
+                    )
                 }
             }
 
@@ -2130,7 +2202,8 @@ struct DeviceStreamSettingsSections: View {
                 HStack {
                     Picker("Dimensions", selection: $client.selectedResolution) {
                         ForEach(client.availableResolutions, id: \.self) { resolution in
-                            Text(resolution.name).tag(resolution)
+                            Text("\(resolution.name) · \(resolution.displaySizeLabel)")
+                                .tag(resolution)
                         }
                     }
                     .disabled(!client.useVirtualDisplay)
@@ -2230,6 +2303,15 @@ struct CustomResolutionEditor: View {
         }
     }
 
+    private var equivalentDisplaySize: String {
+        let diagonal = VirtualDisplayManager.Resolution.equivalentDiagonalInches(
+            width: width,
+            height: height,
+            ppi: ppi
+        )
+        return String(format: "%.1f″", diagonal)
+    }
+
     private var validationMessage: String {
         if isDuplicate {
             return "This resolution already exists."
@@ -2249,7 +2331,7 @@ struct CustomResolutionEditor: View {
         if trimmedLabel.contains("(") || trimmedLabel.contains(")") {
             return "Label cannot contain parentheses."
         }
-        return "The option will appear as \(width) x \(height) (\(trimmedLabel)), \(ppi) PPI."
+        return "macOS will recognize this as approximately a \(equivalentDisplaySize) display when Retina is enabled. Standard mode uses up to 110 PPI."
     }
 
     var body: some View {
@@ -2269,9 +2351,13 @@ struct CustomResolutionEditor: View {
                         .textFieldStyle(.roundedBorder)
                 }
                 GridRow {
-                    Text("PPI")
-                    TextField("PPI", value: $ppi, format: .number.grouping(.never))
-                        .textFieldStyle(.roundedBorder)
+                    Text("Pixel Density")
+                    HStack(spacing: 6) {
+                        TextField("Density", value: $ppi, format: .number.grouping(.never))
+                            .textFieldStyle(.roundedBorder)
+                        Text("PPI")
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 GridRow {
                     Text("Label")
@@ -2888,9 +2974,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
            let profiles = try? JSONDecoder().decode([String: ReceiverSettings].self, from: profilesData) {
             receiverProfiles = profiles
         }
-        if let historyData = defaults.data(forKey: PreferenceKey.manualConnectionHistory),
-           let history = try? JSONDecoder().decode([ManualConnectionHistoryItem].self, from: historyData) {
-            manualConnectionHistory = history
+        if let historyData = defaults.data(forKey: PreferenceKey.manualConnectionHistory) {
+            if let history = try? JSONDecoder().decode(
+                [ManualConnectionHistoryItem].self,
+                from: historyData
+            ) {
+                manualConnectionHistory = history
+            }
         }
 
         LogManager.shared.log("Sender: App Starting")
@@ -3021,7 +3111,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         if !resolutions.contains(selectedResolution) {
             resolutions.append(selectedResolution)
         }
-        return resolutions
+        return resolutions.sorted {
+            if $0.width != $1.width {
+                return $0.width < $1.width
+            }
+            return $0.height < $1.height
+        }
     }
 
     private func persistCustomResolutions() {
@@ -3280,6 +3375,19 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         if let data = try? JSONEncoder().encode(manualConnectionHistory) {
             UserDefaults.standard.set(data, forKey: PreferenceKey.manualConnectionHistory)
         }
+    }
+
+    private func rememberSuccessfulManualConnection(for service: DiscoveredService) {
+        guard case .hostPort(let host, let port) = service.endpoint,
+              service.name == "\(host):\(port.rawValue)" else {
+            return
+        }
+
+        rememberManualConnection(
+            host: String(describing: host),
+            port: port.rawValue
+        )
+        manualConnectionAvailability[service.name.lowercased()] = .available
     }
 
     func selectManualConnection(_ item: ManualConnectionHistoryItem) {
@@ -3729,14 +3837,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     timeoutWork.cancel() // Connection succeeded, cancel timeout
                     self?.connectingServiceNames.remove(service.name)
 
-                    if case .hostPort(let host, let port) = service.endpoint,
-                       service.name == "\(host):\(port.rawValue)" {
-                        self?.rememberManualConnection(
-                            host: String(describing: host),
-                            port: port.rawValue
-                        )
-                        self?.manualConnectionAvailability[service.name.lowercased()] = .available
-                    }
+                    self?.rememberSuccessfulManualConnection(for: service)
 
                     // Detect link type before creating pipeline
                     var isP2P = false
@@ -4187,6 +4288,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 switch state {
                 case .ready:
                     self?.connectingServiceNames.remove(service.name)
+                    self?.rememberSuccessfulManualConnection(for: service)
                     // Detect link type
                     var isP2P = false
                     var isLoopback = false
@@ -4305,7 +4407,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         // Reset Screen Recording
         let screenCapture = Process()
         screenCapture.executableURL = URL(fileURLWithPath: BCConstants.tccutilPath)
-        screenCapture.arguments = ["reset", "ScreenCapture", "com.bettercast.sender"]
+        screenCapture.arguments = ["reset", "ScreenCapture", "com.extendcast.app"]
         do {
             try screenCapture.run()
             screenCapture.waitUntilExit()
@@ -4323,7 +4425,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         // Reset Accessibility (for mouse/keyboard control)
         let accessibility = Process()
         accessibility.executableURL = URL(fileURLWithPath: BCConstants.tccutilPath)
-        accessibility.arguments = ["reset", "Accessibility", "com.bettercast.sender"]
+        accessibility.arguments = ["reset", "Accessibility", "com.extendcast.app"]
         do {
             try accessibility.run()
             accessibility.waitUntilExit()
@@ -4370,57 +4472,120 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     // MARK: - Dynamic Updates
-    private var updateDebounceWork: DispatchWorkItem?
-
-    func updateStreamResolution() {
-        // Debounce: cancel any pending update and schedule a new one
-        updateDebounceWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.performUpdateStreamResolution()
+    func isProtocolLocked(for connectionId: UUID) -> Bool {
+        guard let service = pipelines[connectionId]?.service else { return true }
+        if case .hostPort = service.endpoint {
+            return true
         }
-        updateDebounceWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+        return false
     }
 
-    private func performUpdateStreamResolution() {
-        // Seamlessly update resolution while keeping connections alive.
-        LogManager.shared.log("Sender: Updating Resolution dynamically for all pipelines...")
+    private func editedSettings(for connectionId: UUID) -> ReceiverSettings? {
+        guard pipelines[connectionId] != nil else { return nil }
 
-        // 1. Stop stream components while preserving the virtual display identity.
-        for (id, pipeline) in pipelines {
-            var updatedSettings = currentReceiverSettings()
-            updatedSettings.audioStreamingEnabled =
-                connectedDisplays.first(where: { $0.id == id })?.audioEnabled
-                ?? updatedSettings.audioStreamingEnabled
-            pipelines[id]?.settings = updatedSettings
-            saveSettings(updatedSettings, for: pipeline.service)
+        var settings = currentReceiverSettings()
+        settings.audioStreamingEnabled =
+            connectedDisplays.first(where: { $0.id == connectionId })?.audioEnabled
+            ?? settings.audioStreamingEnabled
+        return settings
+    }
 
-            pipeline.screenRecorder?.stopCapture()
-            pipelines[id]?.screenRecorder = nil
-            pipelines[id]?.videoEncoder = nil
-            pipelines[id]?.audioEncoder = nil
+    func hasPendingSettings(for connectionId: UUID) -> Bool {
+        guard let pipeline = pipelines[connectionId],
+              let editedSettings = editedSettings(for: connectionId) else {
+            return false
+        }
+        return pipeline.settings != editedSettings
+    }
 
-            if updatedSettings.useVirtualDisplay, let displayManager = pipeline.virtualDisplayManager {
-                let resolution = virtualDisplayResolution(for: id)
-                if !displayManager.updateDisplay(resolution: resolution, refreshRate: updatedSettings.fps) {
-                    displayManager.destroyDisplay()
-                    pipelines[id]?.virtualDisplayManager = nil
-                    InputHandler.shared.removeDisplayBounds(for: id)
-                    LogManager.shared.log("Sender: In-place display update failed; will recreate for \(pipeline.service.name)")
-                }
-            } else if let displayManager = pipeline.virtualDisplayManager {
-                displayManager.destroyDisplay()
-                pipelines[id]?.virtualDisplayManager = nil
-                InputHandler.shared.removeDisplayBounds(for: id)
-            }
+    func pendingSettingsRequireReconnect(for connectionId: UUID) -> Bool {
+        guard let pipeline = pipelines[connectionId],
+              let editedSettings = editedSettings(for: connectionId) else {
+            return false
+        }
+        return pipeline.settings.connectionType != editedSettings.connectionType
+            || pipeline.settings.interfacePreferenceRawValue
+                != editedSettings.interfacePreferenceRawValue
+    }
+
+    /// Applies the current form values to one connection.
+    /// - Returns: `true` when changing transport settings requires a reconnect.
+    @discardableResult
+    func applySettings(for connectionId: UUID) -> Bool {
+        guard let pipeline = pipelines[connectionId],
+              let updatedSettings = editedSettings(for: connectionId) else {
+            return false
         }
 
-        // 2. Restart stream components with the new settings.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self = self else { return }
-            for id in self.pipelines.keys {
-                self.startPipeline(for: id)
+        let connectionSettingsChanged = pendingSettingsRequireReconnect(for: connectionId)
+
+        saveSettings(updatedSettings, for: pipeline.service)
+        performApplySettings(
+            updatedSettings,
+            to: connectionId,
+            reconnect: connectionSettingsChanged
+        )
+        objectWillChange.send()
+        return connectionSettingsChanged
+    }
+
+    private func performApplySettings(
+        _ updatedSettings: ReceiverSettings,
+        to connectionId: UUID,
+        reconnect: Bool
+    ) {
+        guard let pipeline = pipelines[connectionId] else { return }
+
+        if reconnect {
+            let service = pipeline.service
+            LogManager.shared.log(
+                "Sender: Connection settings changed for \(service.name); reconnecting..."
+            )
+            removeConnection(connectionId)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                guard let self else { return }
+                if case .hostPort = service.endpoint {
+                    self.connectManualService(service)
+                } else {
+                    self.connect(to: service)
+                }
             }
+            return
+        }
+
+        LogManager.shared.log(
+            "Sender: Applying stream settings for \(pipeline.service.name)..."
+        )
+        pipelines[connectionId]?.settings = updatedSettings
+        pipeline.screenRecorder?.stopCapture()
+        pipelines[connectionId]?.screenRecorder = nil
+        pipelines[connectionId]?.videoEncoder = nil
+        pipelines[connectionId]?.audioEncoder = nil
+
+        if updatedSettings.useVirtualDisplay,
+           let displayManager = pipeline.virtualDisplayManager {
+            let resolution = virtualDisplayResolution(for: connectionId)
+            if !displayManager.updateDisplay(
+                resolution: resolution,
+                refreshRate: updatedSettings.fps
+            ) {
+                displayManager.destroyDisplay()
+                pipelines[connectionId]?.virtualDisplayManager = nil
+                InputHandler.shared.removeDisplayBounds(for: connectionId)
+                LogManager.shared.log(
+                    "Sender: In-place display update failed; will recreate for " +
+                    pipeline.service.name
+                )
+            }
+        } else if let displayManager = pipeline.virtualDisplayManager {
+            displayManager.destroyDisplay()
+            pipelines[connectionId]?.virtualDisplayManager = nil
+            InputHandler.shared.removeDisplayBounds(for: connectionId)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self, self.pipelines[connectionId] != nil else { return }
+            self.startPipeline(for: connectionId)
         }
     }
 
@@ -4692,7 +4857,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             height: height,
             ppi: descriptorPPI,
             hiDPI: settings.retinaEnabled,
-            name: "BetterCast Display (\(serviceName))"
+            name: "ExtendCast Display (\(serviceName))"
         )
     }
 
@@ -4718,7 +4883,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 // This prevents macOS from restoring a cached 1x/2x mode from
                 // the other setting while preserving layout within each mode.
                 let densityIdentity = resolution.hiDPI ? "retina" : "standard"
-                let displayManager = VirtualDisplayManager(identity: "\(serviceName)|\(densityIdentity)")
+                let receiverIdentity = pipelines[connectionId]
+                    .map { receiverProfileKey(for: $0.service) }
+                    ?? "name:unknown"
+                let displayManager = VirtualDisplayManager(
+                    identity: "\(receiverIdentity)|\(densityIdentity)"
+                )
                 if let displayID = displayManager.createDisplay(
                     resolution: resolution,
                     refreshRate: pipelineSettings.fps

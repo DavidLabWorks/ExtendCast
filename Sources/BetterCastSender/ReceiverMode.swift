@@ -48,7 +48,7 @@ class ReceiverWindowController {
             backing: .buffered,
             defer: false
         )
-        w.title = "BetterCast — Receiving"
+        w.title = "ExtendCast — Receiving"
         w.backgroundColor = .black
         w.isReleasedWhenClosed = false
         w.contentMinSize = NSSize(width: 320, height: 180)
@@ -146,9 +146,9 @@ class ReceiverWindowController {
     func updateTitle(senderCount: Int) {
         guard let w = window else { return }
         if senderCount > 0 {
-            w.title = "BetterCast — \(senderCount) sender\(senderCount == 1 ? "" : "s")"
+            w.title = "ExtendCast — \(senderCount) sender\(senderCount == 1 ? "" : "s")"
         } else {
-            w.title = "BetterCast — Receiving"
+            w.title = "ExtendCast — Receiving"
         }
     }
 }
@@ -242,7 +242,7 @@ struct ReceiverModeView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Start Listening at Launch")
                                 .font(.system(size: 14, weight: .semibold))
-                            Text("Automatically start receiver listening when BetterCast opens.")
+                            Text("Automatically start receiver listening when ExtendCast opens.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

@@ -58,5 +58,9 @@ let package = Package(
                 .linkedFramework("AVFoundation")
             ]
         ),
+        .testTarget(
+            name: "BetterCastSenderTests",
+            dependencies: ["BetterCastSender"]
+        ),
     ]
 )

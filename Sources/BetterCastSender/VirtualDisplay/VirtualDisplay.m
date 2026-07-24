@@ -51,12 +51,14 @@ id createVirtualDisplay(int width, int height, int ppi, BOOL hiDPI, NSString *na
     descriptor.maxPixelsHigh = height;
     descriptor.maxPixelsWide = width;
     descriptor.sizeInMillimeters = CGSizeMake(25.4 * width / ppi, 25.4 * height / ppi);
-    // Newer macOS releases use both serial fields when restoring a display's
-    // saved mode. Match Chromium's current CGVirtualDisplay descriptor setup.
+    // Keep the legacy BetterCast identity tuple so existing macOS display
+    // layouts and ColorSync profiles survive the ExtendCast bundle migration.
+    // The serial is unique per receiver/density mode and the vendor is non-zero,
+    // satisfying the requirements of newer macOS releases.
     descriptor.serialNum = serialNum;
     descriptor.serialNumber = serialNum;
-    descriptor.productID = 0;
-    descriptor.vendorID = 505;
+    descriptor.productID = serialNum;
+    descriptor.vendorID = 1;
     descriptor.terminationHandler = nil;
 
     CGVirtualDisplay *display = [[CGVirtualDisplay alloc] initWithDescriptor:descriptor];

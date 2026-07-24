@@ -9,7 +9,7 @@ VERSION="v15.1-custom"
 SIGN_IDENTITY="${SIGN_IDENTITY:-Apple Development: ruobin521@gmail.com (JWP5TQ78Q7)}"
 
 echo "============================================"
-echo "  Building BetterCast $VERSION (Apple Silicon)"
+echo "  Building ExtendCast $VERSION (Apple Silicon)"
 echo "============================================"
 mkdir -p ".build/module-cache" ".build/swiftpm-cache" ".build/swiftpm-config" ".build/swiftpm-security"
 CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache" \
@@ -23,13 +23,13 @@ swift build -c release --product BetterCastSender --arch arm64 \
 
 # Define Paths
 BUILD_DIR=".build/arm64-apple-macosx/release"
-APP_NAME="BetterCast.app"
+APP_NAME="ExtendCast.app"
 
 # Clean the previous app and any legacy packaging artifacts.
-rm -rf "$APP_NAME" "BetterCastSender.app" "dmg_staging" "BetterCast.dmg" "BetterCast-v15.1-custom.zip"
+rm -rf "$APP_NAME" "BetterCast.app" "BetterCastSender.app" "dmg_staging" "BetterCast.dmg" "BetterCast-v15.1-custom.zip"
 
 # ============================================
-# BetterCast App (unified sender + receiver)
+# ExtendCast App (unified sender + receiver)
 # ============================================
 echo "Creating $APP_NAME..."
 mkdir -p "$APP_NAME/Contents/MacOS"
@@ -50,6 +50,6 @@ echo "App:"
 echo "  - $APP_NAME (signed: $SIGN_IDENTITY)"
 echo ""
 echo "Installation:"
-echo "  1. Copy BetterCast.app to Applications"
+echo "  1. Copy ExtendCast.app to Applications"
 echo "  2. Grant Screen Recording permission when prompted"
 echo "  3. Grant Accessibility permission when prompted"

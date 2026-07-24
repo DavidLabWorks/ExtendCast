@@ -12,6 +12,19 @@ class VirtualDisplayManager {
         let ppi: Int
         let hiDPI: Bool
         let name: String
+
+        var equivalentDiagonalInches: Double {
+            Self.equivalentDiagonalInches(width: width, height: height, ppi: ppi)
+        }
+
+        var displaySizeLabel: String {
+            String(format: "%.1f″", equivalentDiagonalInches)
+        }
+
+        static func equivalentDiagonalInches(width: Int, height: Int, ppi: Int) -> Double {
+            guard ppi > 0 else { return 0 }
+            return hypot(Double(width), Double(height)) / Double(ppi)
+        }
     }
     
     static let defaultResolutions: [Resolution] = [
@@ -24,66 +37,17 @@ class VirtualDisplayManager {
         Resolution(width: 1440, height: 900, ppi: 127, hiDPI: false, name: "1440 x 900 (16:10)"),
     ]
     
-    private static let serialNumbersDefaultsKey = "virtualDisplaySerialNumbers"
-
     private var activeDisplay: Any?
     private(set) var displayID: CGDirectDisplayID?
     private(set) var activeResolution: Resolution?
     private(set) var activeRefreshRate: Int?
     private let serialNum: UInt32
     private var didSelectRequestedMode = false
-    private var colorSyncWorkaroundTask: DispatchWorkItem?
-    private var isUsingColorSyncWorkaround = false
 
     init(identity: String) {
-        self.serialNum = Self.persistentSerialNumber(for: identity)
+        self.serialNum = VirtualDisplayIdentity.serialNumber(for: identity)
     }
 
-    private func scheduleColorSyncWorkaround() {
-        colorSyncWorkaroundTask?.cancel()
-
-        let task = DispatchWorkItem { [weak self] in
-            guard let self, self.activeDisplay != nil, self.displayID != nil else { return }
-            ColorSyncWorkaround.shared.acquire()
-            self.isUsingColorSyncWorkaround = true
-        }
-        colorSyncWorkaroundTask = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: task)
-    }
-
-    private func releaseColorSyncWorkaround() {
-        colorSyncWorkaroundTask?.cancel()
-        colorSyncWorkaroundTask = nil
-
-        guard isUsingColorSyncWorkaround else { return }
-        isUsingColorSyncWorkaround = false
-        ColorSyncWorkaround.shared.release()
-    }
-
-    private static func persistentSerialNumber(for identity: String) -> UInt32 {
-        let normalizedIdentity = identity
-            .replacingOccurrences(of: #" \(\d+\)$"#, with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        let defaults = UserDefaults.standard
-        let storedValues = defaults.dictionary(forKey: serialNumbersDefaultsKey) ?? [:]
-
-        if let storedNumber = storedValues[normalizedIdentity] as? NSNumber {
-            return storedNumber.uint32Value
-        }
-
-        let usedSerialNumbers = Set(storedValues.values.compactMap { ($0 as? NSNumber)?.uint32Value })
-        var serialNumber: UInt32 = 1
-        while usedSerialNumbers.contains(serialNumber) {
-            serialNumber += 1
-        }
-
-        var updatedValues = storedValues
-        updatedValues[normalizedIdentity] = NSNumber(value: serialNumber)
-        defaults.set(updatedValues, forKey: serialNumbersDefaultsKey)
-        return serialNumber
-    }
-    
     /// Creates a virtual display with the specified resolution
     /// - Returns: The CGDirectDisplayID of the created virtual display, or nil if creation failed
     func createDisplay(resolution: Resolution, refreshRate: Int) -> CGDirectDisplayID? {
@@ -100,7 +64,8 @@ class VirtualDisplayManager {
     /// Creates a virtual display with custom parameters
     func createDisplay(width: Int, height: Int, ppi: Int, hiDPI: Bool, name: String, refreshRate: Int) -> CGDirectDisplayID? {
         LogManager.shared.log(
-            "VirtualDisplayManager: Requesting \(width)x\(height) @ \(refreshRate)Hz, HiDPI=\(hiDPI), descriptorPPI=\(ppi)"
+            "VirtualDisplayManager: Requesting \(width)x\(height) @ \(refreshRate)Hz, " +
+            "HiDPI=\(hiDPI), descriptorPPI=\(ppi), serial=\(serialNum)"
         )
 
         // Call the Objective-C function
@@ -126,7 +91,6 @@ class VirtualDisplayManager {
         // The CGVirtualDisplay object has a displayID property
         if let displayIDValue = (display as AnyObject).value(forKey: "displayID") as? UInt32 {
             self.displayID = displayIDValue
-            scheduleColorSyncWorkaround()
             LogManager.shared.log("VirtualDisplayManager: Created virtual display with ID \(displayIDValue)")
             return displayIDValue
         }
@@ -268,7 +232,6 @@ class VirtualDisplayManager {
     
     /// Destroys the currently active virtual display
     func destroyDisplay() {
-        releaseColorSyncWorkaround()
         activeDisplay = nil
         displayID = nil
         activeResolution = nil
