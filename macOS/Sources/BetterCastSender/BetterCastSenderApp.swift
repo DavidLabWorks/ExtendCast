@@ -1044,16 +1044,46 @@ private struct SidebarIcon: View {
 
     var body: some View {
         if usesSharedIcon,
-           let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "SidebarIcons"),
-           let image = NSImage(contentsOf: url) {
+           let url = sharedIconURL(named: name),
+           let image = NSImage(contentsOf: url),
+           image.isValid {
             Image(nsImage: image)
                 .renderingMode(.template)
                 .resizable()
                 .scaledToFit()
                 .frame(width: 17, height: 17)
         } else {
-            Image(systemName: name)
+            Image(systemName: fallbackSystemImageName(for: name))
                 .frame(width: 17, height: 17)
+        }
+    }
+
+    private func sharedIconURL(named name: String) -> URL? {
+        Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "SidebarIcons")
+            ?? Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Resources/SidebarIcons")
+            ?? Bundle.module.url(forResource: name, withExtension: "svg")
+    }
+
+    private func fallbackSystemImageName(for name: String) -> String {
+        switch name {
+        case "sidebar-sender":
+            return "paperplane"
+        case "sidebar-devices":
+            return "display.2"
+        case "sidebar-recent":
+            return "clock.arrow.circlepath"
+        case "sidebar-connect":
+            return "link"
+        case "sidebar-receiver":
+            return "display.and.arrow.down"
+        case "sidebar-settings":
+            return "gearshape"
+        case "sidebar-logs":
+            return "text.alignleft"
+        case "sidebar-power":
+            return "power"
+        default:
+            return name
         }
     }
 }
