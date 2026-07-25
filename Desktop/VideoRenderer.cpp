@@ -113,6 +113,7 @@ void VideoRenderer::paintGL() {
         }
 
         // Upload Y plane (tightly packed, stride == width)
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glBindTexture(GL_TEXTURE_2D, m_textureY);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_frameWidth, m_frameHeight,
                         GL_LUMINANCE, GL_UNSIGNED_BYTE, m_yBuffer);

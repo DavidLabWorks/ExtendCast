@@ -125,6 +125,9 @@ VideoWindow::~VideoWindow() {
 
 void VideoWindow::showForVideo() {
     if (isVisible()) {
+        if (m_renderer) {
+            m_renderer->show();
+        }
         raise();
         activateWindow();
         return;
@@ -153,6 +156,9 @@ void VideoWindow::showForVideo() {
     }
 
     resize(winW, winH);
+    if (m_renderer) {
+        m_renderer->show();
+    }
     show();
     positionFullscreenButton(true);
     LogManager::instance().log("Video window opened");
@@ -232,11 +238,6 @@ void VideoWindow::resizeEvent(QResizeEvent* event) {
 void VideoWindow::closeEvent(QCloseEvent* event) {
     if (isFullScreen()) {
         showNormal();
-    }
-    // Re-parent renderer back so it's not destroyed with us
-    if (m_renderer) {
-        m_renderer->setParent(nullptr);
-        m_renderer->hide();
     }
     emit windowClosed();
     QMainWindow::closeEvent(event);

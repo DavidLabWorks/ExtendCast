@@ -2,6 +2,7 @@
 #include "MainWindow.h"  // for LogManager
 #include <QDebug>
 #include <QtEndian>
+#include <cstring>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -201,16 +202,66 @@ void VideoDecoder::destroyDecoder() {
     m_currentHeight = 0;
 }
 
+QByteArray VideoDecoder::avccToAnnexB(const uint8_t* data, int size, int* naluCount) const {
+    QByteArray converted;
+    int offset = 0;
+    int count = 0;
+
+    while (offset + 4 <= size) {
+        const uint32_t naluLen = qFromBigEndian<uint32_t>(data + offset);
+        offset += 4;
+
+        if (naluLen == 0 || naluLen > static_cast<uint32_t>(size - offset)) {
+            converted.clear();
+            break;
+        }
+
+        static constexpr char kStartCode[] = {0x00, 0x00, 0x00, 0x01};
+        converted.append(kStartCode, sizeof(kStartCode));
+        converted.append(reinterpret_cast<const char*>(data + offset), static_cast<int>(naluLen));
+        offset += static_cast<int>(naluLen);
+        count++;
+    }
+
+    if (offset != size) {
+        converted.clear();
+    }
+
+    if (naluCount) {
+        *naluCount = converted.isEmpty() ? 0 : count;
+    }
+    return converted;
+}
+
 void VideoDecoder::decodeNalus(const uint8_t* data, int size) {
     static int sendCount = 0;
     static int outputCount = 0;
 
-    // Build a single packet with all NALUs (AVCC framing)
-    m_packet->data = const_cast<uint8_t*>(data);
-    m_packet->size = size;
+    int naluCount = 0;
+    QByteArray packetData = avccToAnnexB(data, size, &naluCount);
+    if (packetData.isEmpty()) {
+        LogManager::instance().log(QString("Decoder: invalid AVCC packet (%1 bytes), requesting keyframe").arg(size));
+        avcodec_flush_buffers(m_codecCtx);
+        emit keyframeNeeded();
+        return;
+    }
+
+    if (sendCount < 3) {
+        LogManager::instance().log(QString("Decoder: converted AVCC to Annex-B (%1 NALUs, %2 -> %3 bytes)")
+            .arg(naluCount).arg(size).arg(packetData.size()));
+    }
 
     sendCount++;
+    av_packet_unref(m_packet);
+    int packetRet = av_new_packet(m_packet, packetData.size());
+    if (packetRet < 0) {
+        LogManager::instance().log(QString("Decoder: av_new_packet failed: %1").arg(packetRet));
+        return;
+    }
+    memcpy(m_packet->data, packetData.constData(), packetData.size());
+
     int ret = avcodec_send_packet(m_codecCtx, m_packet);
+    av_packet_unref(m_packet);
     if (ret < 0) {
         if (sendCount <= 10 || sendCount % 100 == 0) {
             LogManager::instance().log(QString("Decoder: send_packet #%1 failed: %2")

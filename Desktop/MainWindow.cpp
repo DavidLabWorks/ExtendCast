@@ -1462,6 +1462,13 @@ void MainWindow::onConnectionEstablished() {
         m_videoWindow->showForVideo();
     }
 
+    QTimer::singleShot(200, this, [this]() {
+        if (!m_network->clients().isEmpty()) {
+            LogManager::instance().log("Receiver: Requesting keyframe for new connection");
+            m_network->sendInputEvent(InputEvent(InputEventType::Command, 0, 0, kIDRRequestKeyCode));
+        }
+    });
+
     m_recvStatusLabel->setText("Connected — video window opened");
     m_recvStatusLabel->setStyleSheet("font-size: 15px; font-weight: bold; color: #4caf50;");
 

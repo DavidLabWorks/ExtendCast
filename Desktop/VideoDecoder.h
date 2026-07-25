@@ -29,6 +29,7 @@ private:
     bool initDecoder(const uint8_t* sps, int spsLen, const uint8_t* pps, int ppsLen);
     void destroyDecoder();
     void decodeNalus(const uint8_t* data, int size);
+    QByteArray avccToAnnexB(const uint8_t* data, int size, int* naluCount = nullptr) const;
 
     AVCodecContext* m_codecCtx = nullptr;
     AVFrame* m_frame = nullptr;

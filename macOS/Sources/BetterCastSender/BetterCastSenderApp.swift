@@ -3219,6 +3219,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private var pipelines: [UUID: ConnectionPipeline] = [:]
     private var receiverProfiles: [String: ReceiverSettings] = [:]
     @Published private var autoConnectReceiverKeys: Set<String> = []
+    private var suppressedAutoConnectReceiverKeys: Set<String> = []
     private var manualAvailabilityProbes: [String: NWConnection] = [:]
     private var manualAvailabilityProbeGeneration = UUID()
     private var lastManualAvailabilityRefresh: Date?
@@ -3687,7 +3688,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         // Each receiver owns its auto-connect preference. Multiple available
         // receivers can connect in parallel.
-        for service in services where isAutoConnectEnabled(for: service) {
+        for service in services where shouldAutoConnect(to: service) {
             if connectedServices.contains(where: { $0.name == service.name })
                 || isConnecting(to: service) {
                 continue
@@ -3701,7 +3702,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 continue
             }
             LogManager.shared.log("Sender: Auto-connecting to \(service.name)")
-            connect(to: service)
+            connect(to: service, autoConnectAttempt: true)
         }
     }
 
@@ -4182,6 +4183,26 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         autoConnectReceiverKeys.contains(receiverProfileKey(for: service))
     }
 
+    private func shouldAutoConnect(to service: DiscoveredService) -> Bool {
+        let key = receiverProfileKey(for: service)
+        return autoConnectReceiverKeys.contains(key)
+            && !suppressedAutoConnectReceiverKeys.contains(key)
+    }
+
+    private func suppressAutoConnect(for service: DiscoveredService) {
+        let key = receiverProfileKey(for: service)
+        guard autoConnectReceiverKeys.contains(key) else { return }
+        suppressedAutoConnectReceiverKeys.insert(key)
+        LogManager.shared.log("Sender: Auto-connect paused for \(service.name) after manual disconnect")
+    }
+
+    private func resumeAutoConnect(for service: DiscoveredService) {
+        let key = receiverProfileKey(for: service)
+        if suppressedAutoConnectReceiverKeys.remove(key) != nil {
+            LogManager.shared.log("Sender: Auto-connect resumed for \(service.name)")
+        }
+    }
+
     func isAutoConnectEnabled(for connectionId: UUID) -> Bool {
         guard let service = pipelines[connectionId]?.service else { return false }
         return isAutoConnectEnabled(for: service)
@@ -4190,6 +4211,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     func setAutoConnectEnabled(_ enabled: Bool, for service: DiscoveredService) {
         let key = receiverProfileKey(for: service)
         if enabled {
+            suppressedAutoConnectReceiverKeys.remove(key)
             autoConnectReceiverKeys.insert(key)
             var updatedSettings = receiverProfiles[key] ?? currentReceiverSettings()
             if case .hostPort = service.endpoint {
@@ -4202,6 +4224,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         persistAutoConnectReceiverKeys()
 
         guard enabled,
+              !suppressedAutoConnectReceiverKeys.contains(key),
               !connectedServices.contains(where: { $0.name == service.name }),
               !isConnecting(to: service) else {
             return
@@ -4210,14 +4233,14 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         if case .hostPort = service.endpoint {
             if let item = manualConnectionHistory.first(where: { $0.displayName == service.name }) {
                 if manualConnectionAvailability[item.id] == .available {
-                    connectRecentManualConnection(item)
+                    connectRecentManualConnection(item, autoConnectAttempt: true)
                 } else {
                     refreshManualConnectionAvailability()
                 }
             }
         } else if foundServices.contains(where: { $0.name == service.name }) {
             LogManager.shared.log("Sender: Auto-connect enabled for available device \(service.name)")
-            connect(to: service)
+            connect(to: service, autoConnectAttempt: true)
         }
     }
 
@@ -4340,9 +4363,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
 
-    func connectRecentManualConnection(_ item: ManualConnectionHistoryItem) {
+    func connectRecentManualConnection(
+        _ item: ManualConnectionHistoryItem,
+        autoConnectAttempt: Bool = false
+    ) {
         selectManualConnection(item)
-        connectManual()
+        connectManual(autoConnectAttempt: autoConnectAttempt)
     }
 
     func connectedDisplayId(for item: ManualConnectionHistoryItem) -> UUID? {
@@ -4534,11 +4560,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 case .ready:
                     self.finishManualAvailabilityProbe(item.id, result: .available)
                     if let service = self.service(for: item),
-                       self.isAutoConnectEnabled(for: service),
+                       self.shouldAutoConnect(to: service),
                        !self.connectedServices.contains(where: { $0.name == service.name }),
                        !self.isConnecting(to: service) {
                         LogManager.shared.log("Sender: Auto-connecting to available recent device \(service.name)")
-                        self.connectRecentManualConnection(item)
+                        self.connectRecentManualConnection(item, autoConnectAttempt: true)
                     }
                 case .waiting(let error), .failed(let error):
                     if self.isLocalNetworkPermissionError(error) {
@@ -4797,12 +4823,21 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     func connect(
         to service: DiscoveredService,
         using interfacePreferenceOverride: NetworkInterfacePreference? = nil,
-        restoringSavedSettings: Bool = true
+        restoringSavedSettings: Bool = true,
+        autoConnectAttempt: Bool = false
     ) {
         // Check the display name first for a fast UI-level duplicate guard.
         if connectedServices.contains(where: { $0.name == service.name }) {
             LogManager.shared.log("Sender: Already connected to \(service.name)")
             return
+        }
+        if autoConnectAttempt {
+            guard shouldAutoConnect(to: service) else {
+                LogManager.shared.log("Sender: Auto-connect skipped for manually disconnected \(service.name)")
+                return
+            }
+        } else {
+            resumeAutoConnect(for: service)
         }
         let connectionId = UUID()
         guard let pendingKey = beginConnectionAttempt(
@@ -4949,7 +4984,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 self.connectWithParameters(
                     service: fallbackService,
                     parameters: fallbackParams,
-                    forceTCP: false
+                    forceTCP: false,
+                    autoConnectAttempt: autoConnectAttempt
                 )
             }
         }
@@ -5055,7 +5091,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     func connectManual(
-        using interfacePreferenceOverride: NetworkInterfacePreference? = nil
+        using interfacePreferenceOverride: NetworkInterfacePreference? = nil,
+        autoConnectAttempt: Bool = false
     ) {
         let host = manualHost.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else { return }
@@ -5109,25 +5146,35 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             LogManager.shared.log(
                 "Sender: Manual connect to \(host):\(portNum) via \(resolvedPreference.rawValue) / TCP"
             )
-            connectWithParameters(service: service, parameters: parameters, forceTCP: true)
+            connectWithParameters(
+                service: service,
+                parameters: parameters,
+                forceTCP: true,
+                autoConnectAttempt: autoConnectAttempt
+            )
         }
     }
 
     func connectManualService(
         _ service: DiscoveredService,
-        using interfacePreferenceOverride: NetworkInterfacePreference? = nil
+        using interfacePreferenceOverride: NetworkInterfacePreference? = nil,
+        autoConnectAttempt: Bool = false
     ) {
         guard case .hostPort(let host, let port) = service.endpoint else {
             connect(
                 to: service,
                 using: interfacePreferenceOverride,
-                restoringSavedSettings: false
+                restoringSavedSettings: false,
+                autoConnectAttempt: autoConnectAttempt
             )
             return
         }
         manualHost = String(describing: host)
         manualPort = String(port.rawValue)
-        connectManual(using: interfacePreferenceOverride)
+        connectManual(
+            using: interfacePreferenceOverride,
+            autoConnectAttempt: autoConnectAttempt
+        )
     }
 
     // MARK: - ADB Wireless
@@ -5416,10 +5463,23 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         connectWithParameters(service: service, parameters: parameters, forceTCP: true)
     }
 
-    private func connectWithParameters(service: DiscoveredService, parameters: NWParameters, forceTCP: Bool = false) {
+    private func connectWithParameters(
+        service: DiscoveredService,
+        parameters: NWParameters,
+        forceTCP: Bool = false,
+        autoConnectAttempt: Bool = false
+    ) {
         if connectedServices.contains(where: { $0.name == service.name }) {
             LogManager.shared.log("Sender: Already connected to \(service.name)")
             return
+        }
+        if autoConnectAttempt {
+            guard shouldAutoConnect(to: service) else {
+                LogManager.shared.log("Sender: Auto-connect skipped for manually disconnected \(service.name)")
+                return
+            }
+        } else {
+            resumeAutoConnect(for: service)
         }
         let connectionId = UUID()
         guard let pendingKey = beginConnectionAttempt(
@@ -5835,6 +5895,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         pendingConnectionsByID.values.forEach { $0.cancel() }
         pendingConnectionsByID.removeAll()
         for (id, pipeline) in pipelines {
+            suppressAutoConnect(for: pipeline.service)
             pipeline.screenRecorder?.stopCapture()
             pipeline.virtualDisplayManager?.destroyDisplay()
             pipeline.connection.cancel()
@@ -5849,12 +5910,16 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     func disconnectService(_ service: DiscoveredService) {
+        suppressAutoConnect(for: service)
         if let entry = pipelines.first(where: { $0.value.service.name == service.name }) {
             removeConnection(entry.key)
         }
     }
 
     func disconnectConnection(_ connectionId: UUID) {
+        if let service = pipelines[connectionId]?.service {
+            suppressAutoConnect(for: service)
+        }
         removeConnection(connectionId)
     }
 
