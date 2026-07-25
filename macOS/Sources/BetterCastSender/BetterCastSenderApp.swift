@@ -939,12 +939,13 @@ struct SidebarView: View {
         List {
             Section {
                 HStack(spacing: 8) {
-                    SidebarIcon(name: "sidebar-sender", usesSharedIcon: true)
-                        .foregroundColor(.secondary)
+                    SidebarIcon(name: "sidebar-sender", usesSharedIcon: true, size: 13)
                     Text("Sender")
                 }
-                .foregroundStyle(.primary)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 2)
                 .accessibilityAddTraits(.isHeader)
 
                 sidebarRow("Devices", icon: "sidebar-devices", tag: .devices, usesSharedIcon: true)
@@ -954,9 +955,10 @@ struct SidebarView: View {
                     .padding(.leading, 16)
                 sidebarRow("Connect", icon: "sidebar-connect", tag: .connect, usesSharedIcon: true)
                     .padding(.leading, 16)
+            }
 
+            Section {
                 sidebarRow("Receiver", icon: "sidebar-receiver", tag: .receive, usesSharedIcon: true)
-                    .padding(.top, 8)
                     .tourAnchor("sidebar_receive")
                 sidebarRow("Settings", icon: "sidebar-settings", tag: .settings, usesSharedIcon: true)
                     .tourAnchor("sidebar_settings")
@@ -998,7 +1000,10 @@ struct SidebarView: View {
         Button {
             selection = tag
         } label: {
-            Label {
+            HStack(alignment: .center, spacing: 8) {
+                SidebarIcon(name: icon, usesSharedIcon: usesSharedIcon)
+                    .foregroundColor(isSelected ? tint : .secondary)
+
                 if let subtitle = subtitle {
                     VStack(alignment: .leading) {
                         Text(title)
@@ -1009,9 +1014,6 @@ struct SidebarView: View {
                 } else {
                     Text(title)
                 }
-            } icon: {
-                SidebarIcon(name: icon, usesSharedIcon: usesSharedIcon)
-                    .foregroundColor(isSelected ? tint : .secondary)
             }
             .foregroundColor(isSelected ? tint : .primary)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1041,6 +1043,7 @@ struct SidebarView: View {
 private struct SidebarIcon: View {
     let name: String
     var usesSharedIcon = false
+    var size: CGFloat = 17
 
     var body: some View {
         if usesSharedIcon,
@@ -1051,10 +1054,10 @@ private struct SidebarIcon: View {
                 .renderingMode(.template)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 17, height: 17)
+                .frame(width: size, height: size)
         } else {
             Image(systemName: fallbackSystemImageName(for: name))
-                .frame(width: 17, height: 17)
+                .frame(width: size, height: size)
         }
     }
 
@@ -1135,16 +1138,37 @@ enum ReceiverDetailAvailability: Equatable {
     case available(id: String, name: String)
     case unavailable(id: String)
 
+    var receiverName: String? {
+        guard case .available(_, let name) = self else { return nil }
+        return name
+    }
+
     static func disconnectedReceiverName(
         from previous: ReceiverDetailAvailability,
-        to current: ReceiverDetailAvailability
+        to current: ReceiverDetailAvailability,
+        connectionIsActiveOrPending: Bool = false
     ) -> String? {
+        guard !connectionIsActiveOrPending else { return nil }
         guard case .available(let previousID, let name) = previous,
               case .unavailable(let currentID) = current,
               previousID == currentID else {
             return nil
         }
         return name
+    }
+
+    static func replacementConnectionID(
+        selectedID: UUID,
+        retainedDisplayName: String?,
+        currentDisplays: [ConnectedDisplayInfo]
+    ) -> UUID? {
+        guard !currentDisplays.contains(where: { $0.id == selectedID }),
+              let retainedDisplayName else {
+            return nil
+        }
+        return currentDisplays.first {
+            $0.name == retainedDisplayName
+        }?.id
     }
 }
 
@@ -1153,12 +1177,27 @@ private struct ReceiverDisconnectAlert: Identifiable {
     let receiverName: String
 }
 
+enum ReceiverDisconnectConfirmation {
+    static func shouldPresent(
+        receiverName: String,
+        selectedReceiverName: String?,
+        connectedReceiverNames: Set<String>,
+        connectionIsActivePendingOrReconnecting: Bool
+    ) -> Bool {
+        selectedReceiverName == receiverName
+            && !connectedReceiverNames.contains(receiverName)
+            && !connectionIsActivePendingOrReconnecting
+    }
+}
+
 struct DetailPanelView: View {
     @ObservedObject var client: NetworkClient
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var launchAtLoginManager = LaunchAtLoginManager()
     @State private var customResolutionEditorRequest: CustomResolutionEditorRequest?
     @State private var receiverDisconnectAlert: ReceiverDisconnectAlert?
+    @State private var receiverDisconnectConfirmationWorkItem: DispatchWorkItem?
+    @State private var pendingReceiverDisconnectName: String?
     @State private var retainedConnectedDisplaysByID: [UUID: ConnectedDisplayInfo] = [:]
     @State private var retainedDiscoveredServicesByName: [String: DiscoveredService] = [:]
     @Binding var selection: BetterCastSenderApp.SidebarSelection?
@@ -1168,16 +1207,92 @@ struct DetailPanelView: View {
     var body: some View {
         detailContent
             .onChange(of: receiverDetailAvailability) { previous, current in
-                guard receiverDisconnectAlert == nil,
-                      let receiverName = ReceiverDetailAvailability
-                        .disconnectedReceiverName(from: previous, to: current) else {
+                receiverDisconnectConfirmationWorkItem?.cancel()
+                receiverDisconnectConfirmationWorkItem = nil
+                pendingReceiverDisconnectName = nil
+
+                let receiverName = previous.receiverName
+                let connectionIsActiveOrPending = receiverName.flatMap {
+                    retainedDiscoveredServicesByName[$0]
+                }.map(client.hasActiveOrPendingConnection) ?? false
+                let connectionIsActivePendingOrReconnecting =
+                    connectionIsActiveOrPending
+                    || receiverName.map(client.isReconnecting) == true
+                guard let receiverName = ReceiverDetailAvailability
+                    .disconnectedReceiverName(
+                        from: previous,
+                        to: current,
+                        connectionIsActiveOrPending:
+                            connectionIsActivePendingOrReconnecting
+                    ) else {
                     return
                 }
-                receiverDisconnectAlert = ReceiverDisconnectAlert(
-                    receiverName: receiverName
+
+                pendingReceiverDisconnectName = receiverName
+                let confirmationWorkItem = DispatchWorkItem {
+                    let selectedReceiverName: String?
+                    switch selection {
+                    case .device(let id):
+                        selectedReceiverName =
+                            client.connectedDisplays.first { $0.id == id }?.name
+                            ?? retainedConnectedDisplaysByID[id]?.name
+                    case .discovered(let name):
+                        selectedReceiverName = name
+                    default:
+                        selectedReceiverName = nil
+                    }
+                    let retainedService =
+                        retainedDiscoveredServicesByName[receiverName]
+                    let connectionIsActiveOrPending = retainedService.map(
+                        client.hasActiveOrPendingConnection
+                    ) ?? false
+                    let shouldPresent =
+                        ReceiverDisconnectConfirmation.shouldPresent(
+                            receiverName: receiverName,
+                            selectedReceiverName: selectedReceiverName,
+                            connectedReceiverNames: Set(
+                                client.connectedDisplays.map(\.name)
+                            ),
+                            connectionIsActivePendingOrReconnecting:
+                                connectionIsActiveOrPending
+                                || client.isReconnecting(receiverName)
+                        )
+
+                    pendingReceiverDisconnectName = nil
+                    receiverDisconnectConfirmationWorkItem = nil
+                    guard shouldPresent,
+                          receiverDisconnectAlert == nil else {
+                        return
+                    }
+                    receiverDisconnectAlert = ReceiverDisconnectAlert(
+                        receiverName: receiverName
+                    )
+                }
+                receiverDisconnectConfirmationWorkItem = confirmationWorkItem
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + 0.8,
+                    execute: confirmationWorkItem
                 )
             }
             .onReceive(client.$connectedDisplays) { displays in
+                if let pendingReceiverDisconnectName,
+                   displays.contains(where: {
+                       $0.name == pendingReceiverDisconnectName
+                   }) {
+                    receiverDisconnectConfirmationWorkItem?.cancel()
+                    receiverDisconnectConfirmationWorkItem = nil
+                    self.pendingReceiverDisconnectName = nil
+                }
+                if case .device(let selectedID) = selection,
+                   let replacementID = ReceiverDetailAvailability
+                       .replacementConnectionID(
+                           selectedID: selectedID,
+                           retainedDisplayName:
+                               retainedConnectedDisplaysByID[selectedID]?.name,
+                           currentDisplays: displays
+                       ) {
+                    selection = .device(replacementID)
+                }
                 for display in displays {
                     retainedConnectedDisplaysByID[display.id] = display
                 }
@@ -1194,6 +1309,7 @@ struct DetailPanelView: View {
                 client.setFocusedBonjourServiceName(name)
             }
             .onDisappear {
+                receiverDisconnectConfirmationWorkItem?.cancel()
                 client.setFocusedBonjourServiceName(nil)
             }
             .alert(item: $receiverDisconnectAlert) { alert in
@@ -1254,6 +1370,10 @@ struct DetailPanelView: View {
         case .discovered(let name):
             let detailID = "discovered:\(name)"
             if client.foundServices.contains(where: { $0.name == name }) {
+                return .available(id: detailID, name: name)
+            }
+            if let retainedService = retainedDiscoveredServicesByName[name],
+               client.hasActiveOrPendingConnection(to: retainedService) {
                 return .available(id: detailID, name: name)
             }
             return .unavailable(id: detailID)
@@ -1526,7 +1646,7 @@ struct DevicesView: View {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(display.name)
                                             .font(.system(size: 13, weight: .medium))
-                                        Text(display.resolution)
+                                        Text(display.deviceListSubtitle)
                                             .font(.system(size: 11))
                                             .foregroundStyle(.secondary)
                                     }
@@ -2234,9 +2354,7 @@ struct DeviceDetailView: View {
 
     private var applyButton: some View {
         Button {
-            if client.applySettings(for: display.id) {
-                selection = .devices
-            }
+            client.applySettings(for: display.id)
         } label: {
             Text(client.pendingSettingsRequireReconnect(for: display.id) ? "Apply & Reconnect" : "Apply")
                 .font(.system(size: 12, weight: .medium))
@@ -2707,12 +2825,25 @@ struct DiscoveredDeviceView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("Connect") {
+                    Button {
                         connect(using: client.interfacePreference)
+                    } label: {
+                        if client.isConnecting(to: service) {
+                            HStack(spacing: 5) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Connecting…")
+                            }
+                        } else {
+                            Text("Connect")
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .disabled(!selectedModeIsAvailable)
+                    .disabled(
+                        !selectedModeIsAvailable
+                            || client.isConnecting(to: service)
+                    )
                     InfoTip(text: client.interfacePreference.connectHelp)
                 }
             }
@@ -2837,6 +2968,10 @@ struct ConnectedDisplayInfo: Identifiable {
     let displayBounds: CGRect
     var audioEnabled: Bool
     var cgDisplayID: CGDirectDisplayID? = nil
+
+    var deviceListSubtitle: String {
+        "\(resolution) · \(connectionMethod)"
+    }
 }
 
 struct DiscoveredNetworkInterface: Hashable {
@@ -3210,6 +3345,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private let backgroundBonjourReachabilityRecheckInterval: TimeInterval
     private let focusedBonjourReachabilityRecheckInterval: TimeInterval
     private let bonjourReachabilityProbe: BonjourReachabilityProbe
+    private let localConnectionAddressProvider: () -> [ReceiverConnectionAddress]
+    private let thunderboltPeerAddressProvider: () -> [String]
     private var focusedBonjourServiceName: String?
     private var browsedTCPServicesByName: [String: DiscoveredService] = [:]
     private var reachableTCPServiceNames: Set<String> = []
@@ -3230,6 +3367,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     @Published var connectedServices: [DiscoveredService] = []
     private var connectionRegistry = ReceiverConnectionRegistry()
     private var pendingConnectionsByID: [UUID: NWConnection] = [:]
+    private var reconnectingServiceNames: Set<String> = []
     @Published var useVirtualDisplay: Bool = true {
         didSet { persistSettings() }
     }
@@ -3724,13 +3862,21 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         discoveryRemovalDelay: TimeInterval = 8.0,
         bonjourReachabilityRecheckInterval: TimeInterval = 20.0,
         focusedBonjourReachabilityRecheckInterval: TimeInterval = 3.0,
-        bonjourReachabilityProbe: BonjourReachabilityProbe? = nil
+        bonjourReachabilityProbe: BonjourReachabilityProbe? = nil,
+        localConnectionAddressProvider: @escaping () -> [ReceiverConnectionAddress] = {
+            ReceiverConnectionAddressProvider.availableAddresses(port: 51820)
+        },
+        thunderboltPeerAddressProvider: @escaping () -> [String] = {
+            ThunderboltPeerAddressProvider.availableIPv4Addresses()
+        }
     ) {
         self.discoveryRemovalDelay = discoveryRemovalDelay
         backgroundBonjourReachabilityRecheckInterval =
             bonjourReachabilityRecheckInterval
         self.focusedBonjourReachabilityRecheckInterval =
             focusedBonjourReachabilityRecheckInterval
+        self.localConnectionAddressProvider = localConnectionAddressProvider
+        self.thunderboltPeerAddressProvider = thunderboltPeerAddressProvider
         self.bonjourReachabilityProbe = bonjourReachabilityProbe ?? { service, completion in
             let check = BonjourTCPReachabilityCheck(
                 service: service,
@@ -4144,10 +4290,39 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         if service.supportsEthernetConnection {
             modes.append(.ethernet)
         }
-        if service.supportsThunderboltConnection {
+        let hasActiveLocalThunderboltBridge = localConnectionAddressProvider()
+            .contains { $0.title == NetworkInterfacePreference.thunderboltBridge.connectTitle }
+        if service.supportsThunderboltConnection
+            || (lowercasedName.contains("windows") && hasActiveLocalThunderboltBridge) {
             modes.append(.thunderboltBridge)
         }
         return modes
+    }
+
+    static func preferredAutomaticConnectionMode(
+        receiverName: String,
+        availableModes: [NetworkInterfacePreference]
+    ) -> NetworkInterfacePreference {
+        guard receiverName.lowercased().contains("windows") else {
+            return .auto
+        }
+        if availableModes.contains(.thunderboltBridge) {
+            return .thunderboltBridge
+        }
+        if availableModes.contains(.ethernet) {
+            return .ethernet
+        }
+        return .auto
+    }
+
+    static func preferredThunderboltPeerHost(
+        receiverName: String,
+        availablePeerHosts: [String]
+    ) -> String? {
+        guard receiverName.lowercased().contains("windows") else { return nil }
+        let uniqueHosts = Array(Set(availablePeerHosts))
+        guard uniqueHosts.count == 1 else { return nil }
+        return uniqueHosts[0]
     }
 
     private func resolvedConnectionPreference(
@@ -4155,6 +4330,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         for service: DiscoveredService
     ) -> NetworkInterfacePreference {
         let availableModes = availableConnectionModes(for: service)
+        if preference == .auto {
+            return Self.preferredAutomaticConnectionMode(
+                receiverName: service.name,
+                availableModes: availableModes
+            )
+        }
         if availableModes.contains(preference) {
             return preference
         }
@@ -4388,6 +4569,16 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 endpoint: service.endpoint
             )
         )
+    }
+
+    func hasActiveOrPendingConnection(to service: DiscoveredService) -> Bool {
+        isConnecting(to: service)
+            || connectedServices.contains { $0.name == service.name }
+            || connectedDisplays.contains { $0.name == service.name }
+    }
+
+    func isReconnecting(_ serviceName: String) -> Bool {
+        reconnectingServiceNames.contains(serviceName)
     }
 
     private func beginConnectionAttempt(
@@ -4820,6 +5011,31 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
 
+    private func connectUsingInfrastructureFallback(
+        serviceName: String,
+        endpoint: NWEndpoint,
+        connectionType: String,
+        autoConnectAttempt: Bool
+    ) {
+        let parameters: NWParameters
+        if connectionType == "UDP" {
+            parameters = NWParameters.udp
+        } else {
+            let tcpOptions = NWProtocolTCP.Options()
+            tcpOptions.enableKeepalive = true
+            tcpOptions.noDelay = true
+            tcpOptions.connectionTimeout = 10
+            parameters = NWParameters(tls: nil, tcp: tcpOptions)
+        }
+        parameters.serviceClass = .interactiveVideo
+        connectWithParameters(
+            service: DiscoveredService(name: serviceName, endpoint: endpoint),
+            parameters: parameters,
+            forceTCP: false,
+            autoConnectAttempt: autoConnectAttempt
+        )
+    }
+
     func connect(
         to service: DiscoveredService,
         using interfacePreferenceOverride: NetworkInterfacePreference? = nil,
@@ -4857,8 +5073,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         let selectedConnectionType = selectedInterfacePreference.allowsUDP
             ? receiverSettings.connectionType ?? connectionType
             : "TCP"
+        let shouldFallbackToInfrastructure = requestedInterfacePreference == .auto
+            && selectedInterfacePreference != .auto
         receiverSettings.connectionType = selectedConnectionType
-        receiverSettings.interfacePreferenceRawValue = selectedInterfacePreference.rawValue
+        receiverSettings.interfacePreferenceRawValue =
+            requestedInterfacePreference == .auto
+                ? NetworkInterfacePreference.auto.rawValue
+                : selectedInterfacePreference.rawValue
         applyReceiverSettings(receiverSettings)
         saveSettings(receiverSettings, for: service)
 
@@ -4890,8 +5111,24 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         )
 
         // For Apple devices, prefer the P2P endpoint if available (AWDL low-latency)
-        var connectEndpoint = discoveredServicesByProtocol[selectedConnectionType]?[service.name]?.endpoint
+        let infrastructureEndpoint =
+            discoveredServicesByProtocol[selectedConnectionType]?[service.name]?.endpoint
             ?? service.endpoint
+        var connectEndpoint = infrastructureEndpoint
+        if selectedInterfacePreference == .thunderboltBridge,
+           let peerHost = Self.preferredThunderboltPeerHost(
+               receiverName: service.name,
+               availablePeerHosts: thunderboltPeerAddressProvider()
+           ),
+           let port = NWEndpoint.Port(rawValue: 51820) {
+            connectEndpoint = .hostPort(
+                host: NWEndpoint.Host(peerHost),
+                port: port
+            )
+            LogManager.shared.log(
+                "Sender: Using Thunderbolt Bridge peer \(peerHost):\(port.rawValue) for \(service.name)"
+            )
+        }
         let allowsAppleP2P = selectedInterfacePreference == .auto
             || selectedInterfacePreference == .p2pOnly
         if isAppleReceiver && allowsAppleP2P {
@@ -4941,8 +5178,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         let connection = NWConnection(to: connectEndpoint, using: parameters)
         trackPendingConnection(connection, connectionID: connectionId)
 
-        // Timeout: if connection is still not ready after 5s, retry without P2P
-        // This handles cases where AWDL negotiation hangs
+        // Automatic mode tries the preferred direct/wired route first, then
+        // retries without interface restrictions when that route is unavailable.
         var connectionTimedOut = false
         let timeoutWork = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
@@ -4955,7 +5192,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 )
                 connection.cancel()
 
-                if interfacePreferenceOverride != nil {
+                if !shouldFallbackToInfrastructure {
                     self.status = "Selected connection method unavailable"
                     LogManager.shared.log(
                         "Sender: Connection to \(service.name) timed out on explicitly selected \(selectedInterfacePreference.displayName)"
@@ -4963,28 +5200,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     return
                 }
 
-                LogManager.shared.log("Sender: Connection to \(service.name) timed out — retrying via infrastructure")
-
-                // Retry the same protocol without interface restrictions.
-                let fallbackParams: NWParameters
-                if selectedConnectionType == "UDP" {
-                    fallbackParams = NWParameters.udp
-                } else {
-                    let tcpOptions = NWProtocolTCP.Options()
-                    tcpOptions.enableKeepalive = true
-                    tcpOptions.noDelay = true
-                    tcpOptions.connectionTimeout = 10
-                    fallbackParams = NWParameters(tls: nil, tcp: tcpOptions)
-                }
-                fallbackParams.serviceClass = .interactiveVideo
-                let fallbackService = DiscoveredService(
-                    name: service.name,
-                    endpoint: connectEndpoint
+                LogManager.shared.log(
+                    "Sender: Preferred \(selectedInterfacePreference.displayName) route to \(service.name) timed out — retrying via infrastructure"
                 )
-                self.connectWithParameters(
-                    service: fallbackService,
-                    parameters: fallbackParams,
-                    forceTCP: false,
+                self.connectUsingInfrastructureFallback(
+                    serviceName: service.name,
+                    endpoint: infrastructureEndpoint,
+                    connectionType: selectedConnectionType,
                     autoConnectAttempt: autoConnectAttempt
                 )
             }
@@ -5071,6 +5293,18 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         receiverKey: pendingKey
                     )
                     LogManager.shared.log("Sender: Connection to \(service.name) failed: \(error)")
+                    if shouldFallbackToInfrastructure {
+                        LogManager.shared.log(
+                            "Sender: Preferred \(selectedInterfacePreference.displayName) route to \(service.name) failed — retrying via infrastructure"
+                        )
+                        self?.connectUsingInfrastructureFallback(
+                            serviceName: service.name,
+                            endpoint: infrastructureEndpoint,
+                            connectionType: selectedConnectionType,
+                            autoConnectAttempt: autoConnectAttempt
+                        )
+                        return
+                    }
                     self?.removeConnection(connectionId)
 
                     let remaining = self?.pipelines.count ?? 0
@@ -5787,6 +6021,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         if reconnect {
             let service = pipeline.service
+            reconnectingServiceNames.insert(service.name)
             LogManager.shared.log(
                 "Sender: Connection settings changed for \(service.name); reconnecting..."
             )
@@ -5798,6 +6033,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 } else {
                     self.connect(to: service)
                 }
+                self.reconnectingServiceNames.remove(service.name)
             }
             return
         }
@@ -5931,6 +6167,18 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
 
+    static func physicalConnectionMethod(
+        interfaceNames: [String]
+    ) -> String? {
+        let lowercasedNames = interfaceNames.map { $0.lowercased() }
+        if lowercasedNames.contains(where: {
+            $0.contains("bridge") || $0.contains("thunderbolt")
+        }) {
+            return "Thunderbolt Bridge"
+        }
+        return nil
+    }
+
     private func connectionMethodName(for pipeline: ConnectionPipeline) -> String {
         let serviceName = pipeline.service.name.lowercased()
         if serviceName.contains("android (usb)") {
@@ -5941,6 +6189,15 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
         if pipeline.isP2P || pipeline.connectionPreference == .p2pOnly {
             return "Wi-Fi Direct"
+        }
+        if pipeline.isLoopback {
+            return "Local Tunnel"
+        }
+        if let path = pipeline.connection.currentPath,
+           let physicalMethod = Self.physicalConnectionMethod(
+               interfaceNames: path.availableInterfaces.map(\.name)
+           ) {
+            return physicalMethod
         }
 
         switch pipeline.connectionPreference {
@@ -5968,7 +6225,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     return "Thunderbolt Bridge"
                 }
             }
-            return pipeline.isLoopback ? "Local Tunnel" : "Local Network"
+            return "Local Network"
         case .p2pOnly:
             return "Wi-Fi Direct"
         }

@@ -67,6 +67,21 @@ final class DiscoveryBehaviorTests: XCTestCase {
         )
     }
 
+    func testThunderboltPeerAddressesKeepOnlyUsableBridgeNeighbors() {
+        let output = """
+        ? (169.254.83.107) at (incomplete) on bridge0 [bridge]
+        ? (169.254.155.125) at 36:d1:62:9b:5c:c0 on bridge0 permanent [bridge]
+        ? (169.254.204.111) at e4:9c:49:7a:85:68 on bridge0 [ethernet]
+        ? (169.254.255.255) at ff:ff:ff:ff:ff:ff on bridge0 [bridge]
+        ? (224.0.0.251) at 1:0:5e:0:0:fb on bridge0 ifscope permanent [ethernet]
+        """
+
+        XCTAssertEqual(
+            ThunderboltPeerAddressProvider.parseARPOutput(output),
+            ["169.254.204.111"]
+        )
+    }
+
     func testReceiverDisconnectTransitionShowsAlertOnlyForSameDevice() {
         XCTAssertEqual(
             ReceiverDetailAvailability.disconnectedReceiverName(
@@ -78,6 +93,13 @@ final class DiscoveryBehaviorTests: XCTestCase {
         XCTAssertNil(
             ReceiverDetailAvailability.disconnectedReceiverName(
                 from: .available(id: "receiver-1", name: "Office PC"),
+                to: .unavailable(id: "receiver-1"),
+                connectionIsActiveOrPending: true
+            )
+        )
+        XCTAssertNil(
+            ReceiverDetailAvailability.disconnectedReceiverName(
+                from: .available(id: "receiver-1", name: "Office PC"),
                 to: .unavailable(id: "receiver-2")
             )
         )
@@ -85,6 +107,100 @@ final class DiscoveryBehaviorTests: XCTestCase {
             ReceiverDetailAvailability.disconnectedReceiverName(
                 from: .available(id: "receiver-1", name: "Office PC"),
                 to: .none
+            )
+        )
+    }
+
+    func testDisconnectConfirmationUsesCurrentStateAfterGracePeriod() {
+        XCTAssertTrue(
+            ReceiverDisconnectConfirmation.shouldPresent(
+                receiverName: "Office PC",
+                selectedReceiverName: "Office PC",
+                connectedReceiverNames: [],
+                connectionIsActivePendingOrReconnecting: false
+            )
+        )
+        XCTAssertFalse(
+            ReceiverDisconnectConfirmation.shouldPresent(
+                receiverName: "Office PC",
+                selectedReceiverName: "Office PC",
+                connectedReceiverNames: ["Office PC"],
+                connectionIsActivePendingOrReconnecting: false
+            )
+        )
+        XCTAssertFalse(
+            ReceiverDisconnectConfirmation.shouldPresent(
+                receiverName: "Office PC",
+                selectedReceiverName: "Office PC",
+                connectedReceiverNames: [],
+                connectionIsActivePendingOrReconnecting: true
+            )
+        )
+        XCTAssertFalse(
+            ReceiverDisconnectConfirmation.shouldPresent(
+                receiverName: "Office PC",
+                selectedReceiverName: nil,
+                connectedReceiverNames: [],
+                connectionIsActivePendingOrReconnecting: false
+            )
+        )
+    }
+
+    func testReceiverDetailFollowsSameDeviceAfterReconnectChangesConnectionID() {
+        let previousID = UUID()
+        let replacementID = UUID()
+        let replacement = ConnectedDisplayInfo(
+            id: replacementID,
+            name: "Office PC",
+            resolution: "1920x1080",
+            connectionMethod: "Thunderbolt Bridge",
+            displayBounds: .zero,
+            audioEnabled: true
+        )
+
+        XCTAssertEqual(
+            ReceiverDetailAvailability.replacementConnectionID(
+                selectedID: previousID,
+                retainedDisplayName: "Office PC",
+                currentDisplays: [replacement]
+            ),
+            replacementID
+        )
+        XCTAssertNil(
+            ReceiverDetailAvailability.replacementConnectionID(
+                selectedID: replacementID,
+                retainedDisplayName: "Office PC",
+                currentDisplays: [replacement]
+            )
+        )
+    }
+
+    func testConnectedDeviceListSubtitleIncludesConnectionMethod() {
+        let display = ConnectedDisplayInfo(
+            id: UUID(),
+            name: "Office PC",
+            resolution: "1920x1080",
+            connectionMethod: "Thunderbolt Bridge",
+            displayBounds: .zero,
+            audioEnabled: true
+        )
+
+        XCTAssertEqual(
+            display.deviceListSubtitle,
+            "1920x1080 · Thunderbolt Bridge"
+        )
+    }
+
+    func testBridgePathIsPresentedAsThunderboltConnection() {
+        XCTAssertEqual(
+            NetworkClient.physicalConnectionMethod(
+                interfaceNames: ["bridge0"]
+            ),
+            "Thunderbolt Bridge"
+        )
+        XCTAssertNil(
+            NetworkClient.physicalConnectionMethod(
+                interfaceNames: ["en0"]
             )
         )
     }
@@ -352,7 +468,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
     }
 
     func testEthernetDiscoveryDoesNotClaimThunderboltSupport() {
-        let client = NetworkClient()
+        let client = NetworkClient(localConnectionAddressProvider: { [] })
         let service = DiscoveredService(
             name: "Office PC (Windows)",
             endpoint: .service(
@@ -372,8 +488,8 @@ final class DiscoveryBehaviorTests: XCTestCase {
         )
     }
 
-    func testWindowsReceiverOnlyShowsDiscoveredConnectionModes() {
-        let client = NetworkClient()
+    func testWindowsReceiverOnlyShowsDiscoveredModesWithoutAnotherActiveInterface() {
+        let client = NetworkClient(localConnectionAddressProvider: { [] })
         let service = DiscoveredService(
             name: "Office PC (Windows)",
             endpoint: .service(
@@ -390,6 +506,95 @@ final class DiscoveryBehaviorTests: XCTestCase {
         XCTAssertEqual(
             client.availableConnectionModes(for: service),
             [.auto, .routerOnly]
+        )
+    }
+
+    func testActiveLocalThunderboltBridgeAddsModeForWindowsReceiverFoundOverWiFi() {
+        let client = NetworkClient(
+            localConnectionAddressProvider: {
+                [
+                    ReceiverConnectionAddress(
+                        interfaceName: "bridge0",
+                        title: "Thunderbolt Bridge",
+                        address: "169.254.204.112:51820",
+                        usageHint: "Connect directly over Thunderbolt.",
+                        priority: 20
+                    ),
+                ]
+            }
+        )
+        let service = DiscoveredService(
+            name: "Dang-Surface (Windows)",
+            endpoint: .service(
+                name: "Dang-Surface (Windows)",
+                type: "_bettercast._tcp",
+                domain: "local.",
+                interface: nil
+            ),
+            discoveryInterfaces: [
+                DiscoveredNetworkInterface(name: "en0", type: .wifi),
+            ]
+        )
+
+        XCTAssertEqual(
+            client.availableConnectionModes(for: service),
+            [.auto, .routerOnly, .thunderboltBridge]
+        )
+    }
+
+    func testWindowsAutomaticModePrefersThunderboltThenEthernet() {
+        XCTAssertEqual(
+            NetworkClient.preferredAutomaticConnectionMode(
+                receiverName: "Dang-Surface (Windows)",
+                availableModes: [.auto, .routerOnly, .ethernet, .thunderboltBridge]
+            ),
+            .thunderboltBridge
+        )
+        XCTAssertEqual(
+            NetworkClient.preferredAutomaticConnectionMode(
+                receiverName: "Office PC (Windows)",
+                availableModes: [.auto, .routerOnly, .ethernet]
+            ),
+            .ethernet
+        )
+        XCTAssertEqual(
+            NetworkClient.preferredAutomaticConnectionMode(
+                receiverName: "Office PC (Windows)",
+                availableModes: [.auto, .routerOnly]
+            ),
+            .auto
+        )
+    }
+
+    func testWindowsUsesOnlyUnambiguousThunderboltPeer() {
+        XCTAssertEqual(
+            NetworkClient.preferredThunderboltPeerHost(
+                receiverName: "Dang-Surface (Windows)",
+                availablePeerHosts: ["169.254.204.111"]
+            ),
+            "169.254.204.111"
+        )
+        XCTAssertNil(
+            NetworkClient.preferredThunderboltPeerHost(
+                receiverName: "Dang-Surface (Windows)",
+                availablePeerHosts: ["169.254.204.111", "169.254.204.112"]
+            )
+        )
+        XCTAssertNil(
+            NetworkClient.preferredThunderboltPeerHost(
+                receiverName: "Test iPad",
+                availablePeerHosts: ["169.254.204.111"]
+            )
+        )
+    }
+
+    func testAppleAutomaticModeKeepsPeerToPeerRoutingPolicy() {
+        XCTAssertEqual(
+            NetworkClient.preferredAutomaticConnectionMode(
+                receiverName: "Test iPad",
+                availableModes: [.auto, .p2pOnly, .thunderboltBridge]
+            ),
+            .auto
         )
     }
 

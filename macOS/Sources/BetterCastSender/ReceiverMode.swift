@@ -373,33 +373,61 @@ enum ReceiverConnectionAddressProvider {
     }
 }
 
+enum ThunderboltPeerAddressProvider {
+    static func availableIPv4Addresses() -> [String] {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/arp")
+        process.arguments = ["-an", "-i", "bridge0"]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0,
+                  let text = String(data: data, encoding: .utf8) else {
+                return []
+            }
+            return parseARPOutput(text)
+        } catch {
+            return []
+        }
+    }
+
+    static func parseARPOutput(_ output: String) -> [String] {
+        var addresses: [String] = []
+        for line in output.split(whereSeparator: \.isNewline) {
+            let fields = line.split(separator: " ")
+            guard fields.count >= 4,
+                  fields[1].first == "(",
+                  fields[1].last == ")",
+                  fields[2] == "at",
+                  fields[3].contains(":"),
+                  !fields[3].hasPrefix("ff:"),
+                  !line.contains(" permanent ") else {
+                continue
+            }
+            let address = fields[1].dropFirst().dropLast()
+            guard address.hasPrefix("169.254.") else { continue }
+            addresses.append(String(address))
+        }
+        return Array(Set(addresses)).sorted()
+    }
+}
+
 private struct ReceiverOnOffToggle: View {
     @Binding var isOn: Bool
     let accessibilityLabel: String
 
     var body: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.15)) {
-                isOn.toggle()
-            }
-        } label: {
-            Text(isOn ? "On" : "Off")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(isOn ? Color.white : Color.secondary)
-                .frame(width: 74, height: 32)
-                .background(isOn ? Color.green : Color.secondary.opacity(0.12))
-                .clipShape(Capsule())
-                .overlay {
-                    Capsule()
-                        .stroke(
-                            isOn ? Color.green.opacity(0.8) : Color.secondary.opacity(0.2),
-                            lineWidth: 1
-                        )
-                }
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(accessibilityLabel)
-        .accessibilityValue(isOn ? "On" : "Off")
+        Toggle(accessibilityLabel, isOn: $isOn)
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .accessibilityLabel(accessibilityLabel)
+            .accessibilityValue(isOn ? "On" : "Off")
     }
 }
 
