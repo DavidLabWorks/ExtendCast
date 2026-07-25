@@ -234,7 +234,9 @@ static QString classifyAddress(const QNetworkInterface& iface,
     const QString lowerName = name.toLower();
     const QString ip = address.toString();
 
-    if (containsAny(lowerName, {"mihomo", "meta tunnel", "clash", "proxy"})) {
+    if (ip.startsWith("198.18.") ||
+        ip.startsWith("198.19.") ||
+        containsAny(lowerName, {"mihomo", "meta tunnel", "clash", "proxy"})) {
         *usageHint = "Proxy tunnel; usually not reachable from local senders";
         *priority = 80;
         return "Proxy";
@@ -319,17 +321,17 @@ static QVector<LocalAddressInfo> receiverAddressInfos() {
         const QString lowerInterface = info.interfaceName.toLower();
         const bool isLinkLocal = info.ip.startsWith("169.254.");
         const bool isExcluded =
-            info.connectionLabel == "VPN" ||
             info.connectionLabel == "Virtual" ||
             info.connectionLabel == "Proxy" ||
             info.connectionLabel == "Bluetooth" ||
-            containsAny(lowerInterface, {"tailscale", "zerotier", "wireguard", "mihomo", "hyper-v", "vethernet"});
+            containsAny(lowerInterface, {"mihomo", "hyper-v", "vethernet"});
 
         if (isExcluded) continue;
 
         if (info.connectionLabel == "Wi-Fi" ||
             info.connectionLabel == "Ethernet" ||
-            info.connectionLabel == "Thunderbolt Bridge") {
+            info.connectionLabel == "Thunderbolt Bridge" ||
+            info.connectionLabel == "VPN") {
             result.append(info);
             continue;
         }
@@ -1005,44 +1007,6 @@ void MainWindow::setupReceivePage() {
     pageTitle->setStyleSheet("font-size: 26px; font-weight: bold; color: white;");
     layout->addWidget(pageTitle);
 
-    auto* pageDesc = new QLabel("Use one of the addresses below from the sending device.");
-    pageDesc->setMaximumWidth(680);
-    pageDesc->setStyleSheet("font-size: 13px; color: #9a9a9a;");
-    pageDesc->setWordWrap(true);
-    layout->addWidget(pageDesc);
-
-    auto* autoStartCard = makePanel();
-    autoStartCard->setMaximumWidth(680);
-    auto* autoStartRow = new QHBoxLayout(autoStartCard);
-    autoStartRow->setContentsMargins(24, 18, 24, 18);
-    autoStartRow->setSpacing(14);
-
-    auto* autoStartText = new QVBoxLayout();
-    autoStartText->setSpacing(4);
-    auto* autoStartTitle = new QLabel("Start Listening at Launch");
-    autoStartTitle->setStyleSheet("font-size: 13px; font-weight: 700; color: #f2f2f2;");
-    autoStartText->addWidget(autoStartTitle);
-    auto* autoStartDesc = new QLabel("Automatically start receiver listening when ExtendCast opens.");
-    autoStartDesc->setWordWrap(true);
-    autoStartDesc->setStyleSheet("font-size: 12px; color: #9a9a9a;");
-    autoStartText->addWidget(autoStartDesc);
-    autoStartRow->addLayout(autoStartText, 1);
-
-    m_receiverAutoStartToggle = new QPushButton(receiverAutoStartEnabledPreference() ? "On" : "Off");
-    m_receiverAutoStartToggle->setCheckable(true);
-    m_receiverAutoStartToggle->setChecked(receiverAutoStartEnabledPreference());
-    m_receiverAutoStartToggle->setCursor(Qt::PointingHandCursor);
-    m_receiverAutoStartToggle->setFixedSize(74, 32);
-    m_receiverAutoStartToggle->setStyleSheet(
-        "QPushButton { background-color: #2b2b2b; border: 1px solid #3a3a3a; border-radius: 16px; "
-        "color: #bdbdbd; font-size: 12px; font-weight: 700; padding: 0 12px; text-align: center; }"
-        "QPushButton:checked { background-color: #248a46; border-color: #2fbf62; color: white; }"
-        "QPushButton:hover { border-color: #555555; }");
-    connect(m_receiverAutoStartToggle, &QPushButton::toggled,
-            this, &MainWindow::onReceiverAutoStartToggled);
-    autoStartRow->addWidget(m_receiverAutoStartToggle, 0, Qt::AlignVCenter);
-    layout->addWidget(autoStartCard);
-
     auto* statusTitle = new QLabel("Status");
     statusTitle->setMaximumWidth(680);
     statusTitle->setStyleSheet("font-size: 14px; font-weight: 700; color: #a7a7a7; padding-top: 14px;");
@@ -1107,6 +1071,43 @@ void MainWindow::setupReceivePage() {
     listenLayout->addLayout(m_recvAddressListLayout);
 
     layout->addWidget(listenCard);
+
+    auto* settingsTitle = new QLabel("Settings");
+    settingsTitle->setMaximumWidth(680);
+    settingsTitle->setStyleSheet("font-size: 14px; font-weight: 700; color: #a7a7a7; padding-top: 8px;");
+    layout->addWidget(settingsTitle);
+
+    auto* autoStartCard = makePanel();
+    autoStartCard->setMaximumWidth(680);
+    auto* autoStartRow = new QHBoxLayout(autoStartCard);
+    autoStartRow->setContentsMargins(24, 18, 24, 18);
+    autoStartRow->setSpacing(14);
+
+    auto* autoStartText = new QVBoxLayout();
+    autoStartText->setSpacing(4);
+    auto* autoStartTitle = new QLabel("Start Listening at Launch");
+    autoStartTitle->setStyleSheet("font-size: 13px; font-weight: 700; color: #f2f2f2;");
+    autoStartText->addWidget(autoStartTitle);
+    auto* autoStartDesc = new QLabel("Automatically start receiver listening when ExtendCast opens.");
+    autoStartDesc->setWordWrap(true);
+    autoStartDesc->setStyleSheet("font-size: 12px; color: #9a9a9a;");
+    autoStartText->addWidget(autoStartDesc);
+    autoStartRow->addLayout(autoStartText, 1);
+
+    m_receiverAutoStartToggle = new QPushButton(receiverAutoStartEnabledPreference() ? "On" : "Off");
+    m_receiverAutoStartToggle->setCheckable(true);
+    m_receiverAutoStartToggle->setChecked(receiverAutoStartEnabledPreference());
+    m_receiverAutoStartToggle->setCursor(Qt::PointingHandCursor);
+    m_receiverAutoStartToggle->setFixedSize(74, 32);
+    m_receiverAutoStartToggle->setStyleSheet(
+        "QPushButton { background-color: #2b2b2b; border: 1px solid #3a3a3a; border-radius: 16px; "
+        "color: #bdbdbd; font-size: 12px; font-weight: 700; padding: 0 12px; text-align: center; }"
+        "QPushButton:checked { background-color: #248a46; border-color: #2fbf62; color: white; }"
+        "QPushButton:hover { border-color: #555555; }");
+    connect(m_receiverAutoStartToggle, &QPushButton::toggled,
+            this, &MainWindow::onReceiverAutoStartToggled);
+    autoStartRow->addWidget(m_receiverAutoStartToggle, 0, Qt::AlignVCenter);
+    layout->addWidget(autoStartCard);
 
     layout->addStretch();
 
@@ -1441,7 +1442,7 @@ void MainWindow::onReceiverListeningToggled(bool checked) {
         m_network->stop();
         m_receiverListening = false;
         if (m_recvStatusLabel) {
-            m_recvStatusLabel->setText("Listening is off");
+            m_recvStatusLabel->setText("Receiver is not listening");
             m_recvStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #9a9a9a;");
         }
         if (m_recvStatusDot) {
@@ -1782,26 +1783,19 @@ void MainWindow::updateLocalIpDisplay() {
         clearLayout(m_recvAddressListLayout);
     }
 
-    if (!m_receiverListening) {
-        if (m_recvStatusLabel) {
-            m_recvStatusLabel->setText("Listening is off");
+    if (m_recvStatusLabel) {
+        if (m_receiverListening) {
+            m_recvStatusLabel->setText(infos.isEmpty() ? "Waiting for network" : QString("Listening on port %1").arg(m_receiverPort));
+            m_recvStatusLabel->setToolTip(formatPrimaryHint(infos));
+        } else {
+            m_recvStatusLabel->setText("Receiver is not listening");
             m_recvStatusLabel->setToolTip("Turn on listening to receive connections.");
         }
-        if (m_recvIpLabel) {
-            m_recvIpLabel->show();
-            m_recvIpLabel->setText("Turn on listening to show available receiver addresses.");
-        }
-        return;
-    }
-
-    if (m_recvStatusLabel) {
-        m_recvStatusLabel->setText(infos.isEmpty() ? "Waiting for network" : QString("Listening on port %1").arg(m_receiverPort));
-        m_recvStatusLabel->setToolTip(formatPrimaryHint(infos));
     }
     if (m_recvIpLabel) {
         if (infos.isEmpty()) {
             m_recvIpLabel->show();
-            m_recvIpLabel->setText("No Wi-Fi, Ethernet, or Thunderbolt Bridge address is available.");
+            m_recvIpLabel->setText("No Wi-Fi, Ethernet, VPN, or Thunderbolt Bridge address is available.");
             return;
         }
 

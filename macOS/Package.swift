@@ -33,7 +33,8 @@ let package = Package(
                 .linkedFramework("Network"),
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("AVFoundation"),
-                .linkedFramework("ServiceManagement")
+                .linkedFramework("ServiceManagement"),
+                .linkedFramework("SystemConfiguration")
             ]
         ),
         .executableTarget(

@@ -2,6 +2,8 @@ import SwiftUI
 import Network
 import Combine
 import AppKit
+import Darwin
+import SystemConfiguration
 
 // MARK: - Receiver Video Window
 
@@ -225,6 +227,189 @@ class ReceiverManager: ObservableObject {
     }
 }
 
+// MARK: - Receiver Connection Addresses
+
+struct ReceiverConnectionAddress: Identifiable, Equatable {
+    let interfaceName: String
+    let title: String
+    let address: String
+    let usageHint: String
+    let priority: Int
+
+    var id: String { "\(interfaceName)-\(address)" }
+}
+
+enum ReceiverConnectionAddressProvider {
+    static func availableAddresses(port: UInt16) -> [ReceiverConnectionAddress] {
+        let displayNames = hardwarePortDisplayNames()
+
+        return interfaceIPv4Addresses().compactMap { interfaceName, address in
+            connectionAddress(
+                interfaceName: interfaceName,
+                displayName: displayNames[interfaceName],
+                address: address,
+                port: port
+            )
+        }
+        .sorted {
+            if $0.priority != $1.priority {
+                return $0.priority < $1.priority
+            }
+            if $0.title != $1.title {
+                return $0.title.localizedStandardCompare($1.title) == .orderedAscending
+            }
+            return $0.address.localizedStandardCompare($1.address) == .orderedAscending
+        }
+    }
+
+    static func connectionAddress(
+        interfaceName: String,
+        displayName: String?,
+        address: String,
+        port: UInt16
+    ) -> ReceiverConnectionAddress? {
+        let lowerInterface = interfaceName.lowercased()
+        let lowerDisplayName = displayName?.lowercased() ?? ""
+        let isProxyAddress = address.hasPrefix("198.18.")
+            || address.hasPrefix("198.19.")
+            || lowerDisplayName.contains("mihomo")
+            || lowerDisplayName.contains("clash")
+            || lowerDisplayName.contains("proxy")
+
+        guard !address.hasPrefix("127."),
+              !isProxyAddress,
+              !["lo", "awdl", "llw", "ap", "anpi", "vmenet"].contains(where: lowerInterface.hasPrefix),
+              !lowerInterface.hasPrefix("bridge1"),
+              !lowerInterface.hasPrefix("bridge2"),
+              !lowerInterface.hasPrefix("bridge100") else {
+            return nil
+        }
+
+        let title: String
+        let usageHint: String
+        let priority: Int
+
+        if lowerInterface == "bridge0" || lowerDisplayName.contains("thunderbolt") {
+            title = "Thunderbolt Bridge"
+            usageHint = "Connect directly over Thunderbolt."
+            priority = 20
+        } else if lowerDisplayName.contains("wi-fi")
+                    || lowerDisplayName.contains("airport")
+                    || lowerInterface == "en0" {
+            title = "Wi-Fi"
+            usageHint = "Connect through the Wi-Fi network."
+            priority = 10
+        } else if lowerInterface.hasPrefix("utun")
+                    || lowerDisplayName.contains("vpn")
+                    || lowerDisplayName.contains("wireguard")
+                    || lowerDisplayName.contains("tailscale") {
+            title = "VPN"
+            usageHint = "Connect from another device on the same VPN."
+            priority = 40
+        } else if lowerDisplayName.contains("ethernet")
+                    || lowerInterface.hasPrefix("en") {
+            title = "Ethernet"
+            usageHint = "Connect through the wired local network."
+            priority = 30
+        } else {
+            return nil
+        }
+
+        return ReceiverConnectionAddress(
+            interfaceName: interfaceName,
+            title: title,
+            address: "\(address):\(port)",
+            usageHint: usageHint,
+            priority: priority
+        )
+    }
+
+    private static func hardwarePortDisplayNames() -> [String: String] {
+        guard let interfaces = SCNetworkInterfaceCopyAll() as? [SCNetworkInterface] else {
+            return [:]
+        }
+
+        return interfaces.reduce(into: [:]) { names, interface in
+            guard let bsdName = SCNetworkInterfaceGetBSDName(interface) as String? else {
+                return
+            }
+            let displayName = SCNetworkInterfaceGetLocalizedDisplayName(interface) as String?
+            names[bsdName] = displayName ?? bsdName
+        }
+    }
+
+    private static func interfaceIPv4Addresses() -> [(String, String)] {
+        var pointer: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&pointer) == 0, let first = pointer else {
+            return []
+        }
+        defer { freeifaddrs(pointer) }
+
+        var results: [(String, String)] = []
+        var current: UnsafeMutablePointer<ifaddrs>? = first
+
+        while let interface = current?.pointee {
+            defer { current = interface.ifa_next }
+
+            guard let socketAddress = interface.ifa_addr,
+                  socketAddress.pointee.sa_family == UInt8(AF_INET),
+                  interface.ifa_flags & UInt32(IFF_UP) != 0,
+                  interface.ifa_flags & UInt32(IFF_RUNNING) != 0 else {
+                continue
+            }
+
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let result = getnameinfo(
+                socketAddress,
+                socklen_t(socketAddress.pointee.sa_len),
+                &host,
+                socklen_t(host.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            )
+            guard result == 0 else { continue }
+
+            results.append((
+                String(cString: interface.ifa_name),
+                String(cString: host)
+            ))
+        }
+
+        return results
+    }
+}
+
+private struct ReceiverOnOffToggle: View {
+    @Binding var isOn: Bool
+    let accessibilityLabel: String
+
+    var body: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isOn.toggle()
+            }
+        } label: {
+            Text(isOn ? "On" : "Off")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(isOn ? Color.white : Color.secondary)
+                .frame(width: 74, height: 32)
+                .background(isOn ? Color.green : Color.secondary.opacity(0.12))
+                .clipShape(Capsule())
+                .overlay {
+                    Capsule()
+                        .stroke(
+                            isOn ? Color.green.opacity(0.8) : Color.secondary.opacity(0.2),
+                            lineWidth: 1
+                        )
+                }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityValue(isOn ? "On" : "Off")
+    }
+}
+
 // MARK: - Receiver Mode View (sidebar detail — controls only)
 
 /// Receiver mode detail view — shows controls and status, video opens in separate window.
@@ -232,61 +417,68 @@ struct ReceiverModeView: View {
     @ObservedObject private var manager = ReceiverManager.shared
     @ObservedObject private var listener = ReceiverManager.shared.networkListener
     @AppStorage("receiverAutoStartEnabled") private var receiverAutoStartEnabled = false
-    @State private var cachedLocalIPs: String = ""
+    @State private var availableAddresses: [ReceiverConnectionAddress] = []
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 20) {
+            VStack(alignment: .leading, spacing: 18) {
+                sectionTitle("Status")
+
                 DashboardCard {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Start Listening at Launch")
+                    HStack(spacing: 12) {
+                        Circle()
+                            .fill(statusColor)
+                            .frame(width: 10, height: 10)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(statusTitle)
                                 .font(.system(size: 14, weight: .semibold))
-                            Text("Automatically start receiver listening when ExtendCast opens.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: $receiverAutoStartEnabled)
-                            .labelsHidden()
-                    }
-                }
 
-                // Status header
-                DashboardCard {
-                    VStack(spacing: 12) {
-                        Image(systemName: statusIcon)
-                            .font(.system(size: 36))
-                            .foregroundStyle(statusColor)
-
-                        Text(statusTitle)
-                            .font(.system(size: 18, weight: .semibold))
-
-                        Text(statusSubtitle)
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-
-                        if manager.isRunning {
-                            if let status = manager.networkListener.status {
-                                Text(status)
+                            if let detail = statusDetail {
+                                Text(detail)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
-
-                            Text(cachedLocalIPs)
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                                .onAppear { refreshLocalIPs() }
                         }
+
+                        Spacer()
+
+                        ReceiverOnOffToggle(
+                            isOn: listeningBinding,
+                            accessibilityLabel: "Receiver Listening"
+                        )
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
                 }
 
-                // Connected senders card
+                sectionTitle("Available Connections")
+
+                DashboardCard {
+                    if availableAddresses.isEmpty {
+                        HStack(spacing: 10) {
+                            Image(systemName: "network.slash")
+                                .foregroundStyle(.secondary)
+                            Text("No active Wi-Fi, Ethernet, VPN, or Thunderbolt connection detected.")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                    } else {
+                        VStack(spacing: 0) {
+                            ForEach(Array(availableAddresses.enumerated()), id: \.element.id) { index, connection in
+                                connectionRow(connection)
+                                if index < availableAddresses.count - 1 {
+                                    Divider()
+                                        .padding(.vertical, 14)
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if manager.isRunning && !manager.networkListener.connectedClients.isEmpty {
+                    sectionTitle("Connected Senders")
+
                     DashboardCard {
                         VStack(spacing: 12) {
                             HStack {
@@ -310,82 +502,39 @@ struct ReceiverModeView: View {
                     }
                 }
 
-                if manager.isRunning {
-                    Button(role: .destructive) {
-                        manager.stop()
-                    } label: {
-                        Label("Stop Listening", systemImage: "stop.fill")
-                            .frame(maxWidth: 280)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                } else {
-                    Button {
-                        manager.start()
-                    } label: {
-                        Label("Start Listening", systemImage: "play.fill")
-                            .frame(maxWidth: 280)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .tint(.green)
-                }
+                sectionTitle("Settings")
 
-                // Manual connect
-                if manager.isRunning {
-                    DashboardCard {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Manual Connect")
+                DashboardCard {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Start Listening at Launch")
                                 .font(.system(size: 14, weight: .semibold))
-
-                            HStack(spacing: 8) {
-                                TextField("Host", text: $listener.manualConnectHost)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(maxWidth: 180)
-
-                                TextField("Port", text: $listener.manualConnectPort)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 70)
-
-                                Button("Connect") {
-                                    if let port = UInt16(manager.networkListener.manualConnectPort) {
-                                        manager.networkListener.connectTo(
-                                            host: manager.networkListener.manualConnectHost,
-                                            port: port
-                                        )
-                                    }
-                                }
-                                .buttonStyle(.bordered)
-                            }
-                        }
-                    }
-
-                    // ADB connect
-                    DashboardCard {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Android (ADB)")
-                                .font(.system(size: 14, weight: .semibold))
-
-                            Text("Connect to an Android device streaming via USB.")
+                            Text("Automatically start receiver listening when ExtendCast opens.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-
-                            Button {
-                                if let port = UInt16(manager.networkListener.manualConnectPort) {
-                                    manager.networkListener.connectViaADB(port: port)
-                                }
-                            } label: {
-                                Label("Connect via ADB", systemImage: "cable.connector")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.bordered)
                         }
+                        Spacer()
+                        ReceiverOnOffToggle(
+                            isOn: $receiverAutoStartEnabled,
+                            accessibilityLabel: "Start Listening at Launch"
+                        )
                     }
                 }
             }
             .padding(20)
+            .frame(maxWidth: 720)
+            .frame(maxWidth: .infinity)
         }
-        .navigationTitle("Receive")
+        .navigationTitle("Receiver")
+        .onAppear(perform: refreshAvailableAddresses)
+        .onChange(of: manager.isRunning) { _, _ in
+            refreshAvailableAddresses()
+        }
+        .onReceive(
+            Timer.publish(every: 5, on: .main, in: .common).autoconnect()
+        ) { _ in
+            refreshAvailableAddresses()
+        }
     }
 
     // MARK: - Status Helpers
@@ -394,42 +543,89 @@ struct ReceiverModeView: View {
         manager.isRunning && !manager.networkListener.connectedClients.isEmpty
     }
 
-    private var statusIcon: String {
-        if isConnected { return "display.2" }
-        if manager.isRunning { return "antenna.radiowaves.left.and.right" }
-        return "display.and.arrow.down"
-    }
-
     private var statusColor: Color {
         if isConnected { return .green }
-        if manager.isRunning { return .orange }
+        if listener.status?.hasPrefix("Failed") == true { return .red }
+        if manager.isRunning { return .green }
         return .secondary
     }
 
     private var statusTitle: String {
-        if isConnected { return "Receiving" }
-        if manager.isRunning { return "Waiting for Connection" }
-        return "Not Listening"
+        if isConnected {
+            let count = manager.networkListener.connectedClients.count
+            return "\(count) sender\(count == 1 ? "" : "s") connected on port \(listeningPort)"
+        }
+        if manager.isRunning { return "Listening on port \(listeningPort)" }
+        return "Receiver is not listening"
     }
 
-    private var statusSubtitle: String {
-        if isConnected { return "Video is playing in a separate window." }
-        if manager.isRunning { return "Listening for incoming connections..." }
-        return "Start listening when you want this Mac to receive a screen."
+    private var statusDetail: String? {
+        guard manager.isRunning else {
+            return "Turn listening on to accept incoming connections."
+        }
+        if listener.status?.hasPrefix("Failed") == true {
+            return listener.status
+        }
+        return isConnected ? "Video is playing in a separate window." : nil
     }
 
-    private func refreshLocalIPs() {
-        let port = manager.networkListener.tcpListener?.port?.rawValue ?? 51820
-        DispatchQueue.global(qos: .userInitiated).async {
-            var ips: [String] = []
-            for iface in Host.current().addresses {
-                if iface.contains(".") && !iface.starts(with: "127.") {
-                    ips.append(iface)
+    private var listeningPort: UInt16 {
+        manager.networkListener.tcpListener?.port?.rawValue ?? BCConstants.tcpPort
+    }
+
+    private var listeningBinding: Binding<Bool> {
+        Binding(
+            get: { manager.isRunning },
+            set: { shouldListen in
+                if shouldListen {
+                    manager.start()
+                } else {
+                    manager.stop()
                 }
             }
-            let result = ips.isEmpty ? "No network detected" : "This device: " + ips.joined(separator: " / ") + " : \(port)"
+        )
+    }
+
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .padding(.top, 4)
+    }
+
+    private func connectionRow(_ connection: ReceiverConnectionAddress) -> some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(connection.title)
+                    .font(.system(size: 14, weight: .semibold))
+
+                Text(connection.address)
+                    .font(.system(size: 16, weight: .semibold, design: .monospaced))
+                    .textSelection(.enabled)
+
+                Text(connection.usageHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 20)
+
+            Button("Copy") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(connection.address, forType: .string)
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func refreshAvailableAddresses() {
+        let port = listeningPort
+        DispatchQueue.global(qos: .utility).async {
+            let addresses = ReceiverConnectionAddressProvider.availableAddresses(port: port)
             DispatchQueue.main.async {
-                cachedLocalIPs = result
+                guard addresses != availableAddresses else { return }
+                availableAddresses = addresses
             }
         }
     }

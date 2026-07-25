@@ -4,6 +4,69 @@ import XCTest
 
 @MainActor
 final class DiscoveryBehaviorTests: XCTestCase {
+    func testReceiverAddressesClassifyPhysicalConnections() {
+        XCTAssertEqual(
+            ReceiverConnectionAddressProvider.connectionAddress(
+                interfaceName: "en0",
+                displayName: "Wi-Fi",
+                address: "192.168.1.20",
+                port: 51820
+            ),
+            ReceiverConnectionAddress(
+                interfaceName: "en0",
+                title: "Wi-Fi",
+                address: "192.168.1.20:51820",
+                usageHint: "Connect through the Wi-Fi network.",
+                priority: 10
+            )
+        )
+        XCTAssertEqual(
+            ReceiverConnectionAddressProvider.connectionAddress(
+                interfaceName: "bridge0",
+                displayName: "Thunderbolt Bridge",
+                address: "169.254.204.111",
+                port: 51820
+            )?.title,
+            "Thunderbolt Bridge"
+        )
+        XCTAssertEqual(
+            ReceiverConnectionAddressProvider.connectionAddress(
+                interfaceName: "en7",
+                displayName: "USB 10/100/1000 LAN",
+                address: "10.0.0.8",
+                port: 51820
+            )?.title,
+            "Ethernet"
+        )
+        XCTAssertNil(
+            ReceiverConnectionAddressProvider.connectionAddress(
+                interfaceName: "utun4",
+                displayName: nil,
+                address: "198.19.0.1",
+                port: 51820
+            )
+        )
+    }
+
+    func testReceiverAddressesHideLoopbackAndVirtualBridges() {
+        XCTAssertNil(
+            ReceiverConnectionAddressProvider.connectionAddress(
+                interfaceName: "lo0",
+                displayName: nil,
+                address: "127.0.0.1",
+                port: 51820
+            )
+        )
+        XCTAssertNil(
+            ReceiverConnectionAddressProvider.connectionAddress(
+                interfaceName: "bridge100",
+                displayName: nil,
+                address: "192.168.128.1",
+                port: 51820
+            )
+        )
+    }
+
     func testReceiverDisconnectTransitionShowsAlertOnlyForSameDevice() {
         XCTAssertEqual(
             ReceiverDetailAvailability.disconnectedReceiverName(
