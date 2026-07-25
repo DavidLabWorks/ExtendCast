@@ -4,6 +4,93 @@ import XCTest
 
 @MainActor
 final class DiscoveryBehaviorTests: XCTestCase {
+    func testReceiverDisconnectTransitionShowsAlertOnlyForSameDevice() {
+        XCTAssertEqual(
+            ReceiverDetailAvailability.disconnectedReceiverName(
+                from: .available(id: "receiver-1", name: "Office PC"),
+                to: .unavailable(id: "receiver-1")
+            ),
+            "Office PC"
+        )
+        XCTAssertNil(
+            ReceiverDetailAvailability.disconnectedReceiverName(
+                from: .available(id: "receiver-1", name: "Office PC"),
+                to: .unavailable(id: "receiver-2")
+            )
+        )
+        XCTAssertNil(
+            ReceiverDetailAvailability.disconnectedReceiverName(
+                from: .available(id: "receiver-1", name: "Office PC"),
+                to: .none
+            )
+        )
+    }
+
+    func testReceiverHeartbeatTimeoutDoesNotWaitFifteenSeconds() {
+        let now = Date()
+
+        XCTAssertFalse(
+            NetworkClient.receiverConnectionHasTimedOut(
+                lastHeartbeat: now.addingTimeInterval(-4.9),
+                now: now
+            )
+        )
+        XCTAssertTrue(
+            NetworkClient.receiverConnectionHasTimedOut(
+                lastHeartbeat: now.addingTimeInterval(-5.1),
+                now: now
+            )
+        )
+    }
+
+    func testReachabilityRecheckPolicyUsesFocusAndSkipsConnectedDevices() {
+        XCTAssertEqual(
+            NetworkClient.bonjourReachabilityRecheckInterval(
+                isFocused: true,
+                isConnected: false
+            ),
+            3
+        )
+        XCTAssertEqual(
+            NetworkClient.bonjourReachabilityRecheckInterval(
+                isFocused: false,
+                isConnected: false
+            ),
+            20
+        )
+        XCTAssertNil(
+            NetworkClient.bonjourReachabilityRecheckInterval(
+                isFocused: true,
+                isConnected: true
+            )
+        )
+    }
+
+    func testConnectedReceiverDoesNotStartBonjourReachabilityProbe() {
+        var probeCount = 0
+        let client = NetworkClient(
+            bonjourReachabilityProbe: { _, completion in
+                probeCount += 1
+                completion(true)
+                return {}
+            }
+        )
+        let service = DiscoveredService(
+            name: "Connected Receiver",
+            endpoint: .service(
+                name: "Connected Receiver",
+                type: "_bettercast._tcp",
+                domain: "local.",
+                interface: nil
+            )
+        )
+        client.connectedServices = [service]
+
+        client.updateDiscoveredServices([service], for: "TCP")
+
+        XCTAssertEqual(probeCount, 0)
+    }
+
     func testUnverifiedBonjourServiceIsNotShownAsAvailable() {
         let client = NetworkClient(
             bonjourReachabilityProbe: { _, completion in
@@ -46,6 +133,35 @@ final class DiscoveryBehaviorTests: XCTestCase {
         client.updateDiscoveredServices([service], for: "TCP")
 
         XCTAssertEqual(client.foundServices.map(\.name), ["Online Receiver"])
+    }
+
+    func testConfirmedUnreachableServiceSkipsBrowseRemovalGracePeriod() async throws {
+        var probeResults = [true, false]
+        let client = NetworkClient(
+            discoveryRemovalDelay: 10,
+            bonjourReachabilityRecheckInterval: 0.01,
+            bonjourReachabilityProbe: { _, completion in
+                let result = probeResults.isEmpty ? false : probeResults.removeFirst()
+                completion(result)
+                return {}
+            }
+        )
+        let service = DiscoveredService(
+            name: "Receiver Going Offline",
+            endpoint: .service(
+                name: "Receiver Going Offline",
+                type: "_bettercast._tcp",
+                domain: "local.",
+                interface: nil
+            )
+        )
+
+        client.updateDiscoveredServices([service], for: "TCP")
+        XCTAssertEqual(client.foundServices.map(\.name), ["Receiver Going Offline"])
+
+        try await Task.sleep(nanoseconds: 30_000_000)
+
+        XCTAssertTrue(client.foundServices.isEmpty)
     }
 
     func testTransientBrowseRemovalKeepsDeviceVisibleDuringGracePeriod() async throws {

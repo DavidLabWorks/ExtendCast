@@ -1065,27 +1065,102 @@ private struct CustomResolutionEditorRequest: Identifiable {
     let resolution: VirtualDisplayManager.Resolution?
 }
 
+enum ReceiverDetailAvailability: Equatable {
+    case none
+    case available(id: String, name: String)
+    case unavailable(id: String)
+
+    static func disconnectedReceiverName(
+        from previous: ReceiverDetailAvailability,
+        to current: ReceiverDetailAvailability
+    ) -> String? {
+        guard case .available(let previousID, let name) = previous,
+              case .unavailable(let currentID) = current,
+              previousID == currentID else {
+            return nil
+        }
+        return name
+    }
+}
+
+private struct ReceiverDisconnectAlert: Identifiable {
+    let id = UUID()
+    let receiverName: String
+}
+
 struct DetailPanelView: View {
     @ObservedObject var client: NetworkClient
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var launchAtLoginManager = LaunchAtLoginManager()
     @State private var customResolutionEditorRequest: CustomResolutionEditorRequest?
+    @State private var receiverDisconnectAlert: ReceiverDisconnectAlert?
+    @State private var retainedConnectedDisplaysByID: [UUID: ConnectedDisplayInfo] = [:]
+    @State private var retainedDiscoveredServicesByName: [String: DiscoveredService] = [:]
     @Binding var selection: BetterCastSenderApp.SidebarSelection?
     @Binding var hasCompletedOnboarding: Bool
     @AppStorage("hasCompletedTour") private var hasCompletedTour = false
 
     var body: some View {
+        detailContent
+            .onChange(of: receiverDetailAvailability) { previous, current in
+                guard receiverDisconnectAlert == nil,
+                      let receiverName = ReceiverDetailAvailability
+                        .disconnectedReceiverName(from: previous, to: current) else {
+                    return
+                }
+                receiverDisconnectAlert = ReceiverDisconnectAlert(
+                    receiverName: receiverName
+                )
+            }
+            .onReceive(client.$connectedDisplays) { displays in
+                for display in displays {
+                    retainedConnectedDisplaysByID[display.id] = display
+                }
+            }
+            .onReceive(client.$foundServices) { services in
+                for service in services {
+                    retainedDiscoveredServicesByName[service.name] = service
+                }
+            }
+            .onChange(
+                of: focusedReceiverNameForReachability,
+                initial: true
+            ) { _, name in
+                client.setFocusedBonjourServiceName(name)
+            }
+            .onDisappear {
+                client.setFocusedBonjourServiceName(nil)
+            }
+            .alert(item: $receiverDisconnectAlert) { alert in
+                Alert(
+                    title: Text("Receiver Disconnected"),
+                    message: Text(
+                        "\(alert.receiverName) is no longer available. "
+                            + "Check the receiver and network connection, then try again."
+                    ),
+                    dismissButton: .default(Text("OK")) {
+                        selection = .devices
+                    }
+                )
+            }
+    }
+
+    @ViewBuilder
+    private var detailContent: some View {
         switch selection {
         case .device(let id):
-            if let display = client.connectedDisplays.first(where: { $0.id == id }) {
+            if let display = client.connectedDisplays.first(where: { $0.id == id })
+                ?? retainedConnectedDisplaysByID[id] {
                 DeviceDetailView(display: display, client: client, selection: $selection)
             } else {
-                settingsForm
+                receiverUnavailableView
             }
         case .discovered(let name):
-            if let service = client.foundServices.first(where: { $0.name == name }) {
+            if let service = client.foundServices.first(where: { $0.name == name })
+                ?? retainedDiscoveredServicesByName[name] {
                 DiscoveredDeviceView(service: service, client: client, selection: $selection)
             } else {
-                settingsForm
+                receiverUnavailableView
             }
         case .receive:
             ReceiverModeView()
@@ -1101,6 +1176,42 @@ struct DetailPanelView: View {
         case .devices, nil:
             DevicesView(client: client, selection: $selection)
         }
+    }
+
+    private var receiverDetailAvailability: ReceiverDetailAvailability {
+        switch selection {
+        case .device(let id):
+            let detailID = "connected:\(id.uuidString)"
+            if let display = client.connectedDisplays.first(where: { $0.id == id }) {
+                return .available(id: detailID, name: display.name)
+            }
+            return .unavailable(id: detailID)
+        case .discovered(let name):
+            let detailID = "discovered:\(name)"
+            if client.foundServices.contains(where: { $0.name == name }) {
+                return .available(id: detailID, name: name)
+            }
+            return .unavailable(id: detailID)
+        default:
+            return .none
+        }
+    }
+
+    private var focusedReceiverNameForReachability: String? {
+        guard scenePhase == .active,
+              case .discovered(let name) = selection else {
+            return nil
+        }
+        return name
+    }
+
+    private var receiverUnavailableView: some View {
+        ContentUnavailableView(
+            "Receiver Disconnected",
+            systemImage: "display.trianglebadge.exclamationmark",
+            description: Text("This receiver is no longer available.")
+        )
+        .navigationTitle("Receiver")
     }
 
     // MARK: - Settings (native Form)
@@ -2737,7 +2848,7 @@ private final class BonjourTCPReachabilityCheck {
 
     init(service: DiscoveredService, completion: @escaping (Bool) -> Void) {
         let tcpOptions = NWProtocolTCP.Options()
-        tcpOptions.connectionTimeout = 3
+        tcpOptions.connectionTimeout = 2
         let parameters = NWParameters(tls: nil, tcp: tcpOptions)
         parameters.includePeerToPeer = true
         connection = NWConnection(to: service.endpoint, using: parameters)
@@ -2757,7 +2868,7 @@ private final class BonjourTCPReachabilityCheck {
         }
         connection.start(queue: .global(qos: .utility))
 
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3.5) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.5) {
             self.finish(isReachable: false)
         }
     }
@@ -3021,8 +3132,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private var browserRecoveryAttempts: [String: Int] = [:]
     private var discoverySearchWorkItem: DispatchWorkItem?
     private let discoveryRemovalDelay: TimeInterval
-    private let bonjourReachabilityRecheckInterval: TimeInterval
+    private let backgroundBonjourReachabilityRecheckInterval: TimeInterval
+    private let focusedBonjourReachabilityRecheckInterval: TimeInterval
     private let bonjourReachabilityProbe: BonjourReachabilityProbe
+    private var focusedBonjourServiceName: String?
     private var browsedTCPServicesByName: [String: DiscoveredService] = [:]
     private var reachableTCPServiceNames: Set<String> = []
     private var bonjourReachabilityProbeIDs: [String: UUID] = [:]
@@ -3113,6 +3226,40 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
     var isConnected: Bool { !pipelines.isEmpty }
 
+    static let receiverHeartbeatTimeout: TimeInterval = 5
+
+    static func receiverConnectionHasTimedOut(
+        lastHeartbeat: Date,
+        now: Date
+    ) -> Bool {
+        now.timeIntervalSince(lastHeartbeat) > receiverHeartbeatTimeout
+    }
+
+    static func bonjourReachabilityRecheckInterval(
+        isFocused: Bool,
+        isConnected: Bool,
+        focusedInterval: TimeInterval = 3,
+        backgroundInterval: TimeInterval = 20
+    ) -> TimeInterval? {
+        guard !isConnected else { return nil }
+        return isFocused ? focusedInterval : backgroundInterval
+    }
+
+    func setFocusedBonjourServiceName(_ name: String?) {
+        guard focusedBonjourServiceName != name else { return }
+        let previouslyFocusedName = focusedBonjourServiceName
+        focusedBonjourServiceName = name
+
+        if let previouslyFocusedName {
+            scheduleBonjourReachabilityProbe(for: previouslyFocusedName)
+        }
+        if let name,
+           let service = browsedTCPServicesByName[name],
+           !isReceiverConnected(name),
+           bonjourReachabilityProbeIDs[name] == nil {
+            startBonjourReachabilityProbe(for: service)
+        }
+    }
 
     func startBrowsing() {
         cancelBonjourReachabilityChecks()
@@ -3249,7 +3396,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
     private func startBonjourReachabilityProbe(for service: DiscoveredService) {
         let name = service.name
-        guard browsedTCPServicesByName[name] != nil else { return }
+        guard browsedTCPServicesByName[name] != nil,
+              !isReceiverConnected(name) else {
+            return
+        }
 
         bonjourReachabilityRecheckWorkItems.removeValue(forKey: name)?.cancel()
         bonjourReachabilityProbeCancellations.removeValue(forKey: name)?()
@@ -3291,24 +3441,60 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         if isReachable {
             reachableTCPServiceNames.insert(name)
+            publishReachableTCPServices()
         } else {
             reachableTCPServiceNames.remove(name)
+            removeDiscoveredServiceImmediately(name, for: "TCP")
         }
-        publishReachableTCPServices()
 
-        guard browsedTCPServicesByName[name] != nil else { return }
+        scheduleBonjourReachabilityProbe(for: name)
+    }
+
+    private func scheduleBonjourReachabilityProbe(for name: String) {
+        bonjourReachabilityRecheckWorkItems.removeValue(forKey: name)?.cancel()
+        guard let service = browsedTCPServicesByName[name],
+              bonjourReachabilityProbeIDs[name] == nil,
+              let recheckInterval = recheckInterval(for: name) else {
+            return
+        }
         let recheck = DispatchWorkItem { [weak self] in
             guard let self,
-                  let service = self.browsedTCPServicesByName[name] else {
+                  !self.isReceiverConnected(name) else {
                 return
             }
             self.startBonjourReachabilityProbe(for: service)
         }
         bonjourReachabilityRecheckWorkItems[name] = recheck
         DispatchQueue.main.asyncAfter(
-            deadline: .now() + bonjourReachabilityRecheckInterval,
+            deadline: .now() + recheckInterval,
             execute: recheck
         )
+    }
+
+    private func recheckInterval(for name: String) -> TimeInterval? {
+        Self.bonjourReachabilityRecheckInterval(
+            isFocused: focusedBonjourServiceName == name,
+            isConnected: isReceiverConnected(name),
+            focusedInterval: focusedBonjourReachabilityRecheckInterval,
+            backgroundInterval: backgroundBonjourReachabilityRecheckInterval
+        )
+    }
+
+    private func isReceiverConnected(_ name: String) -> Bool {
+        connectedServices.contains { $0.name == name }
+    }
+
+    private func refreshBonjourReachabilityProbeScheduling() {
+        for (name, service) in browsedTCPServicesByName {
+            if isReceiverConnected(name) {
+                bonjourReachabilityProbeCancellations.removeValue(forKey: name)?()
+                bonjourReachabilityProbeIDs.removeValue(forKey: name)
+                bonjourReachabilityRecheckWorkItems.removeValue(forKey: name)?.cancel()
+            } else if bonjourReachabilityProbeIDs[name] == nil,
+                      bonjourReachabilityRecheckWorkItems[name] == nil {
+                startBonjourReachabilityProbe(for: service)
+            }
+        }
     }
 
     private func publishReachableTCPServices() {
@@ -3316,6 +3502,17 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             reachableTCPServiceNames.contains($0.name)
         }
         applyDiscoveredServices(Array(services), for: "TCP")
+    }
+
+    private func removeDiscoveredServiceImmediately(
+        _ name: String,
+        for protocolType: String
+    ) {
+        let removalKey = "\(protocolType):\(name)"
+        discoveryRemovalWorkItems.removeValue(forKey: removalKey)?.cancel()
+        latestDiscoveredServiceNames[protocolType]?.remove(name)
+        discoveredServicesByProtocol[protocolType]?.removeValue(forKey: name)
+        rebuildFoundServices()
     }
 
     private func applyDiscoveredServices(
@@ -3449,11 +3646,15 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
     init(
         discoveryRemovalDelay: TimeInterval = 8.0,
-        bonjourReachabilityRecheckInterval: TimeInterval = 10.0,
+        bonjourReachabilityRecheckInterval: TimeInterval = 20.0,
+        focusedBonjourReachabilityRecheckInterval: TimeInterval = 3.0,
         bonjourReachabilityProbe: BonjourReachabilityProbe? = nil
     ) {
         self.discoveryRemovalDelay = discoveryRemovalDelay
-        self.bonjourReachabilityRecheckInterval = bonjourReachabilityRecheckInterval
+        backgroundBonjourReachabilityRecheckInterval =
+            bonjourReachabilityRecheckInterval
+        self.focusedBonjourReachabilityRecheckInterval =
+            focusedBonjourReachabilityRecheckInterval
         self.bonjourReachabilityProbe = bonjourReachabilityProbe ?? { service, completion in
             let check = BonjourTCPReachabilityCheck(
                 service: service,
@@ -5496,9 +5697,14 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 var disconnectedIds: [UUID] = []
 
                 for (id, pipeline) in self.pipelines {
-                    let interval = now.timeIntervalSince(pipeline.lastHeartbeat)
-                    if interval > 15.0 {
-                        LogManager.shared.log("Sender: Connection to \(pipeline.service.name) timed out (No Heartbeat for 15s)")
+                    if Self.receiverConnectionHasTimedOut(
+                        lastHeartbeat: pipeline.lastHeartbeat,
+                        now: now
+                    ) {
+                        LogManager.shared.log(
+                            "Sender: Connection to \(pipeline.service.name) timed out "
+                                + "(No heartbeat for \(Int(Self.receiverHeartbeatTimeout))s)"
+                        )
                         disconnectedIds.append(id)
                     }
                 }
@@ -5628,6 +5834,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 cgDisplayID: pipeline.virtualDisplayManager?.displayID
             )
         }
+        refreshBonjourReachabilityProbeScheduling()
     }
 
     private func startStatsTimer() {
