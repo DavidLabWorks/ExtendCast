@@ -22,6 +22,7 @@ xcuserdata/
 *.apk
 *.ipa
 *.zip
+*.exe
 
 # iOS build output
 /iOS/dist/
@@ -35,8 +36,21 @@ xcuserdata/
 
 # Desktop build output
 /Desktop/build/
+/Desktop/build-*/
 /Desktop/artifact/
 /Desktop/vdd/
+/Desktop/ExtendCast-Setup-*.exe
+/Desktop/InstallVddDriverAdmin.cmd
+
+# Local packaged artifacts and extracted dependencies
+/artifact/
+/artifact-*/
+/crash-dumps/
+/platform-tools/
+/tools/
+/vdd/
+/vdd-*/
+/vdd-*-extract/
 
 # JVM crash logs
 hs_err_pid*.log

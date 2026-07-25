@@ -38,14 +38,16 @@ Cross-platform C++ receiver for Windows and Linux.
 
 ### Windows (Visual Studio)
 ```powershell
-mkdir build && cd build
+$buildDir = "D:/Temp/ExtendCast/windows-build"
+New-Item -ItemType Directory -Force $buildDir | Out-Null
 
 # If using vcpkg for FFmpeg:
-cmake .. -DCMAKE_PREFIX_PATH="C:/Qt/6.7.0/msvc2019_64" ^
-         -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg/scripts/buildsystems/vcpkg.cmake" ^
-         -DBONJOUR_SDK_HOME="C:/Program Files/Bonjour SDK"
+cmake -S . -B $buildDir `
+      -DCMAKE_PREFIX_PATH="C:/Qt/6.7.0/msvc2019_64" `
+      -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+      -DBONJOUR_SDK_HOME="C:/Program Files/Bonjour SDK"
 
-cmake --build . --config Release
+cmake --build $buildDir --config Release
 ```
 
 ### Linux

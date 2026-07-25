@@ -11,6 +11,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   QT_VERSION: '6.7.0'
   VDD_VERSION: '25.7.23'  # Virtual Display Driver release tag
+  WINDOWS_BUILD_DIR: 'D:/Temp/ExtendCast/windows-build'
 
 jobs:
   build-windows:
@@ -68,10 +69,9 @@ jobs:
       - name: Configure CMake
         shell: pwsh
         run: |
-          cd Desktop
-          mkdir build
-          cd build
-          cmake .. -G "Visual Studio 17 2022" -A x64 `
+          New-Item -ItemType Directory -Force "$env:WINDOWS_BUILD_DIR" | Out-Null
+          cmake -S "${{ github.workspace }}/Desktop" -B "$env:WINDOWS_BUILD_DIR" `
+            -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg/scripts/buildsystems/vcpkg.cmake" `
             -DCMAKE_PREFIX_PATH="$env:Qt6_DIR" `
             -DENABLE_SENDER=ON
@@ -79,8 +79,7 @@ jobs:
       - name: Build
         shell: pwsh
         run: |
-          cd Desktop/build
-          cmake --build . --config Release
+          cmake --build "$env:WINDOWS_BUILD_DIR" --config Release
 
       - name: Download ADB platform-tools
         shell: pwsh
@@ -142,7 +141,7 @@ jobs:
           mkdir artifact
 
           # Copy the exe
-          Copy-Item "Desktop/build/Release/ExtendCast.exe" "artifact/"
+          Copy-Item "$env:WINDOWS_BUILD_DIR/Release/ExtendCast.exe" "artifact/"
 
           # Run windeployqt to bundle Qt DLLs
           windeployqt --release --no-translations --no-system-d3d-compiler `

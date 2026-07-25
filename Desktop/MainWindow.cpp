@@ -29,6 +29,7 @@
 #include <QStandardPaths>
 #include <QSettings>
 #include <QPainter>
+#include <QGraphicsDropShadowEffect>
 #include <QSvgRenderer>
 #include <QFile>
 #include <QHash>
@@ -38,6 +39,8 @@
 #include <QUrl>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QStyledItemDelegate>
+#include <QStyleOptionViewItem>
 #include <algorithm>
 #include <thread>
 
@@ -46,7 +49,7 @@
 static const char* kDarkStylesheet = R"(
     QMainWindow { background-color: #1a1a1a; }
     QSplitter { background-color: #1a1a1a; }
-    QSplitter::handle { background-color: #333; width: 1px; }
+    QSplitter::handle { background: transparent; width: 0px; }
 
     QListWidget {
         background-color: #202020;
@@ -56,17 +59,13 @@ static const char* kDarkStylesheet = R"(
         padding: 12px 8px 0 8px;
     }
     QListWidget::item {
-        color: #d6d6d6;
-        padding: 6px 12px;
-        border-radius: 7px;
-        margin: 2px 0;
+        border: none;
     }
     QListWidget::item:selected {
-        background-color: rgba(10, 132, 255, 0.26);
-        color: #f5f7fb;
+        background: transparent;
     }
     QListWidget::item:hover:!selected {
-        background-color: rgba(255, 255, 255, 0.07);
+        background: transparent;
     }
 
     QStackedWidget { background-color: #1a1a1a; }
@@ -281,10 +280,96 @@ static QListWidgetItem* addSidebarItem(QListWidget* list, const QIcon& icon,
                                         const QString& title, int pageIndex) {
     auto* item = new QListWidgetItem(icon, title);
     item->setData(Qt::UserRole, pageIndex);
-    item->setSizeHint(QSize(0, 36));
+    item->setSizeHint(QSize(0, 34));
     list->addItem(item);
     return item;
 }
+
+class SidebarItemDelegate final : public QStyledItemDelegate {
+public:
+    explicit SidebarItemDelegate(QObject* parent = nullptr)
+        : QStyledItemDelegate(parent) {}
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+
+        const bool isSection = index.data(Qt::UserRole).toInt() < 0;
+        const bool selected = option.state & QStyle::State_Selected;
+        const bool hovered = option.state & QStyle::State_MouseOver;
+        QRectF rowRect = option.rect.adjusted(8, 2, -8, -2);
+
+        if (isSection) {
+            QFont sectionFont = option.font;
+            sectionFont.setPointSize(8);
+            sectionFont.setWeight(QFont::DemiBold);
+            painter->setFont(sectionFont);
+            painter->setPen(QColor("#7d828c"));
+            painter->drawText(rowRect.adjusted(4, 8, 0, 0),
+                              Qt::AlignLeft | Qt::AlignVCenter,
+                              index.data(Qt::DisplayRole).toString().toUpper());
+            painter->restore();
+            return;
+        }
+
+        QRectF bgRect(rowRect);
+        bgRect = bgRect.adjusted(1, 1, -1, -1);
+
+        if (selected || hovered) {
+            const QColor bg = selected ? QColor(10, 132, 255, 42)
+                                       : QColor(255, 255, 255, 18);
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(bg);
+            painter->drawRoundedRect(bgRect, 7, 7);
+        }
+
+        QRectF contentRect = bgRect.adjusted(12, 0, -12, 0);
+        const int iconSize = 20;
+        QRect iconRect(qRound(contentRect.left()),
+                       qRound(contentRect.center().y() - iconSize / 2.0),
+                       iconSize, iconSize);
+
+        const QIcon icon = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
+        const QPixmap pixmap = icon.pixmap(QSize(iconSize, iconSize),
+                                           selected ? QIcon::Selected : (hovered ? QIcon::Active : QIcon::Normal));
+        if (!pixmap.isNull()) {
+            painter->drawPixmap(iconRect, pixmap);
+        }
+
+        QFont textFont = option.font;
+        textFont.setPointSize(13);
+        textFont.setWeight(selected ? QFont::DemiBold : QFont::Medium);
+        painter->setFont(textFont);
+        painter->setPen(selected ? QColor("#f5f7fb")
+                                 : (hovered ? QColor("#eef1f6") : QColor("#d6d8de")));
+
+        QRectF textRect = contentRect.adjusted(iconSize + 10, 0, 0, 0);
+        QFontMetrics metrics(textFont);
+        const QString title = metrics.elidedText(index.data(Qt::DisplayRole).toString(),
+                                                 Qt::ElideRight,
+                                                 qRound(textRect.width()));
+        painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, title);
+
+        if (hovered && !selected) {
+            painter->setPen(QPen(QColor(255, 255, 255, 16), 1));
+            painter->setBrush(Qt::NoBrush);
+            painter->drawRoundedRect(bgRect.adjusted(0.5, 0.5, -0.5, -0.5), 7, 7);
+        } else if (selected) {
+            painter->setPen(QPen(QColor(94, 177, 255, 90), 1));
+            painter->setBrush(Qt::NoBrush);
+            painter->drawRoundedRect(bgRect.adjusted(0.5, 0.5, -0.5, -0.5), 7, 7);
+        }
+
+        painter->restore();
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem& option,
+                   const QModelIndex& index) const override {
+        Q_UNUSED(option);
+        return QSize(0, index.data(Qt::UserRole).toInt() < 0 ? 30 : 34);
+    }
+};
 
 // ─── Card widget helper ─────────────────────────────────────────────────────────
 
@@ -684,7 +769,24 @@ void MainWindow::setupUi() {
     setStyleSheet(kDarkStylesheet);
 
     m_splitter = new QSplitter(Qt::Horizontal, this);
+    m_splitter->setHandleWidth(0);
     setCentralWidget(m_splitter);
+
+    auto* sidebarFrame = new QFrame();
+    sidebarFrame->setObjectName("sidebarFrame");
+    sidebarFrame->setFixedWidth(252);
+    sidebarFrame->setStyleSheet(
+        "QFrame#sidebarFrame { background-color: #202020; border: none; }");
+
+    auto* sidebarLayout = new QVBoxLayout(sidebarFrame);
+    sidebarLayout->setContentsMargins(0, 0, 20, 0);
+    sidebarLayout->setSpacing(0);
+
+    auto* sidebarShadow = new QGraphicsDropShadowEffect(sidebarFrame);
+    sidebarShadow->setBlurRadius(30);
+    sidebarShadow->setOffset(14, 0);
+    sidebarShadow->setColor(QColor(0, 0, 0, 115));
+    sidebarFrame->setGraphicsEffect(sidebarShadow);
 
     // Sidebar
     m_sidebarList = new QListWidget();
@@ -693,6 +795,10 @@ void MainWindow::setupUi() {
     m_sidebarList->setSpacing(1);
     m_sidebarList->setFocusPolicy(Qt::NoFocus);
     m_sidebarList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_sidebarList->setMouseTracking(true);
+    m_sidebarList->viewport()->setMouseTracking(true);
+    m_sidebarList->setItemDelegate(new SidebarItemDelegate(m_sidebarList));
+    sidebarLayout->addWidget(m_sidebarList);
 
     // Detail stack
     m_stack = new QStackedWidget();
@@ -706,7 +812,7 @@ void MainWindow::setupUi() {
     setupSidebar();
 
     // Assemble splitter
-    m_splitter->addWidget(m_sidebarList);
+    m_splitter->addWidget(sidebarFrame);
     m_splitter->addWidget(m_stack);
     m_splitter->setStretchFactor(0, 0);
     m_splitter->setStretchFactor(1, 1);
