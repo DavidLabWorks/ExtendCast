@@ -29,7 +29,6 @@
 #include <QStandardPaths>
 #include <QSettings>
 #include <QPainter>
-#include <QGraphicsDropShadowEffect>
 #include <QSvgRenderer>
 #include <QFile>
 #include <QHash>
@@ -56,7 +55,7 @@ static const char* kDarkStylesheet = R"(
         border: none;
         outline: none;
         font-size: 14px;
-        padding: 12px 8px 0 8px;
+        padding: 18px 0 0 0;
     }
     QListWidget::item {
         border: none;
@@ -280,7 +279,7 @@ static QListWidgetItem* addSidebarItem(QListWidget* list, const QIcon& icon,
                                         const QString& title, int pageIndex) {
     auto* item = new QListWidgetItem(icon, title);
     item->setData(Qt::UserRole, pageIndex);
-    item->setSizeHint(QSize(0, 34));
+    item->setSizeHint(QSize(0, 44));
     list->addItem(item);
     return item;
 }
@@ -297,16 +296,15 @@ public:
 
         const bool isSection = index.data(Qt::UserRole).toInt() < 0;
         const bool selected = option.state & QStyle::State_Selected;
-        const bool hovered = option.state & QStyle::State_MouseOver;
-        QRectF rowRect = option.rect.adjusted(8, 2, -8, -2);
+        QRectF rowRect = option.rect.adjusted(0, 3, 0, -3);
 
         if (isSection) {
             QFont sectionFont = option.font;
-            sectionFont.setPointSize(8);
-            sectionFont.setWeight(QFont::DemiBold);
+            sectionFont.setPixelSize(15);
+            sectionFont.setWeight(QFont::Medium);
             painter->setFont(sectionFont);
-            painter->setPen(QColor("#7d828c"));
-            painter->drawText(rowRect.adjusted(4, 8, 0, 0),
+            painter->setPen(QColor("#7a8388"));
+            painter->drawText(rowRect.adjusted(30, 8, 0, 0),
                               Qt::AlignLeft | Qt::AlignVCenter,
                               index.data(Qt::DisplayRole).toString().toUpper());
             painter->restore();
@@ -316,33 +314,30 @@ public:
         QRectF bgRect(rowRect);
         bgRect = bgRect.adjusted(1, 1, -1, -1);
 
-        if (selected || hovered) {
-            const QColor bg = selected ? QColor(10, 132, 255, 42)
-                                       : QColor(255, 255, 255, 18);
+        if (selected) {
             painter->setPen(Qt::NoPen);
-            painter->setBrush(bg);
+            painter->setBrush(QColor(10, 132, 255, 42));
             painter->drawRoundedRect(bgRect, 7, 7);
         }
 
-        QRectF contentRect = bgRect.adjusted(12, 0, -12, 0);
-        const int iconSize = 20;
+        QRectF contentRect = bgRect.adjusted(32, 0, -16, 0);
+        const int iconSize = 22;
         QRect iconRect(qRound(contentRect.left()),
                        qRound(contentRect.center().y() - iconSize / 2.0),
                        iconSize, iconSize);
 
         const QIcon icon = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
         const QPixmap pixmap = icon.pixmap(QSize(iconSize, iconSize),
-                                           selected ? QIcon::Selected : (hovered ? QIcon::Active : QIcon::Normal));
+                                           selected ? QIcon::Selected : QIcon::Normal);
         if (!pixmap.isNull()) {
             painter->drawPixmap(iconRect, pixmap);
         }
 
         QFont textFont = option.font;
-        textFont.setPointSize(13);
-        textFont.setWeight(selected ? QFont::DemiBold : QFont::Medium);
+        textFont.setPixelSize(17);
+        textFont.setWeight(QFont::Medium);
         painter->setFont(textFont);
-        painter->setPen(selected ? QColor("#f5f7fb")
-                                 : (hovered ? QColor("#eef1f6") : QColor("#d6d8de")));
+        painter->setPen(selected ? QColor("#2f7dff") : QColor("#e8edf1"));
 
         QRectF textRect = contentRect.adjusted(iconSize + 10, 0, 0, 0);
         QFontMetrics metrics(textFont);
@@ -351,12 +346,8 @@ public:
                                                  qRound(textRect.width()));
         painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, title);
 
-        if (hovered && !selected) {
-            painter->setPen(QPen(QColor(255, 255, 255, 16), 1));
-            painter->setBrush(Qt::NoBrush);
-            painter->drawRoundedRect(bgRect.adjusted(0.5, 0.5, -0.5, -0.5), 7, 7);
-        } else if (selected) {
-            painter->setPen(QPen(QColor(94, 177, 255, 90), 1));
+        if (selected) {
+            painter->setPen(QPen(QColor(94, 177, 255, 80), 1));
             painter->setBrush(Qt::NoBrush);
             painter->drawRoundedRect(bgRect.adjusted(0.5, 0.5, -0.5, -0.5), 7, 7);
         }
@@ -367,7 +358,7 @@ public:
     QSize sizeHint(const QStyleOptionViewItem& option,
                    const QModelIndex& index) const override {
         Q_UNUSED(option);
-        return QSize(0, index.data(Qt::UserRole).toInt() < 0 ? 30 : 34);
+        return QSize(0, index.data(Qt::UserRole).toInt() < 0 ? 38 : 44);
     }
 };
 
@@ -778,27 +769,26 @@ void MainWindow::setupUi() {
     sidebarFrame->setStyleSheet(
         "QFrame#sidebarFrame { background-color: #202020; border: none; }");
 
-    auto* sidebarLayout = new QVBoxLayout(sidebarFrame);
-    sidebarLayout->setContentsMargins(0, 0, 20, 0);
+    auto* sidebarLayout = new QHBoxLayout(sidebarFrame);
+    sidebarLayout->setContentsMargins(0, 0, 0, 0);
     sidebarLayout->setSpacing(0);
-
-    auto* sidebarShadow = new QGraphicsDropShadowEffect(sidebarFrame);
-    sidebarShadow->setBlurRadius(30);
-    sidebarShadow->setOffset(14, 0);
-    sidebarShadow->setColor(QColor(0, 0, 0, 115));
-    sidebarFrame->setGraphicsEffect(sidebarShadow);
 
     // Sidebar
     m_sidebarList = new QListWidget();
-    m_sidebarList->setFixedWidth(232);
+    m_sidebarList->setFixedWidth(248);
     m_sidebarList->setIconSize(QSize(24, 24));
     m_sidebarList->setSpacing(1);
     m_sidebarList->setFocusPolicy(Qt::NoFocus);
     m_sidebarList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_sidebarList->setMouseTracking(true);
-    m_sidebarList->viewport()->setMouseTracking(true);
     m_sidebarList->setItemDelegate(new SidebarItemDelegate(m_sidebarList));
     sidebarLayout->addWidget(m_sidebarList);
+
+    auto* sidebarShadowStrip = new QFrame();
+    sidebarShadowStrip->setFixedWidth(4);
+    sidebarShadowStrip->setStyleSheet(
+        "QFrame { background: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 0, "
+        "stop: 0 rgba(0, 0, 0, 16), stop: 1 rgba(0, 0, 0, 0)); border: none; }");
+    sidebarLayout->addWidget(sidebarShadowStrip);
 
     // Detail stack
     m_stack = new QStackedWidget();

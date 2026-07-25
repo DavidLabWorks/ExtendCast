@@ -4,6 +4,7 @@
 #include <QProcess>
 #include <QStandardPaths>
 #include <QFile>
+#include <QLockFile>
 #include <QDebug>
 #include "MainWindow.h"
 #include "Version.h"
@@ -75,6 +76,14 @@ int main(int argc, char* argv[]) {
     QSurfaceFormat::setDefaultFormat(format);
 
     QApplication app(argc, argv);
+
+    QLockFile singleInstanceLock(QStandardPaths::writableLocation(QStandardPaths::TempLocation) + "/ExtendCast.lock");
+    singleInstanceLock.setStaleLockTime(0);
+    if (!singleInstanceLock.tryLock(100)) {
+        qDebug() << "ExtendCast is already running";
+        return 0;
+    }
+
     app.setApplicationName("ExtendCast");
     app.setOrganizationName("ExtendCast");
     app.setApplicationVersion(EXTENDCAST_VERSION);
