@@ -78,6 +78,12 @@ void AudioDecoder::decode(const QByteArray& aacData) {
         int samples = m_frame->nb_samples;
         int sampleRate = m_frame->sample_rate;
 
+        if (channels <= 0 || channels > AV_NUM_DATA_POINTERS || samples <= 0 || sampleRate <= 0) {
+            qWarning() << "AudioDecoder: Invalid decoded format:"
+                       << sampleRate << "Hz" << channels << "ch" << samples << "samples";
+            continue;
+        }
+
         QByteArray pcm;
 
         if (m_frame->format == AV_SAMPLE_FMT_FLTP) {

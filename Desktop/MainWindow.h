@@ -56,6 +56,7 @@ class AudioDecoder;
 class AudioPlayer;
 class AdbHelper;
 class VideoWindow;
+class QVBoxLayout;
 #ifdef ENABLE_SENDER
 class SenderController;
 class VirtualDisplayVDD;
@@ -75,6 +76,8 @@ private slots:
     void onConnectionEstablished();
     void onConnectionLost();
     void onStatusChanged(const QString& status);
+    void onReceiverListeningToggled(bool checked);
+    void onReceiverAutoStartToggled(bool checked);
     void onVideoSizeChanged(QSize size);
     void attemptAdbReconnect();
     void onLogAdded(const QString& entry);
@@ -138,8 +141,17 @@ private:
     QLabel* m_overviewIpLabel = nullptr;
 
     // Receive page
+    QLabel* m_recvStatusDot = nullptr;
     QLabel* m_recvStatusLabel = nullptr;
     QLabel* m_recvIpLabel = nullptr;
+    QLabel* m_recvPrimaryTypeLabel = nullptr;
+    QLabel* m_recvPrimaryAddressLabel = nullptr;
+    QLabel* m_recvPrimaryHintLabel = nullptr;
+    QVBoxLayout* m_recvAddressListLayout = nullptr;
+    QPushButton* m_receiverListenToggle = nullptr;
+    QCheckBox* m_receiverAutoStartCheck = nullptr;
+    bool m_receiverListening = false;
+    uint16_t m_receiverPort = 51820;
     QLineEdit* m_hostEdit = nullptr;
     QLineEdit* m_portEdit = nullptr;
     QPushButton* m_connectBtn = nullptr;
@@ -173,5 +185,6 @@ private:
     QPushButton* m_removeVddBtn = nullptr;
     QPushButton* m_recheckVddBtn = nullptr;
     QLabel* m_vddStatusLabel = nullptr;
+    QString m_lastSenderError;
 #endif
 };

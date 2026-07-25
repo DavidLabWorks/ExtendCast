@@ -12,7 +12,7 @@ struct BetterCastSenderApp: App {
     @StateObject private var networkClient = NetworkClient()
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @AppStorage("hasCompletedTour") private var hasCompletedTour = false
-    @AppStorage("receiverListeningEnabled") private var receiverAutoStartEnabled = false
+    @AppStorage("receiverAutoStartEnabled") private var receiverAutoStartEnabled = false
     @State private var didStartAppServices = false
 
     var body: some Scene {
@@ -88,6 +88,7 @@ struct BetterCastSenderApp: App {
             networkClient.checkScreenRecordingPermission()
             networkClient.startBrowsing()
             networkClient.startSavedAutoConnections()
+            migrateReceiverAutoStartPreferenceIfNeeded()
             startReceiverIfConfigured()
             UpdateChecker.shared.checkForUpdates()
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
@@ -114,6 +115,15 @@ struct BetterCastSenderApp: App {
         if receiverAutoStartEnabled, !receiver.isRunning {
             receiver.start()
         }
+    }
+
+    private func migrateReceiverAutoStartPreferenceIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: "receiverAutoStartEnabled") == nil,
+              defaults.object(forKey: "receiverListeningEnabled") != nil else {
+            return
+        }
+        receiverAutoStartEnabled = defaults.bool(forKey: "receiverListeningEnabled")
     }
 }
 
@@ -2911,6 +2921,16 @@ struct ManualConnectionHistoryItem: Codable, Hashable, Identifiable {
     var displayName: String {
         "\(host):\(port)"
     }
+
+    var isLinkLocalAddress: Bool {
+        Self.isLinkLocalHost(host)
+    }
+
+    static func isLinkLocalHost(_ host: String) -> Bool {
+        host.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .hasPrefix("169.254.")
+    }
 }
 
 enum ManualConnectionAvailability: Equatable {
@@ -3728,7 +3748,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 [ManualConnectionHistoryItem].self,
                 from: historyData
             ) {
-                manualConnectionHistory = history
+                manualConnectionHistory = history.filter { !$0.isLinkLocalAddress }
+                if manualConnectionHistory.count != history.count,
+                   let data = try? JSONEncoder().encode(manualConnectionHistory) {
+                    defaults.set(data, forKey: PreferenceKey.manualConnectionHistory)
+                }
             }
         }
 
@@ -4214,6 +4238,16 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private func rememberManualConnection(host: String, port: UInt16) {
         let item = ManualConnectionHistoryItem(host: host, port: port)
         manualConnectionHistory.removeAll { $0.id == item.id }
+        if item.isLinkLocalAddress {
+            manualConnectionAvailability.removeValue(forKey: item.id)
+            LogManager.shared.log(
+                "Sender: Not saving \(item.displayName) to Recent because 169.254 link-local addresses can change after Thunderbolt reconnects"
+            )
+            if let data = try? JSONEncoder().encode(manualConnectionHistory) {
+                UserDefaults.standard.set(data, forKey: PreferenceKey.manualConnectionHistory)
+            }
+            return
+        }
         manualConnectionHistory.insert(item, at: 0)
         if manualConnectionHistory.count > 10 {
             manualConnectionHistory.removeLast(manualConnectionHistory.count - 10)
@@ -4402,6 +4436,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
     func startSavedAutoConnections() {
         let hasSavedManualAutoConnect = manualConnectionHistory.contains { item in
+            if item.isLinkLocalAddress { return false }
             guard let service = service(for: item) else { return false }
             return isAutoConnectEnabled(for: service)
         }

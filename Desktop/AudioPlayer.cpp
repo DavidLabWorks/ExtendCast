@@ -16,6 +16,11 @@ AudioPlayer::~AudioPlayer() {
 }
 
 void AudioPlayer::ensureSink(int sampleRate, int channels) {
+    if (sampleRate <= 0 || channels <= 0) {
+        qWarning() << "AudioPlayer: Invalid audio format:" << sampleRate << "Hz" << channels << "ch";
+        return;
+    }
+
     if (m_sink && m_sampleRate == sampleRate && m_channels == channels) {
         return; // Already configured
     }
@@ -49,6 +54,8 @@ void AudioPlayer::ensureSink(int sampleRate, int channels) {
 }
 
 void AudioPlayer::onPcmDecoded(const QByteArray& pcmData, int sampleRate, int channels) {
+    if (pcmData.isEmpty()) return;
+
     ensureSink(sampleRate, channels);
 
     if (m_ioDevice && m_sink) {

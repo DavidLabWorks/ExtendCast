@@ -13,6 +13,7 @@
 #include <QThread>
 #include <QXmlStreamReader>
 #include <QXmlStreamWriter>
+#include <QDirIterator>
 
 // Log to both qDebug and the in-app LogManager
 #define VDD_LOG(msg) do { \
@@ -27,9 +28,11 @@
 #include <SetupAPI.h>
 #include <devguid.h>
 #include <cfgmgr32.h>
+#include <shellapi.h>
 
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "setupapi.lib")
+#pragma comment(lib, "shell32.lib")
 #endif
 
 // Known VDD installation paths (static fallbacks)
@@ -54,12 +57,131 @@ static QStringList getVddPaths() {
 
 // VDD settings file names (varies by version)
 static const QStringList kSettingsFiles = {
+    "Dependencies/vdd_settings.xml",
+    "SignedDrivers/ARM64/VDD/vdd_settings.xml",
+    "SignedDrivers/x86/VDD/vdd_settings.xml",
     "vdd_settings.xml",
     "settings.xml",
     "config.xml",
     "option.txt",
     "options.xml",
 };
+
+static void writeVddResolution(QXmlStreamWriter& xml, int width, int height, int refreshRate) {
+    xml.writeStartElement("resolution");
+    xml.writeTextElement("width", QString::number(width));
+    xml.writeTextElement("height", QString::number(height));
+    xml.writeTextElement("refresh_rate", QString::number(refreshRate));
+    xml.writeEndElement();
+}
+
+#ifdef _WIN32
+static bool isArm64Windows() {
+    USHORT processMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+    USHORT nativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+    using IsWow64Process2Fn = BOOL (WINAPI *)(HANDLE, USHORT*, USHORT*);
+    auto fn = reinterpret_cast<IsWow64Process2Fn>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsWow64Process2"));
+    if (fn && fn(GetCurrentProcess(), &processMachine, &nativeMachine)) {
+        return nativeMachine == IMAGE_FILE_MACHINE_ARM64;
+    }
+
+    SYSTEM_INFO nativeInfo = {};
+    GetNativeSystemInfo(&nativeInfo);
+    return nativeInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64;
+}
+#endif
+
+static bool infSupportsCurrentArchitecture(const QString& infPath) {
+    QFile file(infPath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return true;
+    }
+
+    const QString infText = QString::fromUtf8(file.readAll()).toLower();
+#ifdef _WIN32
+    const bool isArm64 = isArm64Windows();
+#else
+    const QString arch = qEnvironmentVariable("PROCESSOR_ARCHITECTURE").toLower();
+    const QString wowArch = qEnvironmentVariable("PROCESSOR_ARCHITEW6432").toLower();
+    const bool isArm64 = arch.contains("arm64") || wowArch.contains("arm64");
+#endif
+
+    return isArm64 ? infText.contains("ntarm64") : infText.contains("ntamd64");
+}
+
+#ifdef _WIN32
+static QString findCompatibleDriverInf(const QString& vddPath) {
+    const QStringList preferredRelativePaths = isArm64Windows()
+        ? QStringList{
+              "SignedDrivers/ARM64/VDD/MttVDD.inf",
+              "MttVDD.inf",
+              "VirtualDisplayDriver.inf",
+          }
+        : QStringList{
+              "SignedDrivers/x86/VDD/MttVDD.inf",
+              "MttVDD.inf",
+              "VirtualDisplayDriver.inf",
+          };
+
+    for (const auto& relativePath : preferredRelativePaths) {
+        const QString candidate = vddPath + "/" + relativePath;
+        if (QFileInfo::exists(candidate) && infSupportsCurrentArchitecture(candidate)) {
+            return candidate;
+        }
+    }
+
+    QDirIterator it(vddPath, {"*.inf"}, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString candidate = it.next();
+        const QString lower = candidate.toLower();
+        if ((lower.endsWith("/mttvdd.inf") || lower.endsWith("\\mttvdd.inf") ||
+             lower.endsWith("/virtualdisplaydriver.inf") || lower.endsWith("\\virtualdisplaydriver.inf")) &&
+            infSupportsCurrentArchitecture(candidate)) {
+            return candidate;
+        }
+    }
+
+    return {};
+}
+
+static QString quoteProcessArg(const QString& arg) {
+    QString escaped = arg;
+    escaped.replace("\"", "\\\"");
+    return "\"" + escaped + "\"";
+}
+
+static bool runElevatedAndWait(const QString& program, const QStringList& args) {
+    QStringList quotedArgs;
+    for (const auto& arg : args) {
+        quotedArgs.append(quoteProcessArg(arg));
+    }
+
+    std::wstring file = QDir::toNativeSeparators(program).toStdWString();
+    std::wstring params = quotedArgs.join(' ').toStdWString();
+    const QString workingDirectory = QFileInfo(program).absolutePath();
+    std::wstring directory = QDir::toNativeSeparators(workingDirectory).toStdWString();
+
+    SHELLEXECUTEINFOW execInfo = {};
+    execInfo.cbSize = sizeof(execInfo);
+    execInfo.fMask = SEE_MASK_NOCLOSEPROCESS;
+    execInfo.lpVerb = L"runas";
+    execInfo.lpFile = file.c_str();
+    execInfo.lpParameters = params.c_str();
+    execInfo.lpDirectory = directory.c_str();
+    execInfo.nShow = SW_SHOWNORMAL;
+
+    if (!ShellExecuteExW(&execInfo)) {
+        return false;
+    }
+
+    WaitForSingleObject(execInfo.hProcess, 60000);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(execInfo.hProcess, &exitCode);
+    CloseHandle(execInfo.hProcess);
+    return exitCode == 0;
+}
+#endif
 
 // VDD named pipe (modern versions)
 static const char* kVddPipeName = "\\\\.\\pipe\\VDDPipe";
@@ -152,6 +274,16 @@ bool VirtualDisplayVDD::detectVddInstall() {
         QDir dir(basePath);
         if (dir.exists()) {
             VDD_LOG("VDD [Method 1]: Directory exists: " + basePath);
+            QString infPath;
+#ifdef _WIN32
+            infPath = findCompatibleDriverInf(basePath);
+#else
+            if (QFileInfo::exists(basePath + "/MttVDD.inf")) {
+                infPath = basePath + "/MttVDD.inf";
+            } else if (QFileInfo::exists(basePath + "/VirtualDisplayDriver.inf")) {
+                infPath = basePath + "/VirtualDisplayDriver.inf";
+            }
+#endif
             // Verify there's actually a driver or settings file here
             for (const auto& settingsFile : kSettingsFiles) {
                 if (QFileInfo::exists(basePath + "/" + settingsFile)) {
@@ -169,10 +301,9 @@ bool VirtualDisplayVDD::detectVddInstall() {
                 return true;
             }
             // Check for driver .inf files
-            if (QFileInfo::exists(basePath + "/VirtualDisplayDriver.inf") ||
-                QFileInfo::exists(basePath + "/MttVDD.inf")) {
+            if (!infPath.isEmpty()) {
                 m_vddPath = basePath;
-                VDD_LOG("VDD [Method 1]: Found driver .inf in " + basePath);
+                VDD_LOG("VDD [Method 1]: Found compatible driver .inf in " + basePath);
                 return true;
             }
             // Check for VDD Control exe (newer versions — filename may use space or dot)
@@ -290,6 +421,7 @@ bool VirtualDisplayVDD::isDriverLoaded() const {
 bool VirtualDisplayVDD::installDriver() {
 #ifdef _WIN32
     if (m_vddPath.isEmpty()) return false;
+    QString lastInstallOutput;
 
     // Find devcon.exe (bundled in VDD directory or Dependencies subfolder)
     QString devconExe = m_vddPath + "/devcon.exe";
@@ -297,21 +429,11 @@ bool VirtualDisplayVDD::installDriver() {
         devconExe = m_vddPath + "/Dependencies/devcon.exe";
     }
 
-    // Find the MttVDD .inf file
-    QString infPath;
-    if (QFileInfo::exists(m_vddPath + "/MttVDD.inf")) {
-        infPath = m_vddPath + "/MttVDD.inf";
-    } else {
-        // Fall back to first .inf found
-        QDir vddDir(m_vddPath);
-        QStringList infFiles = vddDir.entryList({"*.inf"}, QDir::Files);
-        if (!infFiles.isEmpty()) {
-            infPath = m_vddPath + "/" + infFiles.first();
-        }
-    }
+    const QString infPath = findCompatibleDriverInf(m_vddPath);
 
     if (infPath.isEmpty()) {
         VDD_LOG("VDD: No .inf files found in " + m_vddPath);
+        emit error("VDD driver INF not found in " + m_vddPath);
         return false;
     }
 
@@ -324,12 +446,22 @@ bool VirtualDisplayVDD::installDriver() {
         proc.start();
         if (proc.waitForFinished(30000)) {
             QString output = proc.readAllStandardOutput() + proc.readAllStandardError();
+            lastInstallOutput = output.trimmed();
             VDD_LOG("VDD: devcon output: " + output.trimmed());
             if (proc.exitCode() == 0) {
                 VDD_LOG("VDD: Driver device created via devcon");
                 QThread::msleep(2000);
                 return true;
             }
+        } else {
+            lastInstallOutput = "devcon timed out";
+        }
+
+        VDD_LOG("VDD: devcon failed without elevation — requesting administrator permission...");
+        if (runElevatedAndWait(devconExe, {"install", infPath, "Root\\MttVDD"})) {
+            VDD_LOG("VDD: Driver device created via elevated devcon");
+            QThread::msleep(3000);
+            return true;
         }
     } else {
         VDD_LOG("VDD: devcon.exe not found, trying pnputil...");
@@ -343,9 +475,21 @@ bool VirtualDisplayVDD::installDriver() {
     proc.start();
     if (proc.waitForFinished(30000)) {
         QString output = proc.readAllStandardOutput() + proc.readAllStandardError();
+        lastInstallOutput = output.trimmed();
         VDD_LOG("VDD: pnputil output: " + output.trimmed());
         if (proc.exitCode() == 0) {
             VDD_LOG("VDD: Driver added to store via pnputil");
+        }
+    } else {
+        lastInstallOutput = "pnputil timed out";
+    }
+
+    VDD_LOG("VDD: pnputil may need elevation — requesting administrator permission...");
+    if (runElevatedAndWait("pnputil.exe", {"/add-driver", infPath, "/install"})) {
+        VDD_LOG("VDD: Driver added to store via elevated pnputil");
+        QThread::msleep(3000);
+        if (isDriverLoaded()) {
+            return true;
         }
     }
 
@@ -361,9 +505,19 @@ bool VirtualDisplayVDD::installDriver() {
             QThread::msleep(2000);
             return true;
         }
+        VDD_LOG("VDD: Creating device node via elevated devcon...");
+        if (runElevatedAndWait(devconExe, {"install", infPath, "Root\\MttVDD"})) {
+            VDD_LOG("VDD: Device node created via elevated devcon");
+            QThread::msleep(3000);
+            return true;
+        }
     }
 
-    VDD_LOG("VDD: All driver install methods failed — devcon.exe may be required");
+    const QString detail = lastInstallOutput.isEmpty()
+        ? QString("devcon.exe may be required")
+        : lastInstallOutput.left(240);
+    VDD_LOG("VDD: All driver install methods failed — " + detail);
+    emit error("VDD driver install failed: " + detail);
 #endif
     return false;
 }
@@ -521,7 +675,17 @@ bool VirtualDisplayVDD::createVirtualDisplay(int width, int height, int refreshR
     // Method 2: Modify settings file + notify driver
     VDD_LOG("VDD: Named pipe unavailable, trying settings file method...");
     auto displays = readVddSettings();
-    displays.append({width, height, refreshRate});
+    bool hasRequestedResolution = false;
+    for (auto& display : displays) {
+        if (display.width == width && display.height == height) {
+            display.refreshRate = refreshRate;
+            hasRequestedResolution = true;
+            break;
+        }
+    }
+    if (!hasRequestedResolution) {
+        displays.append({width, height, refreshRate});
+    }
 
     if (!writeVddSettings(displays)) {
         emit error("Failed to write VDD settings file");
@@ -771,12 +935,14 @@ QVector<VirtualDisplayVDD::VddResolution> VirtualDisplayVDD::readVddSettings() c
                 } else if (name == "Height" || name == "height") {
                     current.height = xml.readElementText().toInt();
                 } else if (name == "RefreshRate" || name == "refreshRate" ||
-                           name == "Refresh" || name == "refresh") {
+                           name == "Refresh" || name == "refresh" ||
+                           name == "refresh_rate") {
                     current.refreshRate = xml.readElementText().toInt();
                 }
             } else if (xml.isEndElement()) {
                 QString name = xml.name().toString();
-                if ((name == "Display" || name == "display" || name == "Monitor" || name == "monitor")
+                if ((name == "Display" || name == "display" || name == "Monitor" ||
+                     name == "monitor" || name == "resolution")
                     && current.width > 0 && current.height > 0) {
                     if (current.refreshRate == 0) current.refreshRate = 60;
                     displays.append(current);
@@ -808,6 +974,11 @@ bool VirtualDisplayVDD::writeVddSettings(const QVector<VddResolution>& displays)
         settingsPath = m_vddPath + "/" + kSettingsFiles.first();
     }
 
+    const QString backupPath = settingsPath + ".bak";
+    if (QFileInfo::exists(settingsPath) && !QFileInfo::exists(backupPath)) {
+        QFile::copy(settingsPath, backupPath);
+    }
+
     QFile file(settingsPath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         qWarning() << "VDD: Cannot write settings to" << settingsPath;
@@ -817,19 +988,56 @@ bool VirtualDisplayVDD::writeVddSettings(const QVector<VddResolution>& displays)
     QXmlStreamWriter xml(&file);
     xml.setAutoFormatting(true);
     xml.writeStartDocument();
-    xml.writeStartElement("VirtualDisplaySettings");
-    xml.writeStartElement("Displays");
+    xml.writeStartElement("vdd_settings");
 
-    for (const auto& disp : displays) {
-        xml.writeStartElement("Display");
-        xml.writeTextElement("Width", QString::number(disp.width));
-        xml.writeTextElement("Height", QString::number(disp.height));
-        xml.writeTextElement("RefreshRate", QString::number(disp.refreshRate));
-        xml.writeEndElement(); // Display
+    const int requestedMonitorCount = displays.isEmpty() ? 0 : qMax(1, m_createdDisplayCount + 1);
+    xml.writeStartElement("monitors");
+    xml.writeTextElement("count", QString::number(requestedMonitorCount));
+    xml.writeEndElement();
+
+    xml.writeStartElement("gpu");
+    xml.writeTextElement("friendlyname", "default");
+    xml.writeEndElement();
+
+    xml.writeStartElement("global");
+    for (int hz : {60, 90, 120, 144, 165, 244}) {
+        xml.writeTextElement("g_refresh_rate", QString::number(hz));
     }
+    xml.writeEndElement();
 
-    xml.writeEndElement(); // Displays
-    xml.writeEndElement(); // VirtualDisplaySettings
+    xml.writeStartElement("resolutions");
+    for (const auto& disp : displays) {
+        writeVddResolution(xml, disp.width, disp.height, disp.refreshRate);
+    }
+    xml.writeEndElement();
+
+    xml.writeStartElement("logging");
+    xml.writeTextElement("SendLogsThroughPipe", "true");
+    xml.writeTextElement("logging", "false");
+    xml.writeTextElement("debuglogging", "false");
+    xml.writeEndElement();
+
+    xml.writeStartElement("colour");
+    xml.writeTextElement("SDR10bit", "false");
+    xml.writeTextElement("HDRPlus", "false");
+    xml.writeTextElement("ColourFormat", "RGB");
+    xml.writeEndElement();
+
+    xml.writeStartElement("cursor");
+    xml.writeTextElement("HardwareCursor", "true");
+    xml.writeTextElement("CursorMaxY", "128");
+    xml.writeTextElement("CursorMaxX", "128");
+    xml.writeTextElement("AlphaCursorSupport", "true");
+    xml.writeTextElement("XorCursorSupportLevel", "2");
+    xml.writeEndElement();
+
+    xml.writeStartElement("edid");
+    xml.writeTextElement("CustomEdid", "false");
+    xml.writeTextElement("PreventSpoof", "false");
+    xml.writeTextElement("EdidCeaOverride", "false");
+    xml.writeEndElement();
+
+    xml.writeEndElement();
     xml.writeEndDocument();
 
     file.close();

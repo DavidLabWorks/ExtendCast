@@ -55,15 +55,17 @@ VideoRenderer::VideoRenderer(QWidget* parent)
 }
 
 VideoRenderer::~VideoRenderer() {
-    makeCurrent();
-    deleteTextures();
-    delete m_program;
-    if (m_vbo) {
-        glDeleteBuffers(1, &m_vbo);
+    if (context()) {
+        makeCurrent();
+        deleteTextures();
+        if (m_vbo) {
+            glDeleteBuffers(1, &m_vbo);
+        }
+        doneCurrent();
     }
+    delete m_program;
     free(m_yBuffer);
     free(m_uvBuffer);
-    doneCurrent();
 }
 
 void VideoRenderer::initializeGL() {

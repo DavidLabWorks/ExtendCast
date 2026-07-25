@@ -218,7 +218,7 @@ endif()
 
 # Windows-specific settings
 if(WIN32)
-    target_link_libraries(BetterCastReceiver PRIVATE ws2_32)
+    target_link_libraries(BetterCastReceiver PRIVATE ws2_32 shell32)
     set_target_properties(BetterCastReceiver PROPERTIES
         OUTPUT_NAME ExtendCast
         WIN32_EXECUTABLE TRUE

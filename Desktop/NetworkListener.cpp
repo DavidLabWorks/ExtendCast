@@ -16,9 +16,7 @@ NetworkListener::NetworkListener(QObject* parent)
 }
 
 NetworkListener::~NetworkListener() {
-    for (auto* client : m_clients) {
-        client->disconnectFromHost();
-    }
+    stop();
 }
 
 void NetworkListener::setup(VideoDecoder* decoder, VideoRenderer* renderer, AudioDecoder* audioDecoder) {
@@ -34,6 +32,11 @@ uint16_t NetworkListener::actualTcpPort() const {
 }
 
 void NetworkListener::start() {
+    if (isListening()) {
+        emit statusChanged(QString("Listening on port %1").arg(actualTcpPort()));
+        return;
+    }
+
     // Start TCP server
     m_tcpServer = new QTcpServer(this);
     connect(m_tcpServer, &QTcpServer::newConnection, this, &NetworkListener::onNewTcpConnection);
@@ -67,6 +70,37 @@ void NetworkListener::start() {
     m_heartbeatTimer = new QTimer(this);
     connect(m_heartbeatTimer, &QTimer::timeout, this, &NetworkListener::onHeartbeatTick);
     m_heartbeatTimer->start(500);
+}
+
+void NetworkListener::stop() {
+    disconnectAll();
+
+    if (m_heartbeatTimer) {
+        m_heartbeatTimer->stop();
+        delete m_heartbeatTimer;
+        m_heartbeatTimer = nullptr;
+    }
+
+    if (m_udpSocket) {
+        m_udpSocket->close();
+        delete m_udpSocket;
+        m_udpSocket = nullptr;
+    }
+
+    if (m_tcpServer) {
+        m_tcpServer->close();
+        delete m_tcpServer;
+        m_tcpServer = nullptr;
+    }
+
+    {
+        QMutexLocker lock(&m_udpMutex);
+        m_udpBuffer.clear();
+    }
+}
+
+bool NetworkListener::isListening() const {
+    return m_tcpServer && m_tcpServer->isListening();
 }
 
 void NetworkListener::disconnectAll() {
@@ -189,7 +223,9 @@ void NetworkListener::processTcpBuffer(QTcpSocket* socket) {
         if (format == 1 && body.size() > 1) {
             uint8_t typeByte = static_cast<uint8_t>(body[0]);
             if (typeByte == 0x01) {
-                handleVideoData(body.mid(1), false);  // type-byte framing: no PTS prefix
+                // The type byte only wraps the existing video payload. That payload
+                // is still [8-byte PTS][AVCC NALUs] for both Mac and desktop senders.
+                handleVideoData(body.mid(1), true);
             } else if (typeByte == 0x02) {
                 handleAudioData(body.mid(1));
             }

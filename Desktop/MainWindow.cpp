@@ -17,7 +17,9 @@
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QGridLayout>
 #include <QGroupBox>
+#include <QFrame>
 #include <QScrollArea>
 #include <QScreen>
 #include <QApplication>
@@ -25,12 +27,14 @@
 #include <QDesktopServices>
 #include <QMessageBox>
 #include <QStandardPaths>
+#include <QSettings>
 #include <QDir>
 #include <QDebug>
 #include <QNetworkInterface>
 #include <QUrl>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <algorithm>
 #include <thread>
 
 // ─── Dark theme stylesheet ─────────────────────────────────────────────────────
@@ -189,6 +193,236 @@ static QGroupBox* makeCard(const QString& title) {
     return card;
 }
 
+static QFrame* makePanel() {
+    auto* panel = new QFrame();
+    panel->setObjectName("receiverPanel");
+    panel->setStyleSheet(
+        "QFrame#receiverPanel { background-color: #1f1f1f; border: 1px solid #303030; border-radius: 12px; }");
+    return panel;
+}
+
+static QFrame* makeMethodPanel() {
+    auto* panel = new QFrame();
+    panel->setObjectName("methodPanel");
+    panel->setStyleSheet(
+        "QFrame#methodPanel { background-color: #202020; border: 1px solid #313131; border-radius: 10px; }");
+    return panel;
+}
+
+struct LocalAddressInfo {
+    QString ip;
+    QString interfaceName;
+    QString connectionLabel;
+    QString usageHint;
+    int priority = 100;
+};
+
+static bool containsAny(const QString& text, const QStringList& needles) {
+    for (const auto& needle : needles) {
+        if (text.contains(needle, Qt::CaseInsensitive)) return true;
+    }
+    return false;
+}
+
+static QString classifyAddress(const QNetworkInterface& iface,
+                               const QHostAddress& address,
+                               QString* usageHint,
+                               int* priority) {
+    const QString name = iface.humanReadableName().isEmpty()
+        ? iface.name()
+        : iface.humanReadableName();
+    const QString lowerName = name.toLower();
+    const QString ip = address.toString();
+
+    if (containsAny(lowerName, {"mihomo", "meta tunnel", "clash", "proxy"})) {
+        *usageHint = "Proxy tunnel; usually not reachable from local senders";
+        *priority = 80;
+        return "Proxy";
+    }
+    if (containsAny(lowerName, {"tailscale", "zerotier", "wireguard", "vpn"})) {
+        *usageHint = "VPN address; use from devices on the same VPN";
+        *priority = 50;
+        return "VPN";
+    }
+    if (containsAny(lowerName, {"hyper-v", "vethernet", "virtualbox", "vmware", "wsl"})) {
+        *usageHint = "Virtual adapter; mainly for VMs or local containers";
+        *priority = 70;
+        return "Virtual";
+    }
+    if (containsAny(lowerName, {"usb4", "thunderbolt"})) {
+        *usageHint = "Connect directly over Thunderbolt.";
+        *priority = 20;
+        return "Thunderbolt Bridge";
+    }
+    if (containsAny(lowerName, {"bluetooth"})) {
+        *usageHint = "Bluetooth PAN; only use when paired over Bluetooth networking";
+        *priority = 75;
+        return "Bluetooth";
+    }
+    if (ip.startsWith("169.254.")) {
+        *usageHint = "Link-local address; only works on direct or ad-hoc links";
+        *priority = 60;
+        return "Link-local";
+    }
+    if (containsAny(lowerName, {"wi-fi", "wifi", "wlan", "wireless"})) {
+        *usageHint = "Connect through the Wi-Fi network.";
+        *priority = 10;
+        return "Wi-Fi";
+    }
+    if (containsAny(lowerName, {"ethernet", "以太网"})) {
+        *usageHint = "Connect through a wired Ethernet network.";
+        *priority = 15;
+        return "Ethernet";
+    }
+    *usageHint = "Use when the sender is on this same network";
+    *priority = 30;
+    return "Network";
+}
+
+static QVector<LocalAddressInfo> localAddressInfos() {
+    QVector<LocalAddressInfo> infos;
+    for (const auto& iface : QNetworkInterface::allInterfaces()) {
+        if (!iface.flags().testFlag(QNetworkInterface::IsUp) ||
+            !iface.flags().testFlag(QNetworkInterface::IsRunning) ||
+            iface.flags().testFlag(QNetworkInterface::IsLoopBack)) {
+            continue;
+        }
+
+        const QString ifaceName = iface.humanReadableName().isEmpty()
+            ? iface.name()
+            : iface.humanReadableName();
+        for (const auto& entry : iface.addressEntries()) {
+            const QHostAddress ip = entry.ip();
+            if (ip.protocol() != QAbstractSocket::IPv4Protocol) continue;
+
+            LocalAddressInfo info;
+            info.ip = ip.toString();
+            info.interfaceName = ifaceName;
+            info.connectionLabel = classifyAddress(iface, ip, &info.usageHint, &info.priority);
+            if (info.ip.startsWith("169.254.") && info.priority < 60) {
+                info.usageHint += "; current address is link-local";
+            }
+            infos.append(info);
+        }
+    }
+
+    std::sort(infos.begin(), infos.end(), [](const LocalAddressInfo& a, const LocalAddressInfo& b) {
+        if (a.priority != b.priority) return a.priority < b.priority;
+        return a.ip < b.ip;
+    });
+    return infos;
+}
+
+static QVector<LocalAddressInfo> receiverAddressInfos() {
+    QVector<LocalAddressInfo> result;
+    for (auto info : localAddressInfos()) {
+        const QString lowerInterface = info.interfaceName.toLower();
+        const bool isLinkLocal = info.ip.startsWith("169.254.");
+        const bool isExcluded =
+            info.connectionLabel == "VPN" ||
+            info.connectionLabel == "Virtual" ||
+            info.connectionLabel == "Proxy" ||
+            info.connectionLabel == "Bluetooth" ||
+            containsAny(lowerInterface, {"tailscale", "zerotier", "wireguard", "mihomo", "hyper-v", "vethernet"});
+
+        if (isExcluded) continue;
+
+        if (info.connectionLabel == "Wi-Fi" ||
+            info.connectionLabel == "Ethernet" ||
+            info.connectionLabel == "Thunderbolt Bridge") {
+            result.append(info);
+            continue;
+        }
+
+        // Windows may expose USB4/Thunderbolt peer networking as a generic Ethernet alias
+        // with a link-local address, especially on localized systems.
+        if (isLinkLocal && containsAny(lowerInterface, {"ethernet", "以太网"})) {
+            info.connectionLabel = "Thunderbolt Bridge";
+            info.usageHint = "Connect directly over Thunderbolt.";
+            info.priority = 20;
+            result.append(info);
+        }
+    }
+
+    std::sort(result.begin(), result.end(), [](const LocalAddressInfo& a, const LocalAddressInfo& b) {
+        if (a.priority != b.priority) return a.priority < b.priority;
+        return a.ip < b.ip;
+    });
+    return result;
+}
+
+static QString formatAddressLines(const QVector<LocalAddressInfo>& infos) {
+    if (infos.isEmpty()) return "No network detected";
+
+    QStringList lines;
+    for (int i = 0; i < infos.size(); ++i) {
+        const auto& info = infos.at(i);
+        const QString badge = (i == 0 && info.priority <= 30)
+            ? QStringLiteral("Recommended - ")
+            : QString();
+        lines.append(QString("%1%2<br><b>%3:51820</b><br>%4<br><span style=\"color:#777;\">%5</span>")
+                         .arg(badge,
+                              info.connectionLabel.toHtmlEscaped(),
+                              info.ip.toHtmlEscaped(),
+                              info.interfaceName.toHtmlEscaped(),
+                              info.usageHint.toHtmlEscaped()));
+    }
+    return lines.join("<br><br>");
+}
+
+static QLabel* makeAddressLabel(const QString& text, const QString& style) {
+    auto* label = new QLabel(text);
+    label->setStyleSheet(style);
+    label->setWordWrap(true);
+    return label;
+}
+
+static QFrame* makeDivider() {
+    auto* line = new QFrame();
+    line->setFrameShape(QFrame::HLine);
+    line->setFrameShadow(QFrame::Plain);
+    line->setStyleSheet("background-color: #2c2c2c; max-height: 1px;");
+    return line;
+}
+
+static void clearLayout(QLayout* layout) {
+    if (!layout) return;
+    while (auto* item = layout->takeAt(0)) {
+        if (auto* childLayout = item->layout()) clearLayout(childLayout);
+        if (auto* widget = item->widget()) delete widget;
+        delete item;
+    }
+}
+
+static QString formatPrimaryAddress(const QVector<LocalAddressInfo>& infos) {
+    if (infos.isEmpty()) return "Listening on port 51820";
+
+    const auto& primary = infos.first();
+    return QString("Listening at %1:%2").arg(primary.ip, QStringLiteral("51820"));
+}
+
+static QString formatPrimaryHint(const QVector<LocalAddressInfo>& infos) {
+    if (infos.isEmpty()) return "No active network address was found.";
+
+    const auto& primary = infos.first();
+    return QString("Best manual address: %1 · %2")
+                         .arg(primary.ip, primary.connectionLabel);
+}
+
+static bool receiverAutoStartEnabledPreference() {
+    QSettings settings;
+    if (settings.contains("receiverAutoStartEnabled")) {
+        return settings.value("receiverAutoStartEnabled", false).toBool();
+    }
+    if (settings.contains("receiverListeningEnabled")) {
+        const bool migrated = settings.value("receiverListeningEnabled", false).toBool();
+        settings.setValue("receiverAutoStartEnabled", migrated);
+        settings.sync();
+        return migrated;
+    }
+    return false;
+}
+
 // ─── Constructor ────────────────────────────────────────────────────────────────
 
 MainWindow::MainWindow(QWidget* parent)
@@ -197,21 +431,11 @@ MainWindow::MainWindow(QWidget* parent)
     setWindowTitle("ExtendCast");
     setMinimumSize(800, 500);
 
-    // Crash detection: check if previous session exited cleanly
+    // Crash detection: clear stale marker from previous sessions. Avoid showing a
+    // startup dialog here because it has caused Qt Widgets crashes on some systems.
     QString crashMarker = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/running.lock";
     if (QFile::exists(crashMarker)) {
-        // Previous session crashed — offer to report
-        QTimer::singleShot(500, this, [this]() {
-            auto* dialog = new QMessageBox(this);
-            dialog->setIcon(QMessageBox::Warning);
-            dialog->setWindowTitle("ExtendCast crashed last time");
-            dialog->setText("ExtendCast didn't exit cleanly last time. Would you like to report this issue on GitHub?");
-            dialog->setStandardButtons(QMessageBox::Yes | QMessageBox::No);
-            dialog->setDefaultButton(QMessageBox::Yes);
-            if (dialog->exec() == QMessageBox::Yes) {
-                onReportIssue();
-            }
-        });
+        QFile::remove(crashMarker);
     }
     // Write crash marker (removed on clean exit)
     QDir().mkpath(QFileInfo(crashMarker).absolutePath());
@@ -239,7 +463,14 @@ MainWindow::MainWindow(QWidget* parent)
         LogManager::instance().log("Sender: " + status);
     });
     connect(m_sender, &SenderController::error, this, [this](const QString& msg) {
+        m_lastSenderError = msg;
         if (m_senderStatusLabel) m_senderStatusLabel->setText("Error: " + msg);
+        if (m_vddStatusLabel && (msg.contains("VDD", Qt::CaseInsensitive) ||
+                                 msg.contains("driver", Qt::CaseInsensitive) ||
+                                 msg.contains("virtual display", Qt::CaseInsensitive))) {
+            m_vddStatusLabel->setText("Error: " + msg);
+            m_vddStatusLabel->setStyleSheet("font-size: 12px; color: #d32f2f;");
+        }
         LogManager::instance().log("Sender error: " + msg);
     });
     connect(m_sender, &SenderController::connected, this, [this]() {
@@ -294,12 +525,6 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_network, &NetworkListener::statusChanged,
             this, &MainWindow::onStatusChanged);
 
-    // Create video window (separate window, like Mac app)
-    m_videoWindow = new VideoWindow(m_renderer, m_inputHandler, this);
-    connect(m_videoWindow, &VideoWindow::windowClosed, this, [this]() {
-        LogManager::instance().log("Video window closed by user");
-    });
-
     connect(m_renderer, &VideoRenderer::videoSizeChanged,
             this, &MainWindow::onVideoSizeChanged);
 
@@ -309,14 +534,14 @@ MainWindow::MainWindow(QWidget* parent)
 
     setupUi();
 
-    // Start services
-    m_network->start();
-    uint16_t actualPort = m_network->actualTcpPort();
-    m_discovery->startAdvertising(actualPort);
+    // Match macOS: only start the receiver automatically when the persisted
+    // receiverAutoStartEnabled preference is enabled.
+    onReceiverListeningToggled(receiverAutoStartEnabledPreference());
 #ifdef ENABLE_SENDER
     m_discovery->startBrowsing();
 #endif
-    LogManager::instance().log(QString("ExtendCast started — listening on port %1").arg(actualPort));
+    LogManager::instance().log(QString("ExtendCast started — receiver listening %1")
+                                   .arg(m_receiverListening ? "enabled" : "disabled"));
 #ifdef _WIN32
     QByteArray fwStatus = qgetenv("EXTENDCAST_FW_STATUS");
     if (fwStatus == "ok") {
@@ -342,6 +567,10 @@ MainWindow::MainWindow(QWidget* parent)
 
 MainWindow::~MainWindow() {
     m_discovery->stopAdvertising();
+    delete m_videoWindow;
+    m_videoWindow = nullptr;
+    delete m_renderer;
+    m_renderer = nullptr;
     // Clean exit — remove crash marker
     QString crashMarker = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/running.lock";
     QFile::remove(crashMarker);
@@ -365,10 +594,6 @@ void MainWindow::setupUi() {
     m_stack = new QStackedWidget();
 
     // Build pages — order matters for page indices
-    setupOverviewPage();
-#ifdef ENABLE_SENDER
-    setupSendPage();
-#endif
     setupReceivePage();
     setupSettingsPage();
     setupLogsPage();
@@ -388,23 +613,12 @@ void MainWindow::setupUi() {
     connect(m_sidebarList, &QListWidget::currentRowChanged,
             this, &MainWindow::onSidebarSelectionChanged);
 
-    // Select Overview by default
-    selectSidebarItem(m_pageOverview);
+    // Select Receiver by default
+    selectSidebarItem(m_pageReceive);
 }
 
 void MainWindow::setupSidebar() {
-    addSidebarSection(m_sidebarList, "DEVICES");
-    addSidebarItem(m_sidebarList, QString::fromUtf8("\xF0\x9F\x96\xA5"), "Overview", m_pageOverview);
-
-#ifdef ENABLE_SENDER
-    addSidebarSection(m_sidebarList, "SEND");
-    addSidebarItem(m_sidebarList, QString::fromUtf8("\xF0\x9F\x93\xA4"), "Send Screen", m_pageSend);
-#endif
-
-    addSidebarSection(m_sidebarList, "RECEIVE");
-    addSidebarItem(m_sidebarList, QString::fromUtf8("\xF0\x9F\x93\xA5"), "Receive Screen", m_pageReceive);
-
-    addSidebarSection(m_sidebarList, "");
+    addSidebarItem(m_sidebarList, QString::fromUtf8("\xF0\x9F\x93\xA5"), "Receiver", m_pageReceive);
     addSidebarItem(m_sidebarList, QString::fromUtf8("\xE2\x9A\x99"), "Settings", m_pageSettings);
     addSidebarItem(m_sidebarList, QString::fromUtf8("\xF0\x9F\x93\x9C"), "Logs", m_pageLogs);
 }
@@ -514,8 +728,8 @@ void MainWindow::setupSendPage() {
     scroll->setWidgetResizable(true);
 
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(40, 30, 40, 30);
-    layout->setSpacing(16);
+    layout->setContentsMargins(48, 34, 48, 34);
+    layout->setSpacing(20);
 
     auto* pageTitle = new QLabel("Send Screen");
     pageTitle->setStyleSheet("font-size: 22px; font-weight: bold; color: white;");
@@ -782,105 +996,90 @@ void MainWindow::setupReceivePage() {
     scroll->setWidgetResizable(true);
 
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(40, 30, 40, 30);
-    layout->setSpacing(16);
+    layout->setContentsMargins(48, 34, 48, 34);
+    layout->setSpacing(18);
+    layout->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
 
-    auto* pageTitle = new QLabel("Receive Screen");
-    pageTitle->setStyleSheet("font-size: 22px; font-weight: bold; color: white;");
+    auto* pageTitle = new QLabel("Receiver");
+    pageTitle->setMaximumWidth(680);
+    pageTitle->setStyleSheet("font-size: 26px; font-weight: bold; color: white;");
     layout->addWidget(pageTitle);
 
-    // Listening status card (prominent, like Mac's Start Listening)
-    auto* listenCard = makeCard("Listening for Senders");
-    auto* listenLayout = new QVBoxLayout(listenCard);
-    listenLayout->setSpacing(10);
+    auto* pageDesc = new QLabel("Use one of the addresses below from the sending device.");
+    pageDesc->setMaximumWidth(680);
+    pageDesc->setStyleSheet("font-size: 13px; color: #9a9a9a;");
+    pageDesc->setWordWrap(true);
+    layout->addWidget(pageDesc);
 
-    // Status indicator
+    auto* statusTitle = new QLabel("Status");
+    statusTitle->setMaximumWidth(680);
+    statusTitle->setStyleSheet("font-size: 14px; font-weight: 700; color: #a7a7a7; padding-top: 14px;");
+    layout->addWidget(statusTitle);
+
+    auto* statusCard = makePanel();
+    statusCard->setMaximumWidth(680);
+    auto* statusLayout = new QVBoxLayout(statusCard);
+    statusLayout->setContentsMargins(24, 22, 24, 22);
+
+    auto* statusRow = new QHBoxLayout();
+    statusRow->setSpacing(12);
+
+    m_recvStatusDot = new QLabel();
+    m_recvStatusDot->setFixedSize(10, 10);
+    m_recvStatusDot->setStyleSheet("background-color: #34c759; border-radius: 5px;");
+    statusRow->addWidget(m_recvStatusDot);
+
     m_recvStatusLabel = new QLabel("Listening on port 51820");
-    m_recvStatusLabel->setStyleSheet("font-size: 15px; font-weight: bold; color: #4da6ff;");
-    listenLayout->addWidget(m_recvStatusLabel);
+    m_recvStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #d8d8d8;");
+    statusRow->addWidget(m_recvStatusLabel);
+    statusRow->addStretch();
+
+    m_receiverListenToggle = new QPushButton("On");
+    m_receiverListenToggle->setCheckable(true);
+    m_receiverListenToggle->setChecked(true);
+    m_receiverListenToggle->setCursor(Qt::PointingHandCursor);
+    m_receiverListenToggle->setFixedSize(74, 32);
+    m_receiverListenToggle->setStyleSheet(
+        "QPushButton { background-color: #2b2b2b; border: 1px solid #3a3a3a; border-radius: 16px; "
+        "color: #bdbdbd; font-size: 12px; font-weight: 700; padding: 0 12px; text-align: center; }"
+        "QPushButton:checked { background-color: #248a46; border-color: #2fbf62; color: white; }"
+        "QPushButton:hover { border-color: #555555; }");
+    connect(m_receiverListenToggle, &QPushButton::toggled,
+            this, &MainWindow::onReceiverListeningToggled);
+    statusRow->addWidget(m_receiverListenToggle);
+    statusLayout->addLayout(statusRow);
+
+    layout->addWidget(statusCard);
+
+    auto* listTitle = new QLabel("Available Connections");
+    listTitle->setMaximumWidth(680);
+    listTitle->setStyleSheet("font-size: 14px; font-weight: 700; color: #a7a7a7; padding-top: 8px;");
+    layout->addWidget(listTitle);
+
+    auto* listenCard = makePanel();
+    listenCard->setMaximumWidth(680);
+    auto* listenLayout = new QVBoxLayout(listenCard);
+    listenLayout->setContentsMargins(24, 24, 24, 24);
+    listenLayout->setSpacing(0);
 
     m_recvIpLabel = new QLabel();
-    m_recvIpLabel->setStyleSheet("font-size: 13px; color: #888;");
+    m_recvIpLabel->setTextFormat(Qt::PlainText);
     m_recvIpLabel->setWordWrap(true);
+    m_recvIpLabel->setStyleSheet(
+        "font-size: 13px; color: #8f8f8f; padding: 18px 0;");
     listenLayout->addWidget(m_recvIpLabel);
 
-    auto* instrLabel = new QLabel(
-        "This device is ready to receive. On the sender device:\n"
-        "  1. Open ExtendCast and go to Send Screen\n"
-        "  2. This device should appear automatically\n"
-        "  3. Or enter this device's IP address manually");
-    instrLabel->setStyleSheet("color: #888; font-size: 12px;");
-    instrLabel->setWordWrap(true);
-    listenLayout->addWidget(instrLabel);
+    m_recvAddressListLayout = new QVBoxLayout();
+    m_recvAddressListLayout->setContentsMargins(0, 0, 0, 0);
+    m_recvAddressListLayout->setSpacing(10);
+    listenLayout->addLayout(m_recvAddressListLayout);
 
     layout->addWidget(listenCard);
-
-    // Manual connect card (secondary)
-    auto* manualCard = makeCard("Connect to a Sender (Manual)");
-    auto* manualLayout = new QVBoxLayout(manualCard);
-    manualLayout->setSpacing(10);
-
-    auto* manualDesc = new QLabel("Connect to a sender that isn't auto-discovered:");
-    manualDesc->setStyleSheet("font-size: 12px; color: #888;");
-    manualLayout->addWidget(manualDesc);
-
-    auto* connRow = new QHBoxLayout();
-    connRow->setSpacing(8);
-
-    m_hostEdit = new QLineEdit();
-    m_hostEdit->setPlaceholderText("Sender IP address");
-    m_hostEdit->setFixedWidth(180);
-    connRow->addWidget(m_hostEdit);
-
-    m_portEdit = new QLineEdit("51820");
-    m_portEdit->setPlaceholderText("Port");
-    m_portEdit->setFixedWidth(80);
-    connRow->addWidget(m_portEdit);
-
-    m_connectBtn = new QPushButton("Connect");
-    m_connectBtn->setStyleSheet(
-        "QPushButton { background-color: #0078D4; color: white; font-weight: bold; "
-        "padding: 8px 20px; border-radius: 6px; border: none; }"
-        "QPushButton:hover { background-color: #1a8ae8; }"
-        "QPushButton:disabled { background-color: #2a2a2a; color: #666; }");
-    connect(m_connectBtn, &QPushButton::clicked, this, &MainWindow::onConnectClicked);
-    connRow->addWidget(m_connectBtn);
-
-    connRow->addStretch();
-    manualLayout->addLayout(connRow);
-
-    layout->addWidget(manualCard);
-
-    // ADB card
-    auto* adbCard = makeCard("Android (ADB)");
-    auto* adbLayout = new QVBoxLayout(adbCard);
-    adbLayout->setSpacing(10);
-
-    m_adbBtn = new QPushButton("Connect to Android (ADB)");
-    m_adbBtn->setStyleSheet(
-        "QPushButton { background-color: #3ddc84; color: black; font-weight: bold; "
-        "padding: 10px 20px; border-radius: 8px; font-size: 14px; border: none; }"
-        "QPushButton:hover { background-color: #50e898; }"
-        "QPushButton:disabled { background-color: #2a2a2a; color: #666; }");
-    connect(m_adbBtn, &QPushButton::clicked, this, &MainWindow::onAdbConnectClicked);
-    adbLayout->addWidget(m_adbBtn);
-
-    m_adbHelpLabel = new QLabel(
-        "To mirror your Android screen:\n"
-        "1. Enable Developer Options (tap Build Number 7x in Settings > About)\n"
-        "2. Enable USB Debugging in Developer Options\n"
-        "3. Connect Android to this computer via USB\n"
-        "4. Open the compatible Android app and tap \"Start Casting\"\n"
-        "5. Click the button above to connect");
-    m_adbHelpLabel->setStyleSheet("color: #666; font-size: 11px;");
-    m_adbHelpLabel->setWordWrap(true);
-    adbLayout->addWidget(m_adbHelpLabel);
-
-    layout->addWidget(adbCard);
 
     layout->addStretch();
 
     m_pageReceive = m_stack->addWidget(scroll);
+    updateLocalIpDisplay();
 }
 
 // ─── Settings Page ──────────────────────────────────────────────────────────────
@@ -927,22 +1126,16 @@ void MainWindow::setupSettingsPage() {
     portInfo->setStyleSheet("font-size: 13px; color: #ccc;");
     connLayout->addWidget(portInfo);
 
-    auto* ipInfo = new QLabel();
-    QStringList ips;
-    for (const auto& iface : QNetworkInterface::allInterfaces()) {
-        if (iface.flags().testFlag(QNetworkInterface::IsUp) &&
-            iface.flags().testFlag(QNetworkInterface::IsRunning) &&
-            !iface.flags().testFlag(QNetworkInterface::IsLoopBack)) {
-            for (const auto& entry : iface.addressEntries()) {
-                if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol) {
-                    ips.append(entry.ip().toString());
-                }
-            }
-        }
-    }
-    ipInfo->setText(ips.isEmpty() ? "No network detected"
-                                  : "Local IPs: " + ips.join(", "));
+    m_receiverAutoStartCheck = new QCheckBox("Start listening on launch");
+    m_receiverAutoStartCheck->setChecked(receiverAutoStartEnabledPreference());
+    m_receiverAutoStartCheck->setStyleSheet("font-size: 13px; color: #ddd;");
+    connect(m_receiverAutoStartCheck, &QCheckBox::toggled,
+            this, &MainWindow::onReceiverAutoStartToggled);
+    connLayout->addWidget(m_receiverAutoStartCheck);
+
+    auto* ipInfo = new QLabel(formatAddressLines(localAddressInfos()));
     ipInfo->setStyleSheet("font-size: 12px; color: #888;");
+    ipInfo->setTextFormat(Qt::RichText);
     ipInfo->setWordWrap(true);
     connLayout->addWidget(ipInfo);
 
@@ -1113,11 +1306,19 @@ void MainWindow::onAdbConnectClicked() {
 }
 
 void MainWindow::onConnectionEstablished() {
-    m_connectBtn->setEnabled(true);
+    if (m_connectBtn) {
+        m_connectBtn->setEnabled(true);
+    }
     m_reconnectTimer->stop();
     LogManager::instance().log("Connection established — streaming video");
 
     // Open the video in a separate window
+    if (!m_videoWindow) {
+        m_videoWindow = new VideoWindow(m_renderer, m_inputHandler, this);
+        connect(m_videoWindow, &VideoWindow::windowClosed, this, [this]() {
+            LogManager::instance().log("Video window closed by user");
+        });
+    }
     if (m_videoWindow) {
         m_videoWindow->showForVideo();
     }
@@ -1150,7 +1351,9 @@ void MainWindow::onConnectionEstablished() {
 }
 
 void MainWindow::onConnectionLost() {
-    m_connectBtn->setEnabled(true);
+    if (m_connectBtn) {
+        m_connectBtn->setEnabled(true);
+    }
 
     if (m_adbHelper->wasAdbConnection()) {
         // Don't reset m_reconnectAttempts here — if the reconnect itself
@@ -1176,8 +1379,60 @@ void MainWindow::onConnectionLost() {
 }
 
 void MainWindow::onStatusChanged(const QString& status) {
-    m_recvStatusLabel->setText(status);
+    if (m_recvStatusLabel) {
+        if (status.contains("Waiting for connection", Qt::CaseInsensitive)) {
+            m_recvStatusLabel->setText(QString("Listening on port %1").arg(m_receiverPort));
+            m_recvStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #d8d8d8;");
+        } else {
+            m_recvStatusLabel->setText(status);
+        }
+    }
     LogManager::instance().log(status);
+}
+
+void MainWindow::onReceiverListeningToggled(bool checked) {
+    if (m_receiverListenToggle) {
+        m_receiverListenToggle->blockSignals(true);
+        m_receiverListenToggle->setChecked(checked);
+        m_receiverListenToggle->setText(checked ? "On" : "Off");
+        m_receiverListenToggle->blockSignals(false);
+    }
+
+    if (checked) {
+        m_network->start();
+        m_receiverPort = m_network->actualTcpPort();
+        m_discovery->startAdvertising(m_receiverPort);
+        m_receiverListening = true;
+        if (m_recvStatusLabel) {
+            m_recvStatusLabel->setText(QString("Listening on port %1").arg(m_receiverPort));
+            m_recvStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #d8d8d8;");
+        }
+        if (m_recvStatusDot) {
+            m_recvStatusDot->setStyleSheet("background-color: #34c759; border-radius: 5px;");
+        }
+        LogManager::instance().log(QString("Receiver listening enabled on port %1").arg(m_receiverPort));
+    } else {
+        m_discovery->stopAdvertising();
+        m_network->stop();
+        m_receiverListening = false;
+        if (m_recvStatusLabel) {
+            m_recvStatusLabel->setText("Listening is off");
+            m_recvStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #9a9a9a;");
+        }
+        if (m_recvStatusDot) {
+            m_recvStatusDot->setStyleSheet("background-color: #6b6b6b; border-radius: 5px;");
+        }
+        LogManager::instance().log("Receiver listening disabled");
+    }
+
+    updateLocalIpDisplay();
+}
+
+void MainWindow::onReceiverAutoStartToggled(bool checked) {
+    QSettings settings;
+    settings.setValue("receiverAutoStartEnabled", checked);
+    settings.sync();
+    LogManager::instance().log(QString("Receiver start-on-launch %1").arg(checked ? "enabled" : "disabled"));
 }
 
 void MainWindow::onVideoSizeChanged(QSize size) {
@@ -1264,6 +1519,7 @@ void MainWindow::onCreateVirtualDisplay() {
     m_createVddBtn->setEnabled(false);
     m_vddStatusLabel->setText("Creating virtual display...");
     m_vddStatusLabel->setStyleSheet("font-size: 12px; color: #4da6ff;");
+    m_lastSenderError.clear();
     LogManager::instance().log(QString("Creating virtual display %1x%2...").arg(w).arg(h));
 
     // Run in background thread to avoid blocking UI
@@ -1287,7 +1543,10 @@ void MainWindow::onCreateVirtualDisplay() {
                     }
                 }
             } else {
-                m_vddStatusLabel->setText("Failed to create virtual display — check logs");
+                const QString errorText = m_lastSenderError.isEmpty()
+                    ? QString("Failed to create virtual display — check logs")
+                    : QString("Failed: %1").arg(m_lastSenderError);
+                m_vddStatusLabel->setText(errorText);
                 m_vddStatusLabel->setStyleSheet("font-size: 12px; color: #d32f2f;");
             }
         });
@@ -1481,23 +1740,98 @@ void MainWindow::onReportIssue() {
 // ─── Local IP Display ───────────────────────────────────────────────────────────
 
 void MainWindow::updateLocalIpDisplay() {
-    QStringList ips;
-    for (const auto& iface : QNetworkInterface::allInterfaces()) {
-        if (iface.flags().testFlag(QNetworkInterface::IsUp) &&
-            iface.flags().testFlag(QNetworkInterface::IsRunning) &&
-            !iface.flags().testFlag(QNetworkInterface::IsLoopBack)) {
-            for (const auto& entry : iface.addressEntries()) {
-                if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol) {
-                    ips.append(entry.ip().toString());
-                }
-            }
-        }
+    const auto infos = receiverAddressInfos();
+    QString overviewText = "No network detected";
+
+    if (!infos.isEmpty()) {
+        const auto& primary = infos.first();
+        overviewText = QString("Best manual address: %1:51820 (%2)")
+                           .arg(primary.ip, primary.connectionLabel);
     }
 
-    QString text = ips.isEmpty()
-        ? "No network detected"
-        : "This device: " + ips.join(" / ") + " : 51820";
+    if (m_overviewIpLabel) m_overviewIpLabel->setText(overviewText);
+    if (m_recvAddressListLayout) {
+        clearLayout(m_recvAddressListLayout);
+    }
 
-    if (m_overviewIpLabel) m_overviewIpLabel->setText(text);
-    if (m_recvIpLabel) m_recvIpLabel->setText(text);
+    if (!m_receiverListening) {
+        if (m_recvStatusLabel) {
+            m_recvStatusLabel->setText("Listening is off");
+            m_recvStatusLabel->setToolTip("Turn on listening to receive connections.");
+        }
+        if (m_recvIpLabel) {
+            m_recvIpLabel->show();
+            m_recvIpLabel->setText("Turn on listening to show available receiver addresses.");
+        }
+        return;
+    }
+
+    if (m_recvStatusLabel) {
+        m_recvStatusLabel->setText(infos.isEmpty() ? "Waiting for network" : QString("Listening on port %1").arg(m_receiverPort));
+        m_recvStatusLabel->setToolTip(formatPrimaryHint(infos));
+    }
+    if (m_recvIpLabel) {
+        if (infos.isEmpty()) {
+            m_recvIpLabel->show();
+            m_recvIpLabel->setText("No Wi-Fi, Ethernet, or Thunderbolt Bridge address is available.");
+            return;
+        }
+
+        m_recvIpLabel->clear();
+        m_recvIpLabel->hide();
+    }
+
+    if (m_recvAddressListLayout) {
+        for (const auto& info : infos) {
+            auto* panel = makeMethodPanel();
+            panel->setToolTip(QString("Windows adapter: %1").arg(info.interfaceName));
+            auto* row = new QHBoxLayout(panel);
+            row->setContentsMargins(18, 16, 18, 16);
+            row->setSpacing(16);
+
+            auto* textCol = new QVBoxLayout();
+            textCol->setSpacing(6);
+
+            auto* titleRow = new QHBoxLayout();
+            titleRow->setSpacing(8);
+
+            auto* modeLabel = new QLabel(info.connectionLabel);
+            modeLabel->setStyleSheet("font-size: 13px; font-weight: 700; color: #f2f2f2;");
+            titleRow->addWidget(modeLabel);
+
+            titleRow->addStretch();
+            textCol->addLayout(titleRow);
+
+            auto* addressLabel = new QLabel(QString("%1:%2").arg(info.ip).arg(m_receiverPort));
+            addressLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            addressLabel->setWordWrap(true);
+            addressLabel->setStyleSheet(
+                "font-family: Consolas, 'SF Mono', monospace; font-size: 20px; "
+                "font-weight: 700; color: #ffffff; letter-spacing: 0;");
+            textCol->addWidget(addressLabel);
+
+            auto* hintLabel = new QLabel(info.usageHint);
+            hintLabel->setWordWrap(true);
+            hintLabel->setStyleSheet("font-size: 12px; color: #a6a6a6;");
+            textCol->addWidget(hintLabel);
+
+            row->addLayout(textCol, 1);
+
+            auto* copyBtn = new QPushButton("Copy");
+            copyBtn->setCursor(Qt::PointingHandCursor);
+            copyBtn->setFixedWidth(68);
+            copyBtn->setStyleSheet(
+                "QPushButton { background-color: #2b2b2b; border: 1px solid #3a3a3a; "
+                "border-radius: 8px; color: #d8d8d8; font-size: 12px; font-weight: 600; padding: 6px 10px; }"
+                "QPushButton:hover { background-color: #333333; border-color: #4d4d4d; }");
+            const QString address = QString("%1:%2").arg(info.ip).arg(m_receiverPort);
+            connect(copyBtn, &QPushButton::clicked, this, [address]() {
+                QApplication::clipboard()->setText(address);
+                LogManager::instance().log(QString("Copied receiver address: %1").arg(address));
+            });
+            row->addWidget(copyBtn, 0, Qt::AlignTop);
+
+            m_recvAddressListLayout->addWidget(panel);
+        }
+    }
 }

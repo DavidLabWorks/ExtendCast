@@ -35,7 +35,9 @@ ShowInstDetails show
 !insertmacro MUI_PAGE_WELCOME
 
 ; Components page (lets user choose VDD)
-!insertmacro MUI_PAGE_COMPONENTS
+!ifdef INCLUDE_VDD
+  !insertmacro MUI_PAGE_COMPONENTS
+!endif
 
 ; Directory page
 !insertmacro MUI_PAGE_DIRECTORY
@@ -99,6 +101,7 @@ Section "ExtendCast (required)" SecCore
     nsExec::ExecToLog 'netsh advfirewall firewall add rule name="ExtendCast Receiver" dir=in action=allow protocol=TCP localport=51820 program="$INSTDIR\${PRODUCT_EXE}"'
 SectionEnd
 
+!ifdef INCLUDE_VDD
 Section "Virtual Display Driver (VDD)" SecVDD
     ; VDD enables extending your desktop with virtual monitors
     ; Files are placed by CI into vdd/ directory
@@ -172,15 +175,18 @@ Section "Virtual Display Driver (VDD)" SecVDD
 
     vdd_skip_registry:
 SectionEnd
+!endif
 
 ; ─── Section Descriptions ────────────────────────────────────────────────────────
 
+!ifdef INCLUDE_VDD
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SecCore} \
     "ExtendCast receiver and sender application. Stream your screen to any device."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecVDD} \
     "Virtual Display Driver — creates virtual monitors to extend your desktop without a physical display. Required for sender mode screen extension."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
+!endif
 
 ; ─── Uninstaller ─────────────────────────────────────────────────────────────────
 
