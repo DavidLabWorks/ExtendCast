@@ -28,6 +28,11 @@
 #include <QMessageBox>
 #include <QStandardPaths>
 #include <QSettings>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QPainter>
 #include <QSvgRenderer>
 #include <QFile>
@@ -38,15 +43,32 @@
 #include <QUrl>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QToolButton>
+#include <QEvent>
+#include <QWindow>
 #include <QStyledItemDelegate>
 #include <QStyleOptionViewItem>
 #include <algorithm>
 #include <thread>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <windowsx.h>
+#endif
+
 // ─── Dark theme stylesheet ─────────────────────────────────────────────────────
 
 static const char* kDarkStylesheet = R"(
     QMainWindow { background-color: #1a1a1a; }
+    QWidget#appRoot { background-color: #1a1a1a; border: 1px solid #303030; }
+    QFrame#customTitleBar { background-color: #202020; border: none; }
+    QLabel#titleBarText { color: #8e8e8e; font-size: 13px; font-weight: 500; }
+    QPushButton#windowButton { background: transparent; border: none; color: #c8c8c8; font-family: "Segoe MDL2 Assets"; font-size: 10px; padding: 0; margin: 0; }
+    QPushButton#windowButton:hover { background-color: rgba(255, 255, 255, 0.12); color: #ffffff; }
+    QPushButton#windowButton:pressed { background-color: rgba(255, 255, 255, 0.08); color: #ffffff; }
+    QPushButton#closeWindowButton { background: transparent; border: none; color: #c8c8c8; font-family: "Segoe MDL2 Assets"; font-size: 10px; padding: 0; margin: 0; }
+    QPushButton#closeWindowButton:hover { background-color: #c42b1c; color: #ffffff; }
+    QPushButton#closeWindowButton:pressed { background-color: #a82419; color: #ffffff; }
     QSplitter { background-color: #1a1a1a; }
     QSplitter::handle { background: transparent; width: 0px; }
 
@@ -55,7 +77,7 @@ static const char* kDarkStylesheet = R"(
         border: none;
         outline: none;
         font-size: 14px;
-        padding: 18px 0 0 0;
+        padding: 12px 0 0 0;
     }
     QListWidget::item {
         border: none;
@@ -270,8 +292,8 @@ static QIcon makeSidebarIcon(const QString& name) {
 
     QIcon icon;
     icon.addPixmap(drawIcon(QColor("#aeb3bd")), QIcon::Normal);
-    icon.addPixmap(drawIcon(QColor("#f5f7fb")), QIcon::Selected);
-    icon.addPixmap(drawIcon(QColor("#f5f7fb")), QIcon::Active);
+    icon.addPixmap(drawIcon(QColor("#2f7dff")), QIcon::Selected);
+    icon.addPixmap(drawIcon(QColor("#2f7dff")), QIcon::Active);
     return icon;
 }
 
@@ -279,7 +301,7 @@ static QListWidgetItem* addSidebarItem(QListWidget* list, const QIcon& icon,
                                         const QString& title, int pageIndex) {
     auto* item = new QListWidgetItem(icon, title);
     item->setData(Qt::UserRole, pageIndex);
-    item->setSizeHint(QSize(0, 44));
+    item->setSizeHint(QSize(0, 40));
     list->addItem(item);
     return item;
 }
@@ -316,7 +338,7 @@ public:
 
         if (selected) {
             painter->setPen(Qt::NoPen);
-            painter->setBrush(QColor(10, 132, 255, 42));
+            painter->setBrush(QColor(10, 132, 255, 26));
             painter->drawRoundedRect(bgRect, 7, 7);
         }
 
@@ -334,7 +356,7 @@ public:
         }
 
         QFont textFont = option.font;
-        textFont.setPixelSize(17);
+        textFont.setPixelSize(15);
         textFont.setWeight(QFont::Medium);
         painter->setFont(textFont);
         painter->setPen(selected ? QColor("#2f7dff") : QColor("#e8edf1"));
@@ -346,19 +368,13 @@ public:
                                                  qRound(textRect.width()));
         painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, title);
 
-        if (selected) {
-            painter->setPen(QPen(QColor(94, 177, 255, 80), 1));
-            painter->setBrush(Qt::NoBrush);
-            painter->drawRoundedRect(bgRect.adjusted(0.5, 0.5, -0.5, -0.5), 7, 7);
-        }
-
         painter->restore();
     }
 
     QSize sizeHint(const QStyleOptionViewItem& option,
                    const QModelIndex& index) const override {
         Q_UNUSED(option);
-        return QSize(0, index.data(Qt::UserRole).toInt() < 0 ? 38 : 44);
+        return QSize(0, index.data(Qt::UserRole).toInt() < 0 ? 34 : 40);
     }
 };
 
@@ -601,6 +617,70 @@ static bool receiverAutoStartEnabledPreference() {
     return false;
 }
 
+static QVector<int> versionComponents(const QString& value) {
+    QVector<int> components;
+    int start = -1;
+    for (int i = 0; i < value.size(); ++i) {
+        if (value.at(i).isDigit()) {
+            start = i;
+            break;
+        }
+    }
+    if (start < 0) return components;
+
+    QString numeric;
+    for (int i = start; i < value.size(); ++i) {
+        const QChar ch = value.at(i);
+        if (!ch.isDigit() && ch != '.') break;
+        numeric.append(ch);
+    }
+    for (const auto& part : numeric.split('.', Qt::KeepEmptyParts)) {
+        components.append(part.toInt());
+    }
+    return components;
+}
+
+static bool isVersionNewer(const QString& candidate, const QString& current) {
+    const QVector<int> candidateParts = versionComponents(candidate);
+    const QVector<int> currentParts = versionComponents(current);
+    if (candidateParts.isEmpty() || currentParts.isEmpty()) return false;
+
+    const int count = qMax(candidateParts.size(), currentParts.size());
+    for (int i = 0; i < count; ++i) {
+        const int candidateValue = i < candidateParts.size() ? candidateParts.at(i) : 0;
+        const int currentValue = i < currentParts.size() ? currentParts.at(i) : 0;
+        if (candidateValue != currentValue) {
+            return candidateValue > currentValue;
+        }
+    }
+    return false;
+}
+
+static bool launchAtLoginEnabledPreference() {
+#ifdef _WIN32
+    QSettings runKey("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                     QSettings::NativeFormat);
+    return runKey.contains("ExtendCast");
+#else
+    return false;
+#endif
+}
+
+static void setLaunchAtLoginEnabledPreference(bool enabled) {
+#ifdef _WIN32
+    QSettings runKey("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                     QSettings::NativeFormat);
+    if (enabled) {
+        runKey.setValue("ExtendCast", QString("\"%1\"").arg(QDir::toNativeSeparators(QApplication::applicationFilePath())));
+    } else {
+        runKey.remove("ExtendCast");
+    }
+    runKey.sync();
+#else
+    Q_UNUSED(enabled);
+#endif
+}
+
 // ─── Constructor ────────────────────────────────────────────────────────────────
 
 MainWindow::MainWindow(QWidget* parent)
@@ -630,6 +710,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_audioDecoder = new AudioDecoder(this);
     m_audioPlayer = new AudioPlayer(this);
     m_adbHelper = new AdbHelper(this);
+    m_updateManager = new QNetworkAccessManager(this);
     m_reconnectTimer = new QTimer(this);
     m_reconnectTimer->setInterval(3000);
     connect(m_reconnectTimer, &QTimer::timeout, this, &MainWindow::attemptAdbReconnect);
@@ -757,15 +838,24 @@ MainWindow::~MainWindow() {
 // ─── UI Setup ───────────────────────────────────────────────────────────────────
 
 void MainWindow::setupUi() {
+    setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
     setStyleSheet(kDarkStylesheet);
 
-    m_splitter = new QSplitter(Qt::Horizontal, this);
+    auto* root = new QWidget(this);
+    root->setObjectName("appRoot");
+    auto* rootLayout = new QVBoxLayout(root);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    rootLayout->setSpacing(0);
+    setCentralWidget(root);
+
+    setupTitleBar(rootLayout);
+
+    m_splitter = new QSplitter(Qt::Horizontal, root);
     m_splitter->setHandleWidth(0);
-    setCentralWidget(m_splitter);
 
     auto* sidebarFrame = new QFrame();
     sidebarFrame->setObjectName("sidebarFrame");
-    sidebarFrame->setFixedWidth(252);
+    sidebarFrame->setFixedWidth(248);
     sidebarFrame->setStyleSheet(
         "QFrame#sidebarFrame { background-color: #202020; border: none; }");
 
@@ -782,13 +872,6 @@ void MainWindow::setupUi() {
     m_sidebarList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_sidebarList->setItemDelegate(new SidebarItemDelegate(m_sidebarList));
     sidebarLayout->addWidget(m_sidebarList);
-
-    auto* sidebarShadowStrip = new QFrame();
-    sidebarShadowStrip->setFixedWidth(4);
-    sidebarShadowStrip->setStyleSheet(
-        "QFrame { background: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 0, "
-        "stop: 0 rgba(0, 0, 0, 16), stop: 1 rgba(0, 0, 0, 0)); border: none; }");
-    sidebarLayout->addWidget(sidebarShadowStrip);
 
     // Detail stack
     m_stack = new QStackedWidget();
@@ -808,6 +891,7 @@ void MainWindow::setupUi() {
     m_splitter->setStretchFactor(1, 1);
     m_splitter->setCollapsible(0, false);
     m_splitter->setCollapsible(1, false);
+    rootLayout->addWidget(m_splitter, 1);
 
     // Connect sidebar selection
     connect(m_sidebarList, &QListWidget::currentRowChanged,
@@ -815,6 +899,135 @@ void MainWindow::setupUi() {
 
     // Select Receiver by default
     selectSidebarItem(m_pageReceive);
+}
+
+void MainWindow::setupTitleBar(QVBoxLayout* rootLayout) {
+    m_titleBar = new QFrame(this);
+    m_titleBar->setObjectName("customTitleBar");
+    m_titleBar->setFixedHeight(32);
+    m_titleBar->installEventFilter(this);
+
+    auto* titleLayout = new QHBoxLayout(m_titleBar);
+    titleLayout->setContentsMargins(12, 0, 0, 0);
+    titleLayout->setSpacing(8);
+
+    auto* iconLabel = new QLabel(m_titleBar);
+    QPixmap appIcon(":/appicon.png");
+    if (!appIcon.isNull()) {
+        iconLabel->setPixmap(appIcon.scaled(18, 18, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+    iconLabel->setFixedSize(20, 20);
+    iconLabel->setAlignment(Qt::AlignCenter);
+    iconLabel->installEventFilter(this);
+    titleLayout->addWidget(iconLabel);
+
+    auto* titleLabel = new QLabel("ExtendCast", m_titleBar);
+    titleLabel->setObjectName("titleBarText");
+    titleLabel->installEventFilter(this);
+    titleLayout->addWidget(titleLabel);
+    titleLayout->addStretch();
+
+    auto* minimizeButton = new QPushButton(QString::fromWCharArray(L"\uE921"), m_titleBar);
+    minimizeButton->setObjectName("windowButton");
+    minimizeButton->setFixedSize(46, 32);
+    minimizeButton->setCursor(Qt::ArrowCursor);
+    connect(minimizeButton, &QPushButton::clicked, this, &MainWindow::showMinimized);
+    titleLayout->addWidget(minimizeButton);
+
+    m_maximizeButton = new QPushButton(QString::fromWCharArray(L"\uE922"), m_titleBar);
+    m_maximizeButton->setObjectName("windowButton");
+    m_maximizeButton->setFixedSize(46, 32);
+    m_maximizeButton->setCursor(Qt::ArrowCursor);
+    connect(m_maximizeButton, &QPushButton::clicked, this, [this]() {
+        isMaximized() ? showNormal() : showMaximized();
+    });
+    titleLayout->addWidget(m_maximizeButton);
+
+    auto* closeButton = new QPushButton(QString::fromWCharArray(L"\uE8BB"), m_titleBar);
+    closeButton->setObjectName("closeWindowButton");
+    closeButton->setFixedSize(46, 32);
+    closeButton->setCursor(Qt::ArrowCursor);
+    connect(closeButton, &QPushButton::clicked, this, &MainWindow::close);
+    titleLayout->addWidget(closeButton);
+
+    rootLayout->addWidget(m_titleBar);
+}
+
+void MainWindow::updateWindowControlStates() {
+    if (m_maximizeButton) {
+        m_maximizeButton->setText(QString::fromWCharArray(isMaximized() ? L"\uE923" : L"\uE922"));
+    }
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    if ((watched == m_titleBar || (m_titleBar && watched->parent() == m_titleBar)) && event) {
+        if (event->type() == QEvent::MouseButtonDblClick) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() == Qt::LeftButton) {
+                isMaximized() ? showNormal() : showMaximized();
+                return true;
+            }
+        }
+
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() == Qt::LeftButton && windowHandle()) {
+                windowHandle()->startSystemMove();
+                return true;
+            }
+        }
+    }
+
+    return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::changeEvent(QEvent* event) {
+    QMainWindow::changeEvent(event);
+    if (event->type() == QEvent::WindowStateChange) {
+        updateWindowControlStates();
+    }
+}
+
+bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result) {
+#ifdef _WIN32
+    Q_UNUSED(eventType);
+    MSG* msg = static_cast<MSG*>(message);
+    if (msg && msg->message == WM_NCHITTEST) {
+        const LONG x = GET_X_LPARAM(msg->lParam);
+        const LONG y = GET_Y_LPARAM(msg->lParam);
+        const QPoint globalPos(x, y);
+        const QPoint localPos = mapFromGlobal(globalPos);
+        const int resizeMargin = isMaximized() ? 0 : 6;
+        const int w = width();
+        const int h = height();
+
+        const bool left = localPos.x() >= 0 && localPos.x() < resizeMargin;
+        const bool right = localPos.x() <= w && localPos.x() >= w - resizeMargin;
+        const bool top = localPos.y() >= 0 && localPos.y() < resizeMargin;
+        const bool bottom = localPos.y() <= h && localPos.y() >= h - resizeMargin;
+
+        if (top && left) { *result = HTTOPLEFT; return true; }
+        if (top && right) { *result = HTTOPRIGHT; return true; }
+        if (bottom && left) { *result = HTBOTTOMLEFT; return true; }
+        if (bottom && right) { *result = HTBOTTOMRIGHT; return true; }
+        if (left) { *result = HTLEFT; return true; }
+        if (right) { *result = HTRIGHT; return true; }
+        if (top) { *result = HTTOP; return true; }
+        if (bottom) { *result = HTBOTTOM; return true; }
+
+        const int titleHeight = m_titleBar ? m_titleBar->height() : 34;
+        const bool overWindowButtons = localPos.x() >= w - 138 && localPos.y() >= 0 && localPos.y() < titleHeight;
+        if (!overWindowButtons && localPos.y() >= 0 && localPos.y() < titleHeight) {
+            *result = HTCAPTION;
+            return true;
+        }
+    }
+#else
+    Q_UNUSED(eventType);
+    Q_UNUSED(message);
+    Q_UNUSED(result);
+#endif
+    return QMainWindow::nativeEvent(eventType, message, result);
 }
 
 void MainWindow::setupSidebar() {
@@ -1334,93 +1547,183 @@ void MainWindow::setupSettingsPage() {
 
     auto* layout = new QVBoxLayout(page);
     layout->setContentsMargins(40, 30, 40, 30);
-    layout->setSpacing(16);
+    layout->setSpacing(18);
 
     auto* pageTitle = new QLabel("Settings");
     pageTitle->setStyleSheet("font-size: 22px; font-weight: bold; color: white;");
     layout->addWidget(pageTitle);
 
-    // About card
+    auto* generalCard = makeCard("General");
+    auto* generalLayout = new QVBoxLayout(generalCard);
+    generalLayout->setSpacing(12);
+
+    auto* launchRow = new QHBoxLayout();
+    launchRow->setContentsMargins(0, 0, 0, 0);
+    launchRow->setSpacing(16);
+
+    auto* launchText = new QVBoxLayout();
+    launchText->setSpacing(4);
+    auto* launchTitle = new QLabel("Launch at Login");
+    launchTitle->setStyleSheet("font-size: 13px; font-weight: 700; color: #f2f2f2;");
+    launchText->addWidget(launchTitle);
+    auto* launchDesc = new QLabel("Automatically open ExtendCast after you sign in to Windows.");
+    launchDesc->setWordWrap(true);
+    launchDesc->setStyleSheet("font-size: 12px; color: #9a9a9a;");
+    launchText->addWidget(launchDesc);
+    launchRow->addLayout(launchText, 1);
+
+    m_launchAtLoginToggle = new QPushButton(launchAtLoginEnabledPreference() ? "On" : "Off");
+    m_launchAtLoginToggle->setCheckable(true);
+    m_launchAtLoginToggle->setChecked(launchAtLoginEnabledPreference());
+    m_launchAtLoginToggle->setCursor(Qt::PointingHandCursor);
+    m_launchAtLoginToggle->setFixedSize(74, 32);
+    updateLaunchAtLoginToggleStyle();
+    connect(m_launchAtLoginToggle, &QPushButton::toggled,
+            this, &MainWindow::onLaunchAtLoginToggled);
+    launchRow->addWidget(m_launchAtLoginToggle, 0, Qt::AlignVCenter);
+
+    generalLayout->addLayout(launchRow);
+    layout->addWidget(generalCard);
+
     auto* aboutCard = makeCard("About");
     auto* aboutLayout = new QVBoxLayout(aboutCard);
-    aboutLayout->setSpacing(8);
+    aboutLayout->setSpacing(12);
 
-    m_versionLabel = new QLabel(QString("ExtendCast v%1")
-        .arg(QApplication::applicationVersion()));
-    m_versionLabel->setStyleSheet("font-size: 14px; font-weight: bold; color: #e0e0e0;");
-    aboutLayout->addWidget(m_versionLabel);
+    auto* versionRow = new QHBoxLayout();
+    versionRow->setContentsMargins(0, 0, 0, 0);
+    versionRow->setSpacing(12);
 
-    auto* descLabel = new QLabel(
-        "Turn any device into a wireless extended display. "
-        "Works with iPad, Android, Windows, Linux, and Mac receivers.");
-    descLabel->setStyleSheet("font-size: 12px; color: #888;");
-    descLabel->setWordWrap(true);
-    aboutLayout->addWidget(descLabel);
+    auto* versionLabel = new QLabel("Version");
+    versionLabel->setStyleSheet("font-size: 13px; color: #cfcfcf;");
+    versionRow->addWidget(versionLabel);
+    versionRow->addStretch();
+
+    m_versionLabel = new QLabel(QString("ExtendCast %1").arg(QApplication::applicationVersion()));
+    m_versionLabel->setStyleSheet("font-size: 13px; color: #9a9a9a;");
+    versionRow->addWidget(m_versionLabel);
+
+    m_checkUpdatesButton = new QPushButton("Check for Updates");
+    m_checkUpdatesButton->setCursor(Qt::PointingHandCursor);
+    m_checkUpdatesButton->setStyleSheet(
+        "QPushButton { background-color: #2b2b2b; border: 1px solid #3a3a3a; "
+        "border-radius: 7px; color: #e0e0e0; font-size: 12px; font-weight: 600; padding: 6px 12px; }"
+        "QPushButton:hover { background-color: #333333; border-color: #4d4d4d; }"
+        "QPushButton:disabled { color: #777; }");
+    connect(m_checkUpdatesButton, &QPushButton::clicked,
+            this, &MainWindow::onCheckUpdatesClicked);
+    versionRow->addWidget(m_checkUpdatesButton);
+
+    aboutLayout->addLayout(versionRow);
+
+    m_updateStatusLabel = new QLabel();
+    m_updateStatusLabel->setWordWrap(true);
+    m_updateStatusLabel->setStyleSheet("font-size: 12px; color: #8f8f8f;");
+    m_updateStatusLabel->hide();
+    aboutLayout->addWidget(m_updateStatusLabel);
+
+    m_downloadUpdateButton = new QPushButton("Download");
+    m_downloadUpdateButton->setCursor(Qt::PointingHandCursor);
+    m_downloadUpdateButton->setStyleSheet(
+        "QPushButton { background-color: #1f8f4d; border: 1px solid #2ac56b; "
+        "border-radius: 7px; color: white; font-size: 12px; font-weight: 700; padding: 7px 14px; }"
+        "QPushButton:hover { background-color: #24a75a; }");
+    m_downloadUpdateButton->hide();
+    connect(m_downloadUpdateButton, &QPushButton::clicked,
+            this, &MainWindow::onDownloadUpdateClicked);
+    aboutLayout->addWidget(m_downloadUpdateButton, 0, Qt::AlignLeft);
 
     layout->addWidget(aboutCard);
-
-    // Connection card
-    auto* connCard = makeCard("Connection");
-    auto* connLayout = new QVBoxLayout(connCard);
-    connLayout->setSpacing(10);
-
-    auto* portInfo = new QLabel("Listening on port 51820 (TCP)");
-    portInfo->setStyleSheet("font-size: 13px; color: #ccc;");
-    connLayout->addWidget(portInfo);
-
-    auto* ipInfo = new QLabel(formatAddressLines(localAddressInfos()));
-    ipInfo->setStyleSheet("font-size: 12px; color: #888;");
-    ipInfo->setTextFormat(Qt::RichText);
-    ipInfo->setWordWrap(true);
-    connLayout->addWidget(ipInfo);
-
-    layout->addWidget(connCard);
-
-    // Changelog card
-    auto* changeCard = makeCard("What's New");
-    auto* changeLayout = new QVBoxLayout(changeCard);
-    changeLayout->setSpacing(10);
-
-    struct ChangeEntry {
-        QString version, date;
-        QStringList items;
-    };
-    QVector<ChangeEntry> changelog = {
-        {"v8", "2026-03-30", {
-            "Unified sender + receiver in a single app",
-            "Apple Music-style sidebar with tinted selection",
-            "Windows sender with sidebar UI",
-            "In-app update checker via GitHub Releases",
-        }},
-        {"v7", "2026-03-23", {
-            "Android ADB wireless auto-reconnect",
-            "Orientation fix for rotated displays",
-        }},
-        {"v6", "2026-03-19", {
-            "Windows sender Phase 1",
-            "DMG signing improvements",
-        }},
-    };
-
-    for (const auto& entry : changelog) {
-        auto* verLabel = new QLabel(QString("%1  —  %2").arg(entry.version, entry.date));
-        verLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #ccc;");
-        changeLayout->addWidget(verLabel);
-
-        for (const auto& item : entry.items) {
-            auto* bulletLabel = new QLabel(QString("  \xE2\x80\xA2  %1").arg(item));
-            bulletLabel->setStyleSheet("font-size: 11px; color: #888;");
-            changeLayout->addWidget(bulletLabel);
-        }
-
-        changeLayout->addSpacing(4);
-    }
-
-    layout->addWidget(changeCard);
-
     layout->addStretch();
 
     m_pageSettings = m_stack->addWidget(scroll);
+}
+
+void MainWindow::updateLaunchAtLoginToggleStyle() {
+    if (!m_launchAtLoginToggle) return;
+    const bool enabled = m_launchAtLoginToggle->isChecked();
+    m_launchAtLoginToggle->setText(enabled ? "On" : "Off");
+    m_launchAtLoginToggle->setStyleSheet(enabled
+        ? "QPushButton { background-color: #1f8f4d; color: white; border-radius: 16px; font-weight: 700; border: 1px solid #2ac56b; }"
+          "QPushButton:hover { background-color: #24a75a; }"
+        : "QPushButton { background-color: #2b2b2b; color: #bdbdbd; border-radius: 16px; font-weight: 700; border: 1px solid #454545; }"
+          "QPushButton:hover { background-color: #333333; }");
+}
+
+void MainWindow::onLaunchAtLoginToggled(bool checked) {
+    setLaunchAtLoginEnabledPreference(checked);
+    updateLaunchAtLoginToggleStyle();
+    LogManager::instance().log(QString("Settings: Launch at login %1").arg(checked ? "enabled" : "disabled"));
+}
+
+void MainWindow::onCheckUpdatesClicked() {
+    if (!m_updateManager) return;
+    if (m_checkUpdatesButton) m_checkUpdatesButton->setEnabled(false);
+    if (m_downloadUpdateButton) m_downloadUpdateButton->hide();
+    m_updateDownloadUrl.clear();
+    if (m_updateStatusLabel) {
+        m_updateStatusLabel->setText("Checking for updates...");
+        m_updateStatusLabel->setStyleSheet("font-size: 12px; color: #8f8f8f;");
+        m_updateStatusLabel->show();
+    }
+
+    QNetworkRequest request(QUrl("https://api.github.com/repos/Ruobin521/ExtendCast/releases/latest"));
+    request.setRawHeader("Accept", "application/vnd.github+json");
+    request.setRawHeader("User-Agent", QString("ExtendCast/%1").arg(QApplication::applicationVersion()).toUtf8());
+    auto* reply = m_updateManager->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        handleUpdateReply(reply);
+    });
+}
+
+void MainWindow::handleUpdateReply(QNetworkReply* reply) {
+    if (m_checkUpdatesButton) m_checkUpdatesButton->setEnabled(true);
+    if (!reply) return;
+    reply->deleteLater();
+
+    if (reply->error() != QNetworkReply::NoError) {
+        if (m_updateStatusLabel) {
+            m_updateStatusLabel->setText("Unable to check for updates. Please try again later.");
+            m_updateStatusLabel->setStyleSheet("font-size: 12px; color: #d07c7c;");
+            m_updateStatusLabel->show();
+        }
+        return;
+    }
+
+    const QJsonDocument document = QJsonDocument::fromJson(reply->readAll());
+    const QJsonObject object = document.object();
+    const QString tagName = object.value("tag_name").toString();
+    const QString htmlUrl = object.value("html_url").toString();
+    if (tagName.isEmpty() || htmlUrl.isEmpty()) {
+        if (m_updateStatusLabel) {
+            m_updateStatusLabel->setText("Unable to read update information.");
+            m_updateStatusLabel->setStyleSheet("font-size: 12px; color: #d07c7c;");
+            m_updateStatusLabel->show();
+        }
+        return;
+    }
+
+    if (isVersionNewer(tagName, QApplication::applicationVersion())) {
+        m_updateDownloadUrl = htmlUrl;
+        if (m_updateStatusLabel) {
+            m_updateStatusLabel->setText(QString("Update available: %1").arg(tagName));
+            m_updateStatusLabel->setStyleSheet("font-size: 12px; color: #54d17a;");
+            m_updateStatusLabel->show();
+        }
+        if (m_downloadUpdateButton) m_downloadUpdateButton->show();
+        LogManager::instance().log(QString("Update: %1 available").arg(tagName));
+    } else {
+        if (m_updateStatusLabel) {
+            m_updateStatusLabel->setText("You're on the latest version.");
+            m_updateStatusLabel->setStyleSheet("font-size: 12px; color: #54d17a;");
+            m_updateStatusLabel->show();
+        }
+    }
+}
+
+void MainWindow::onDownloadUpdateClicked() {
+    if (!m_updateDownloadUrl.isEmpty()) {
+        QDesktopServices::openUrl(QUrl(m_updateDownloadUrl));
+    }
 }
 
 // ─── Logs Page ──────────────────────────────────────────────────────────────────

@@ -10,8 +10,10 @@
 #include <QScreen>
 #include <QApplication>
 #include <QSize>
-#include <QPoint>
 
+class QEvent;
+class QFrame;
+class QLabel;
 class VideoRenderer;
 class InputHandler;
 
@@ -33,21 +35,22 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
+    void changeEvent(QEvent* event) override;
 
 private:
+    void setupTitleBar(QVBoxLayout* layout);
+    void updateWindowControlStates();
     void toggleFullscreen();
     void updateFullscreenButton();
-    void positionFullscreenButton(bool forceDefault = false);
-    void captureFullscreenButtonAnchor();
 
     VideoRenderer* m_renderer = nullptr;
     InputHandler* m_inputHandler = nullptr;
     QWidget* m_ownerWindow = nullptr;
+    QFrame* m_titleBar = nullptr;
+    QLabel* m_titleLabel = nullptr;
+    QPushButton* m_maximizeButton = nullptr;
     QPushButton* m_fullscreenButton = nullptr;
     QSize m_lastVideoSize;
-    bool m_fullscreenButtonMoved = false;
-    bool m_buttonAnchorRight = true;
-    bool m_buttonAnchorBottom = true;
-    int m_buttonAnchorX = 16;
-    int m_buttonAnchorY = 16;
 };

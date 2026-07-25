@@ -58,6 +58,9 @@ class AdbHelper;
 class VideoWindow;
 class QVBoxLayout;
 class QFrame;
+class QEvent;
+class QNetworkAccessManager;
+class QNetworkReply;
 #ifdef ENABLE_SENDER
 class SenderController;
 class VirtualDisplayVDD;
@@ -69,6 +72,11 @@ class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow();
+
+protected:
+    bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
 private slots:
     void onSidebarSelectionChanged(int row);
@@ -85,6 +93,9 @@ private slots:
     void onCopyLogs();
     void onClearLogs();
     void onReportIssue();
+    void onLaunchAtLoginToggled(bool checked);
+    void onCheckUpdatesClicked();
+    void onDownloadUpdateClicked();
 #ifdef ENABLE_SENDER
     void onSendScreenClicked();
     void onStopSendingClicked();
@@ -98,6 +109,8 @@ private slots:
 
 private:
     void setupUi();
+    void setupTitleBar(QVBoxLayout* rootLayout);
+    void updateWindowControlStates();
     void setupSidebar();
     void setupOverviewPage();
     void setupReceivePage();
@@ -108,6 +121,8 @@ private:
 #endif
     void updateLocalIpDisplay();
     void selectSidebarItem(int pageIndex);
+    void updateLaunchAtLoginToggleStyle();
+    void handleUpdateReply(QNetworkReply* reply);
 
     // Core components
     VideoDecoder* m_decoder = nullptr;
@@ -126,6 +141,8 @@ private:
 #endif
 
     // Layout
+    QFrame* m_titleBar = nullptr;
+    QPushButton* m_maximizeButton = nullptr;
     QSplitter* m_splitter = nullptr;
     QListWidget* m_sidebarList = nullptr;
     QStackedWidget* m_stack = nullptr;
@@ -165,6 +182,12 @@ private:
 
     // Settings page
     QLabel* m_versionLabel = nullptr;
+    QPushButton* m_launchAtLoginToggle = nullptr;
+    QPushButton* m_checkUpdatesButton = nullptr;
+    QPushButton* m_downloadUpdateButton = nullptr;
+    QLabel* m_updateStatusLabel = nullptr;
+    QNetworkAccessManager* m_updateManager = nullptr;
+    QString m_updateDownloadUrl;
 
     // Logs page
     QTextEdit* m_logViewer = nullptr;

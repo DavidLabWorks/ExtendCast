@@ -4,85 +4,17 @@
 #include "MainWindow.h"  // for LogManager
 
 #include <QDebug>
+#include <QEvent>
+#include <QFrame>
 #include <QIcon>
+#include <QLabel>
+#include <QWindow>
 #include <functional>
 
-namespace {
-
-class FloatingFullscreenButton : public QPushButton {
-public:
-    explicit FloatingFullscreenButton(QWidget* parent = nullptr)
-        : QPushButton(parent)
-    {
-        setFixedSize(38, 38);
-        setCursor(Qt::PointingHandCursor);
-        setFocusPolicy(Qt::NoFocus);
-    }
-
-    bool wasMovedByUser() const { return m_wasMovedByUser; }
-    void setMoveFinishedCallback(std::function<void()> callback) {
-        m_moveFinishedCallback = std::move(callback);
-    }
-
-protected:
-    void mousePressEvent(QMouseEvent* event) override {
-        if (event->button() == Qt::LeftButton) {
-            m_pressPos = event->globalPosition().toPoint();
-            m_startPos = pos();
-            m_dragging = false;
-        }
-        QPushButton::mousePressEvent(event);
-    }
-
-    void mouseMoveEvent(QMouseEvent* event) override {
-        QWidget* bounds = parentWidget();
-        if (!(event->buttons() & Qt::LeftButton) || !bounds) {
-            QPushButton::mouseMoveEvent(event);
-            return;
-        }
-
-        const QPoint delta = event->globalPosition().toPoint() - m_pressPos;
-        if (!m_dragging && delta.manhattanLength() < QApplication::startDragDistance()) {
-            QPushButton::mouseMoveEvent(event);
-            return;
-        }
-
-        m_dragging = true;
-        m_wasMovedByUser = true;
-        setCursor(Qt::SizeAllCursor);
-
-        const int margin = 12;
-        QPoint next = m_startPos + delta;
-        next.setX(qBound(margin, next.x(), bounds->width() - width() - margin));
-        next.setY(qBound(margin, next.y(), bounds->height() - height() - margin));
-        move(next);
-        raise();
-        event->accept();
-    }
-
-    void mouseReleaseEvent(QMouseEvent* event) override {
-        setCursor(Qt::PointingHandCursor);
-        if (m_dragging) {
-            m_dragging = false;
-            setDown(false);
-            if (m_moveFinishedCallback) {
-                m_moveFinishedCallback();
-            }
-            event->accept();
-            return;
-        }
-        QPushButton::mouseReleaseEvent(event);
-    }
-
-private:
-    QPoint m_pressPos;
-    QPoint m_startPos;
-    bool m_dragging = false;
-    bool m_wasMovedByUser = false;
-    std::function<void()> m_moveFinishedCallback;
-};
-
-} // namespace
+#ifdef _WIN32
+#include <windows.h>
+#include <windowsx.h>
+#endif
 
 VideoWindow::VideoWindow(VideoRenderer* renderer, InputHandler* inputHandler, QWidget* parent)
     : QMainWindow(nullptr)
@@ -92,28 +24,94 @@ VideoWindow::VideoWindow(VideoRenderer* renderer, InputHandler* inputHandler, QW
 {
     setWindowTitle("ExtendCast — Receiving");
     setAttribute(Qt::WA_DeleteOnClose, false);
-    setWindowFlag(Qt::Window, true);
-    setStyleSheet("background-color: black;");
-    setMinimumSize(320, 180);
+    setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
+    setStyleSheet(R"(
+        QMainWindow { background-color: black; }
+        QWidget#videoRoot { background-color: black; border: 1px solid #303030; }
+        QFrame#videoTitleBar { background-color: #151515; border: none; }
+        QLabel#videoTitleText { color: #a8a8a8; font-size: 13px; font-weight: 500; }
+        QPushButton#videoWindowButton { background: transparent; border: none; color: #c8c8c8; font-family: "Segoe MDL2 Assets"; font-size: 10px; padding: 0; margin: 0; }
+        QPushButton#videoWindowButton:hover { background-color: rgba(255, 255, 255, 0.12); color: #ffffff; }
+        QPushButton#videoWindowButton:pressed { background-color: rgba(255, 255, 255, 0.08); color: #ffffff; }
+        QPushButton#videoCloseWindowButton { background: transparent; border: none; color: #c8c8c8; font-family: "Segoe MDL2 Assets"; font-size: 10px; padding: 0; margin: 0; }
+        QPushButton#videoCloseWindowButton:hover { background-color: #c42b1c; color: #ffffff; }
+        QPushButton#videoCloseWindowButton:pressed { background-color: #a82419; color: #ffffff; }
+    )");
+    setMinimumSize(320, 214);
 
     auto* central = new QWidget();
-    central->setStyleSheet("background-color: black;");
+    central->setObjectName("videoRoot");
     auto* layout = new QVBoxLayout(central);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
+    setupTitleBar(layout);
     layout->addWidget(m_renderer, 1);
 
     setCentralWidget(central);
 
-    m_fullscreenButton = new FloatingFullscreenButton(central);
-    static_cast<FloatingFullscreenButton*>(m_fullscreenButton)->setMoveFinishedCallback([this]() {
-        m_fullscreenButtonMoved = true;
-        captureFullscreenButtonAnchor();
-    });
+}
+
+void VideoWindow::setupTitleBar(QVBoxLayout* layout) {
+    m_titleBar = new QFrame(this);
+    m_titleBar->setObjectName("videoTitleBar");
+    m_titleBar->setFixedHeight(32);
+    m_titleBar->installEventFilter(this);
+
+    auto* titleLayout = new QHBoxLayout(m_titleBar);
+    titleLayout->setContentsMargins(12, 0, 0, 0);
+    titleLayout->setSpacing(8);
+
+    auto* iconLabel = new QLabel(m_titleBar);
+    QPixmap appIcon(":/appicon.png");
+    if (!appIcon.isNull()) {
+        iconLabel->setPixmap(appIcon.scaled(18, 18, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+    iconLabel->setFixedSize(20, 20);
+    iconLabel->setAlignment(Qt::AlignCenter);
+    iconLabel->installEventFilter(this);
+    titleLayout->addWidget(iconLabel);
+
+    m_titleLabel = new QLabel("Receiving", m_titleBar);
+    m_titleLabel->setObjectName("videoTitleText");
+    m_titleLabel->installEventFilter(this);
+    titleLayout->addWidget(m_titleLabel);
+    titleLayout->addStretch();
+
+    m_fullscreenButton = new QPushButton(QString::fromWCharArray(L"\uE740"), m_titleBar);
+    m_fullscreenButton->setObjectName("videoWindowButton");
+    m_fullscreenButton->setFixedSize(46, 32);
+    m_fullscreenButton->setToolTip("Enter fullscreen");
     connect(m_fullscreenButton, &QPushButton::clicked, this, &VideoWindow::toggleFullscreen);
-    updateFullscreenButton();
-    positionFullscreenButton(true);
+    titleLayout->addWidget(m_fullscreenButton);
+
+    auto* minimizeButton = new QPushButton(QString::fromWCharArray(L"\uE921"), m_titleBar);
+    minimizeButton->setObjectName("videoWindowButton");
+    minimizeButton->setFixedSize(46, 32);
+    connect(minimizeButton, &QPushButton::clicked, this, &VideoWindow::showMinimized);
+    titleLayout->addWidget(minimizeButton);
+
+    m_maximizeButton = new QPushButton(QString::fromWCharArray(L"\uE922"), m_titleBar);
+    m_maximizeButton->setObjectName("videoWindowButton");
+    m_maximizeButton->setFixedSize(46, 32);
+    connect(m_maximizeButton, &QPushButton::clicked, this, [this]() {
+        isMaximized() ? showNormal() : showMaximized();
+    });
+    titleLayout->addWidget(m_maximizeButton);
+
+    auto* closeButton = new QPushButton(QString::fromWCharArray(L"\uE8BB"), m_titleBar);
+    closeButton->setObjectName("videoCloseWindowButton");
+    closeButton->setFixedSize(46, 32);
+    connect(closeButton, &QPushButton::clicked, this, &VideoWindow::close);
+    titleLayout->addWidget(closeButton);
+
+    layout->addWidget(m_titleBar);
+}
+
+void VideoWindow::updateWindowControlStates() {
+    if (m_maximizeButton) {
+        m_maximizeButton->setText(QString::fromWCharArray(isMaximized() ? L"\uE923" : L"\uE922"));
+    }
 }
 
 VideoWindow::~VideoWindow() {
@@ -124,6 +122,18 @@ VideoWindow::~VideoWindow() {
 }
 
 void VideoWindow::showForVideo() {
+    if (isFullScreen()) {
+        showNormal();
+    }
+    if (m_titleBar) {
+        m_titleBar->show();
+    }
+    if (m_fullscreenButton) {
+        m_fullscreenButton->show();
+    }
+    updateWindowControlStates();
+    updateFullscreenButton();
+
     if (isVisible()) {
         if (m_renderer) {
             m_renderer->show();
@@ -160,7 +170,6 @@ void VideoWindow::showForVideo() {
         m_renderer->show();
     }
     show();
-    positionFullscreenButton(true);
     LogManager::instance().log("Video window opened");
 }
 
@@ -211,6 +220,77 @@ void VideoWindow::resizeToFitVideo(int videoWidth, int videoHeight) {
     setGeometry(x, y, winW, winH);
 }
 
+bool VideoWindow::eventFilter(QObject* watched, QEvent* event) {
+    if ((watched == m_titleBar || (m_titleBar && watched->parent() == m_titleBar)) && event) {
+        if (event->type() == QEvent::MouseButtonDblClick) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() == Qt::LeftButton) {
+                isMaximized() ? showNormal() : showMaximized();
+                return true;
+            }
+        }
+
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() == Qt::LeftButton && windowHandle()) {
+                windowHandle()->startSystemMove();
+                return true;
+            }
+        }
+    }
+
+    return QMainWindow::eventFilter(watched, event);
+}
+
+void VideoWindow::changeEvent(QEvent* event) {
+    QMainWindow::changeEvent(event);
+    if (event->type() == QEvent::WindowStateChange) {
+        updateWindowControlStates();
+        updateFullscreenButton();
+    }
+}
+
+bool VideoWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result) {
+#ifdef _WIN32
+    Q_UNUSED(eventType);
+    MSG* msg = static_cast<MSG*>(message);
+    if (msg && msg->message == WM_NCHITTEST) {
+        const LONG x = GET_X_LPARAM(msg->lParam);
+        const LONG y = GET_Y_LPARAM(msg->lParam);
+        const QPoint localPos = mapFromGlobal(QPoint(x, y));
+        const int resizeMargin = isMaximized() || isFullScreen() ? 0 : 6;
+        const int w = width();
+        const int h = height();
+
+        const bool left = localPos.x() >= 0 && localPos.x() < resizeMargin;
+        const bool right = localPos.x() <= w && localPos.x() >= w - resizeMargin;
+        const bool top = localPos.y() >= 0 && localPos.y() < resizeMargin;
+        const bool bottom = localPos.y() <= h && localPos.y() >= h - resizeMargin;
+
+        if (top && left) { *result = HTTOPLEFT; return true; }
+        if (top && right) { *result = HTTOPRIGHT; return true; }
+        if (bottom && left) { *result = HTBOTTOMLEFT; return true; }
+        if (bottom && right) { *result = HTBOTTOMRIGHT; return true; }
+        if (left) { *result = HTLEFT; return true; }
+        if (right) { *result = HTRIGHT; return true; }
+        if (top) { *result = HTTOP; return true; }
+        if (bottom) { *result = HTBOTTOM; return true; }
+
+        const int titleHeight = m_titleBar && m_titleBar->isVisible() ? m_titleBar->height() : 0;
+        const bool overWindowButtons = localPos.x() >= w - 184 && localPos.y() >= 0 && localPos.y() < titleHeight;
+        if (!overWindowButtons && localPos.y() >= 0 && localPos.y() < titleHeight) {
+            *result = HTCAPTION;
+            return true;
+        }
+    }
+#else
+    Q_UNUSED(eventType);
+    Q_UNUSED(message);
+    Q_UNUSED(result);
+#endif
+    return QMainWindow::nativeEvent(eventType, message, result);
+}
+
 void VideoWindow::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_F11) {
         toggleFullscreen();
@@ -232,113 +312,42 @@ void VideoWindow::mouseDoubleClickEvent(QMouseEvent* event) {
 
 void VideoWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event);
-    positionFullscreenButton(false);
 }
 
 void VideoWindow::closeEvent(QCloseEvent* event) {
     if (isFullScreen()) {
         showNormal();
     }
+    if (m_titleBar) {
+        m_titleBar->show();
+    }
+    if (m_fullscreenButton) {
+        m_fullscreenButton->show();
+    }
     emit windowClosed();
     QMainWindow::closeEvent(event);
 }
 
 void VideoWindow::toggleFullscreen() {
-    captureFullscreenButtonAnchor();
-
     if (isFullScreen()) {
+        if (m_titleBar) m_titleBar->show();
         showNormal();
+        if (m_fullscreenButton) m_fullscreenButton->show();
+        updateWindowControlStates();
         updateFullscreenButton();
-        positionFullscreenButton(false);
         LogManager::instance().log("Exited fullscreen");
     } else {
+        if (m_titleBar) m_titleBar->hide();
         showFullScreen();
-        updateFullscreenButton();
-        positionFullscreenButton(false);
+        updateWindowControlStates();
         LogManager::instance().log("Entered fullscreen (F11 or Escape to exit)");
     }
 }
 
 void VideoWindow::updateFullscreenButton() {
-    if (!m_fullscreenButton) return;
-
-    const bool full = isFullScreen();
-    m_fullscreenButton->setIcon(QIcon());
-    m_fullscreenButton->setText(full
-        ? QString::fromUtf8("\xE2\x86\x98 \xE2\x86\x99\n\xE2\x86\x97 \xE2\x86\x96")
-        : QString::fromUtf8("\xE2\x86\x96 \xE2\x86\x97\n\xE2\x86\x99 \xE2\x86\x98"));
-    m_fullscreenButton->setToolTip(full ? "Exit fullscreen" : "Enter fullscreen");
-    m_fullscreenButton->setAccessibleName(full ? "Exit fullscreen" : "Enter fullscreen");
-    m_fullscreenButton->setStyleSheet(R"(
-        QPushButton {
-            background-color: rgba(16, 16, 16, 0.72);
-            border: 1px solid rgba(255, 255, 255, 0.24);
-            border-radius: 8px;
-            color: white;
-            font-size: 13px;
-            font-weight: 600;
-            line-height: 12px;
-            padding: 0;
-        }
-        QPushButton:hover {
-            background-color: rgba(34, 34, 34, 0.78);
-            border-color: rgba(255, 255, 255, 0.36);
-        }
-        QPushButton:pressed {
-            background-color: rgba(16, 16, 16, 0.72);
-            border-color: rgba(255, 255, 255, 0.24);
-        }
-    )");
-    m_fullscreenButton->raise();
+    if (!m_fullscreenButton) {
+        return;
+    }
     m_fullscreenButton->show();
-}
-
-void VideoWindow::captureFullscreenButtonAnchor() {
-    if (!m_fullscreenButton || !centralWidget()) return;
-
-    const int parentW = centralWidget()->width();
-    const int parentH = centralWidget()->height();
-    const int left = m_fullscreenButton->x();
-    const int top = m_fullscreenButton->y();
-    const int right = parentW - left - m_fullscreenButton->width();
-    const int bottom = parentH - top - m_fullscreenButton->height();
-
-    m_buttonAnchorRight = right < left;
-    m_buttonAnchorBottom = bottom < top;
-    m_buttonAnchorX = qMax(0, m_buttonAnchorRight ? right : left);
-    m_buttonAnchorY = qMax(0, m_buttonAnchorBottom ? bottom : top);
-}
-
-void VideoWindow::positionFullscreenButton(bool forceDefault) {
-    if (!m_fullscreenButton || !centralWidget()) return;
-
-    auto* floatingButton = dynamic_cast<FloatingFullscreenButton*>(m_fullscreenButton);
-    if (floatingButton && floatingButton->wasMovedByUser()) {
-        m_fullscreenButtonMoved = true;
-    }
-
-    const int margin = isFullScreen() ? 24 : 16;
-    const QSize buttonSize = m_fullscreenButton->size();
-    QPoint next = m_fullscreenButton->pos();
-
-    if (forceDefault || !m_fullscreenButtonMoved) {
-        m_buttonAnchorRight = true;
-        m_buttonAnchorBottom = true;
-        m_buttonAnchorX = margin;
-        m_buttonAnchorY = margin;
-        next = QPoint(centralWidget()->width() - buttonSize.width() - margin,
-                      centralWidget()->height() - buttonSize.height() - margin);
-    } else {
-        next.setX(m_buttonAnchorRight
-            ? centralWidget()->width() - buttonSize.width() - m_buttonAnchorX
-            : m_buttonAnchorX);
-        next.setY(m_buttonAnchorBottom
-            ? centralWidget()->height() - buttonSize.height() - m_buttonAnchorY
-            : m_buttonAnchorY);
-    }
-
-    next.setX(qBound(margin, next.x(), centralWidget()->width() - buttonSize.width() - margin));
-    next.setY(qBound(margin, next.y(), centralWidget()->height() - buttonSize.height() - margin));
-    m_fullscreenButton->move(next);
-    m_fullscreenButton->raise();
+    m_fullscreenButton->setText(QString::fromWCharArray(L"\uE740"));
 }
