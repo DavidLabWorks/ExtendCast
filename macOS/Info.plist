@@ -37,6 +37,7 @@
     <key>NSBonjourServices</key>
     <array>
         <string>_bettercast._tcp</string>
+        <string>_bettercast._udp</string>
     </array>
 </dict>
 </plist>
