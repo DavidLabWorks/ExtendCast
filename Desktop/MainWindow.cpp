@@ -324,14 +324,14 @@ static QVector<LocalAddressInfo> receiverAddressInfos() {
             info.connectionLabel == "Virtual" ||
             info.connectionLabel == "Proxy" ||
             info.connectionLabel == "Bluetooth" ||
-            containsAny(lowerInterface, {"mihomo", "hyper-v", "vethernet"});
+            info.connectionLabel == "VPN" ||
+            containsAny(lowerInterface, {"tailscale", "zerotier", "wireguard", "vpn", "mihomo", "hyper-v", "vethernet"});
 
         if (isExcluded) continue;
 
         if (info.connectionLabel == "Wi-Fi" ||
             info.connectionLabel == "Ethernet" ||
-            info.connectionLabel == "Thunderbolt Bridge" ||
-            info.connectionLabel == "VPN") {
+            info.connectionLabel == "Thunderbolt Bridge") {
             result.append(info);
             continue;
         }
@@ -1025,9 +1025,20 @@ void MainWindow::setupReceivePage() {
     m_recvStatusDot->setStyleSheet("background-color: #34c759; border-radius: 5px;");
     statusRow->addWidget(m_recvStatusDot);
 
+    auto* statusTextLayout = new QVBoxLayout();
+    statusTextLayout->setSpacing(3);
+
     m_recvStatusLabel = new QLabel("Listening on port 51820");
     m_recvStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #d8d8d8;");
-    statusRow->addWidget(m_recvStatusLabel);
+    statusTextLayout->addWidget(m_recvStatusLabel);
+
+    m_recvStatusDetailLabel = new QLabel();
+    m_recvStatusDetailLabel->setWordWrap(true);
+    m_recvStatusDetailLabel->setStyleSheet("font-size: 12px; color: #9a9a9a;");
+    m_recvStatusDetailLabel->hide();
+    statusTextLayout->addWidget(m_recvStatusDetailLabel);
+
+    statusRow->addLayout(statusTextLayout, 1);
     statusRow->addStretch();
 
     m_receiverListenToggle = new QPushButton("On");
@@ -1047,14 +1058,14 @@ void MainWindow::setupReceivePage() {
 
     layout->addWidget(statusCard);
 
-    auto* listTitle = new QLabel("Available Connections");
-    listTitle->setMaximumWidth(680);
-    listTitle->setStyleSheet("font-size: 14px; font-weight: 700; color: #a7a7a7; padding-top: 8px;");
-    layout->addWidget(listTitle);
+    m_receiverConnectionsTitle = new QLabel("Available Connections");
+    m_receiverConnectionsTitle->setMaximumWidth(680);
+    m_receiverConnectionsTitle->setStyleSheet("font-size: 14px; font-weight: 700; color: #a7a7a7; padding-top: 8px;");
+    layout->addWidget(m_receiverConnectionsTitle);
 
-    auto* listenCard = makePanel();
-    listenCard->setMaximumWidth(680);
-    auto* listenLayout = new QVBoxLayout(listenCard);
+    m_receiverConnectionsCard = makePanel();
+    m_receiverConnectionsCard->setMaximumWidth(680);
+    auto* listenLayout = new QVBoxLayout(m_receiverConnectionsCard);
     listenLayout->setContentsMargins(24, 24, 24, 24);
     listenLayout->setSpacing(0);
 
@@ -1070,7 +1081,7 @@ void MainWindow::setupReceivePage() {
     m_recvAddressListLayout->setSpacing(10);
     listenLayout->addLayout(m_recvAddressListLayout);
 
-    layout->addWidget(listenCard);
+    layout->addWidget(m_receiverConnectionsCard);
 
     auto* settingsTitle = new QLabel("Settings");
     settingsTitle->setMaximumWidth(680);
@@ -1409,8 +1420,16 @@ void MainWindow::onStatusChanged(const QString& status) {
         if (status.contains("Waiting for connection", Qt::CaseInsensitive)) {
             m_recvStatusLabel->setText(QString("Listening on port %1").arg(m_receiverPort));
             m_recvStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #d8d8d8;");
+            if (m_recvStatusDetailLabel) {
+                m_recvStatusDetailLabel->clear();
+                m_recvStatusDetailLabel->hide();
+            }
         } else {
             m_recvStatusLabel->setText(status);
+            if (m_recvStatusDetailLabel && status.startsWith("TCP listen failed", Qt::CaseInsensitive)) {
+                m_recvStatusDetailLabel->setText(status);
+                m_recvStatusDetailLabel->show();
+            }
         }
     }
     LogManager::instance().log(status);
@@ -1433,6 +1452,10 @@ void MainWindow::onReceiverListeningToggled(bool checked) {
             m_recvStatusLabel->setText(QString("Listening on port %1").arg(m_receiverPort));
             m_recvStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #d8d8d8;");
         }
+        if (m_recvStatusDetailLabel) {
+            m_recvStatusDetailLabel->clear();
+            m_recvStatusDetailLabel->hide();
+        }
         if (m_recvStatusDot) {
             m_recvStatusDot->setStyleSheet("background-color: #34c759; border-radius: 5px;");
         }
@@ -1444,6 +1467,10 @@ void MainWindow::onReceiverListeningToggled(bool checked) {
         if (m_recvStatusLabel) {
             m_recvStatusLabel->setText("Receiver is not listening");
             m_recvStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #9a9a9a;");
+        }
+        if (m_recvStatusDetailLabel) {
+            m_recvStatusDetailLabel->setText("Turn listening on to accept incoming connections.");
+            m_recvStatusDetailLabel->show();
         }
         if (m_recvStatusDot) {
             m_recvStatusDot->setStyleSheet("background-color: #6b6b6b; border-radius: 5px;");
@@ -1779,23 +1806,43 @@ void MainWindow::updateLocalIpDisplay() {
     }
 
     if (m_overviewIpLabel) m_overviewIpLabel->setText(overviewText);
-    if (m_recvAddressListLayout) {
-        clearLayout(m_recvAddressListLayout);
-    }
 
     if (m_recvStatusLabel) {
         if (m_receiverListening) {
             m_recvStatusLabel->setText(infos.isEmpty() ? "Waiting for network" : QString("Listening on port %1").arg(m_receiverPort));
             m_recvStatusLabel->setToolTip(formatPrimaryHint(infos));
+            if (m_recvStatusDetailLabel) {
+                m_recvStatusDetailLabel->clear();
+                m_recvStatusDetailLabel->hide();
+            }
         } else {
             m_recvStatusLabel->setText("Receiver is not listening");
             m_recvStatusLabel->setToolTip("Turn on listening to receive connections.");
+            if (m_recvStatusDetailLabel) {
+                m_recvStatusDetailLabel->setText("Turn listening on to accept incoming connections.");
+                m_recvStatusDetailLabel->show();
+            }
         }
     }
+
+    if (!m_receiverListening) {
+        if (m_receiverConnectionsTitle) m_receiverConnectionsTitle->hide();
+        if (m_receiverConnectionsCard) m_receiverConnectionsCard->hide();
+        m_receiverAddressSignature.clear();
+        return;
+    }
+
+    if (m_receiverConnectionsTitle) m_receiverConnectionsTitle->show();
+    if (m_receiverConnectionsCard) m_receiverConnectionsCard->show();
+
     if (m_recvIpLabel) {
         if (infos.isEmpty()) {
+            if (m_recvAddressListLayout) {
+                clearLayout(m_recvAddressListLayout);
+            }
+            m_receiverAddressSignature.clear();
             m_recvIpLabel->show();
-            m_recvIpLabel->setText("No Wi-Fi, Ethernet, VPN, or Thunderbolt Bridge address is available.");
+            m_recvIpLabel->setText("No active Wi-Fi, Ethernet, or Thunderbolt connection detected.");
             return;
         }
 
@@ -1804,6 +1851,19 @@ void MainWindow::updateLocalIpDisplay() {
     }
 
     if (m_recvAddressListLayout) {
+        QStringList signatureParts;
+        for (const auto& info : infos) {
+            signatureParts.append(QString("%1|%2|%3|%4")
+                                      .arg(info.connectionLabel, info.ip, QString::number(m_receiverPort), info.usageHint));
+        }
+        const QString signature = signatureParts.join("\n");
+        if (signature == m_receiverAddressSignature) {
+            return;
+        }
+
+        clearLayout(m_recvAddressListLayout);
+        m_receiverAddressSignature = signature;
+
         for (const auto& info : infos) {
             auto* panel = makeMethodPanel();
             panel->setToolTip(QString("Windows adapter: %1").arg(info.interfaceName));

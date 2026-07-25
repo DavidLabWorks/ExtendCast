@@ -57,6 +57,7 @@ class AudioPlayer;
 class AdbHelper;
 class VideoWindow;
 class QVBoxLayout;
+class QFrame;
 #ifdef ENABLE_SENDER
 class SenderController;
 class VirtualDisplayVDD;
@@ -143,15 +144,19 @@ private:
     // Receive page
     QLabel* m_recvStatusDot = nullptr;
     QLabel* m_recvStatusLabel = nullptr;
+    QLabel* m_recvStatusDetailLabel = nullptr;
     QLabel* m_recvIpLabel = nullptr;
     QLabel* m_recvPrimaryTypeLabel = nullptr;
     QLabel* m_recvPrimaryAddressLabel = nullptr;
     QLabel* m_recvPrimaryHintLabel = nullptr;
     QVBoxLayout* m_recvAddressListLayout = nullptr;
+    QLabel* m_receiverConnectionsTitle = nullptr;
+    QFrame* m_receiverConnectionsCard = nullptr;
     QPushButton* m_receiverListenToggle = nullptr;
     QPushButton* m_receiverAutoStartToggle = nullptr;
     bool m_receiverListening = false;
     uint16_t m_receiverPort = 51820;
+    QString m_receiverAddressSignature;
     QLineEdit* m_hostEdit = nullptr;
     QLineEdit* m_portEdit = nullptr;
     QPushButton* m_connectBtn = nullptr;

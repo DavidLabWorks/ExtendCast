@@ -299,13 +299,6 @@ enum ReceiverConnectionAddressProvider {
             title = "Wi-Fi"
             usageHint = "Connect through the Wi-Fi network."
             priority = 10
-        } else if lowerInterface.hasPrefix("utun")
-                    || lowerDisplayName.contains("vpn")
-                    || lowerDisplayName.contains("wireguard")
-                    || lowerDisplayName.contains("tailscale") {
-            title = "VPN"
-            usageHint = "Connect from another device on the same VPN."
-            priority = 40
         } else if lowerDisplayName.contains("ethernet")
                     || lowerInterface.hasPrefix("en") {
             title = "Ethernet"
@@ -450,26 +443,28 @@ struct ReceiverModeView: View {
                     }
                 }
 
-                sectionTitle("Available Connections")
+                if manager.isRunning {
+                    sectionTitle("Available Connections")
 
-                DashboardCard {
-                    if availableAddresses.isEmpty {
-                        HStack(spacing: 10) {
-                            Image(systemName: "network.slash")
-                                .foregroundStyle(.secondary)
-                            Text("No active Wi-Fi, Ethernet, VPN, or Thunderbolt connection detected.")
-                                .font(.system(size: 13))
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 8)
-                    } else {
-                        VStack(spacing: 0) {
-                            ForEach(Array(availableAddresses.enumerated()), id: \.element.id) { index, connection in
-                                connectionRow(connection)
-                                if index < availableAddresses.count - 1 {
-                                    Divider()
-                                        .padding(.vertical, 14)
+                    DashboardCard {
+                        if availableAddresses.isEmpty {
+                            HStack(spacing: 10) {
+                                Image(systemName: "network.slash")
+                                    .foregroundStyle(.secondary)
+                                Text("No active Wi-Fi, Ethernet, or Thunderbolt connection detected.")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 8)
+                        } else {
+                            VStack(spacing: 0) {
+                                ForEach(Array(availableAddresses.enumerated()), id: \.element.id) { index, connection in
+                                    connectionRow(connection)
+                                    if index < availableAddresses.count - 1 {
+                                        Divider()
+                                            .padding(.vertical, 14)
+                                    }
                                 }
                             }
                         }
@@ -526,13 +521,22 @@ struct ReceiverModeView: View {
             .frame(maxWidth: .infinity)
         }
         .navigationTitle("Receiver")
-        .onAppear(perform: refreshAvailableAddresses)
-        .onChange(of: manager.isRunning) { _, _ in
-            refreshAvailableAddresses()
+        .onAppear {
+            if manager.isRunning {
+                refreshAvailableAddresses()
+            }
+        }
+        .onChange(of: manager.isRunning) { _, isRunning in
+            if isRunning {
+                refreshAvailableAddresses()
+            } else {
+                availableAddresses = []
+            }
         }
         .onReceive(
             Timer.publish(every: 5, on: .main, in: .common).autoconnect()
         ) { _ in
+            guard manager.isRunning else { return }
             refreshAvailableAddresses()
         }
     }
