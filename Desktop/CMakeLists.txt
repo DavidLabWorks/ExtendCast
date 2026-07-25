@@ -22,7 +22,7 @@ set(CMAKE_AUTOUIC ON)
 option(ENABLE_SENDER "Enable sender mode (screen capture + H.264 encode)" OFF)
 
 # Qt6 components
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network OpenGLWidgets Multimedia)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network OpenGLWidgets Multimedia Svg)
 
 # FFmpeg — try multiple discovery methods
 # 1. vcpkg / CMake find_package (works on Windows CI)
@@ -197,6 +197,7 @@ target_link_libraries(BetterCastReceiver PRIVATE
     Qt6::Network
     Qt6::OpenGLWidgets
     Qt6::Multimedia
+    Qt6::Svg
     ${FFMPEG_ALL_LIBRARIES}
 )
 

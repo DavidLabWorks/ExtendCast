@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import Network
 import Security
 import ScreenCaptureKit
@@ -937,25 +938,29 @@ struct SidebarView: View {
     var body: some View {
         List {
             Section {
-                Label("Sender", systemImage: "paperplane")
-                    .foregroundStyle(.primary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityAddTraits(.isHeader)
+                HStack(spacing: 8) {
+                    SidebarIcon(name: "sidebar-sender", usesSharedIcon: true)
+                        .foregroundColor(.secondary)
+                    Text("Sender")
+                }
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityAddTraits(.isHeader)
 
-                sidebarRow("Devices", icon: "display.2", tag: .devices)
+                sidebarRow("Devices", icon: "sidebar-devices", tag: .devices, usesSharedIcon: true)
                     .padding(.leading, 16)
                     .tourAnchor("sidebar_devices_section")
-                sidebarRow("Recent", icon: "clock.arrow.circlepath", tag: .recent)
+                sidebarRow("Recent", icon: "sidebar-recent", tag: .recent, usesSharedIcon: true)
                     .padding(.leading, 16)
-                sidebarRow("Connect", icon: "link", tag: .connect)
+                sidebarRow("Connect", icon: "sidebar-connect", tag: .connect, usesSharedIcon: true)
                     .padding(.leading, 16)
 
-                sidebarRow("Receiver", icon: "display.and.arrow.down", tag: .receive)
+                sidebarRow("Receiver", icon: "sidebar-receiver", tag: .receive, usesSharedIcon: true)
                     .padding(.top, 8)
                     .tourAnchor("sidebar_receive")
-                sidebarRow("Settings", icon: "gearshape", tag: .settings)
+                sidebarRow("Settings", icon: "sidebar-settings", tag: .settings, usesSharedIcon: true)
                     .tourAnchor("sidebar_settings")
-                sidebarRow("Logs", icon: "text.alignleft", tag: .logs)
+                sidebarRow("Logs", icon: "sidebar-logs", tag: .logs, usesSharedIcon: true)
                     .tourAnchor("sidebar_logs")
             }
         }
@@ -966,8 +971,7 @@ struct SidebarView: View {
                 Button(role: .destructive) {
                     quitAction()
                 } label: {
-                    Image(systemName: "power")
-                        .font(.system(size: 11))
+                    SidebarIcon(name: "sidebar-power", usesSharedIcon: true)
                 }
                 .buttonStyle(.borderless)
                 .help("Quit ExtendCast")
@@ -985,7 +989,8 @@ struct SidebarView: View {
         subtitle: String? = nil,
         icon: String,
         tag: BetterCastSenderApp.SidebarSelection,
-        iconTint: Color? = nil
+        iconTint: Color? = nil,
+        usesSharedIcon: Bool = false
     ) -> some View {
         let isSelected = isSidebarSelectionActive(tag)
         let tint = iconTint ?? .accentColor
@@ -1005,7 +1010,7 @@ struct SidebarView: View {
                     Text(title)
                 }
             } icon: {
-                Image(systemName: icon)
+                SidebarIcon(name: icon, usesSharedIcon: usesSharedIcon)
                     .foregroundColor(isSelected ? tint : .secondary)
             }
             .foregroundColor(isSelected ? tint : .primary)
@@ -1029,6 +1034,26 @@ struct SidebarView: View {
             return true
         default:
             return false
+        }
+    }
+}
+
+private struct SidebarIcon: View {
+    let name: String
+    var usesSharedIcon = false
+
+    var body: some View {
+        if usesSharedIcon,
+           let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "SidebarIcons"),
+           let image = NSImage(contentsOf: url) {
+            Image(nsImage: image)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 17, height: 17)
+        } else {
+            Image(systemName: name)
+                .frame(width: 17, height: 17)
         }
     }
 }

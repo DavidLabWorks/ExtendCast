@@ -1,5 +1,13 @@
 <RCC>
     <qresource prefix="/">
         <file alias="appicon.png">icon_256x256.png</file>
+        <file alias="icons/sidebar-sender.svg">../macOS/Sources/BetterCastSender/Resources/SidebarIcons/sidebar-sender.svg</file>
+        <file alias="icons/sidebar-devices.svg">../macOS/Sources/BetterCastSender/Resources/SidebarIcons/sidebar-devices.svg</file>
+        <file alias="icons/sidebar-recent.svg">../macOS/Sources/BetterCastSender/Resources/SidebarIcons/sidebar-recent.svg</file>
+        <file alias="icons/sidebar-connect.svg">../macOS/Sources/BetterCastSender/Resources/SidebarIcons/sidebar-connect.svg</file>
+        <file alias="icons/sidebar-receiver.svg">../macOS/Sources/BetterCastSender/Resources/SidebarIcons/sidebar-receiver.svg</file>
+        <file alias="icons/sidebar-settings.svg">../macOS/Sources/BetterCastSender/Resources/SidebarIcons/sidebar-settings.svg</file>
+        <file alias="icons/sidebar-logs.svg">../macOS/Sources/BetterCastSender/Resources/SidebarIcons/sidebar-logs.svg</file>
+        <file alias="icons/sidebar-power.svg">../macOS/Sources/BetterCastSender/Resources/SidebarIcons/sidebar-power.svg</file>
     </qresource>
 </RCC>

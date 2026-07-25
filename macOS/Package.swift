@@ -26,6 +26,9 @@ let package = Package(
             name: "BetterCastSender",
             dependencies: ["VirtualDisplayLib"],
             exclude: ["VirtualDisplay"],
+            resources: [
+                .process("Resources")
+            ],
             linkerSettings: [
                 .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("CoreMedia"),

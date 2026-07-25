@@ -28,6 +28,10 @@
 #include <QMessageBox>
 #include <QStandardPaths>
 #include <QSettings>
+#include <QPainter>
+#include <QSvgRenderer>
+#include <QFile>
+#include <QHash>
 #include <QDir>
 #include <QDebug>
 #include <QNetworkInterface>
@@ -45,29 +49,83 @@ static const char* kDarkStylesheet = R"(
     QSplitter::handle { background-color: #333; width: 1px; }
 
     QListWidget {
-        background-color: #1e1e1e;
+        background-color: #202020;
         border: none;
         outline: none;
-        font-size: 13px;
-        padding-top: 8px;
+        font-size: 14px;
+        padding: 12px 8px 0 8px;
     }
     QListWidget::item {
-        color: #ccc;
-        padding: 7px 14px;
-        border-radius: 6px;
-        margin: 1px 8px;
+        color: #d6d6d6;
+        padding: 6px 12px;
+        border-radius: 7px;
+        margin: 2px 0;
     }
     QListWidget::item:selected {
-        background-color: rgba(0, 120, 212, 0.18);
-        color: #4da6ff;
+        background-color: rgba(10, 132, 255, 0.26);
+        color: #f5f7fb;
     }
     QListWidget::item:hover:!selected {
-        background-color: rgba(255, 255, 255, 0.05);
+        background-color: rgba(255, 255, 255, 0.07);
     }
 
     QStackedWidget { background-color: #1a1a1a; }
     QScrollArea { background-color: #1a1a1a; border: none; }
     QScrollArea > QWidget > QWidget { background-color: #1a1a1a; }
+
+    QScrollBar:vertical {
+        background: transparent;
+        width: 10px;
+        margin: 4px 2px 4px 2px;
+    }
+    QScrollBar::handle:vertical {
+        background: rgba(255, 255, 255, 0.22);
+        border-radius: 4px;
+        min-height: 36px;
+    }
+    QScrollBar::handle:vertical:hover {
+        background: rgba(255, 255, 255, 0.34);
+    }
+    QScrollBar::handle:vertical:pressed {
+        background: rgba(255, 255, 255, 0.46);
+    }
+    QScrollBar::add-line:vertical,
+    QScrollBar::sub-line:vertical {
+        height: 0px;
+        border: none;
+        background: transparent;
+    }
+    QScrollBar::add-page:vertical,
+    QScrollBar::sub-page:vertical {
+        background: transparent;
+    }
+
+    QScrollBar:horizontal {
+        background: transparent;
+        height: 10px;
+        margin: 2px 4px 2px 4px;
+    }
+    QScrollBar::handle:horizontal {
+        background: rgba(255, 255, 255, 0.22);
+        border-radius: 4px;
+        min-width: 36px;
+    }
+    QScrollBar::handle:horizontal:hover {
+        background: rgba(255, 255, 255, 0.34);
+    }
+    QScrollBar::handle:horizontal:pressed {
+        background: rgba(255, 255, 255, 0.46);
+    }
+    QScrollBar::add-line:horizontal,
+    QScrollBar::sub-line:horizontal {
+        width: 0px;
+        border: none;
+        background: transparent;
+    }
+    QScrollBar::add-page:horizontal,
+    QScrollBar::sub-page:horizontal {
+        background: transparent;
+    }
 
     QLabel { color: #e0e0e0; }
 
@@ -177,11 +235,53 @@ static QListWidgetItem* addSidebarSection(QListWidget* list, const QString& titl
     return item;
 }
 
-static QListWidgetItem* addSidebarItem(QListWidget* list, const QString& icon,
+static QIcon makeSidebarIcon(const QString& name) {
+    static const QHash<QString, QString> kIconPaths = {
+        {"sender", ":/icons/sidebar-sender.svg"},
+        {"devices", ":/icons/sidebar-devices.svg"},
+        {"recent", ":/icons/sidebar-recent.svg"},
+        {"connect", ":/icons/sidebar-connect.svg"},
+        {"receiver", ":/icons/sidebar-receiver.svg"},
+        {"settings", ":/icons/sidebar-settings.svg"},
+        {"logs", ":/icons/sidebar-logs.svg"},
+        {"power", ":/icons/sidebar-power.svg"},
+    };
+
+    auto drawIcon = [&](const QColor& color) {
+        const QSize logicalSize(24, 24);
+        const qreal dpr = qApp ? qApp->devicePixelRatio() : 1.0;
+        QPixmap pixmap(logicalSize * dpr);
+        pixmap.setDevicePixelRatio(dpr);
+        pixmap.fill(Qt::transparent);
+
+        QFile file(kIconPaths.value(name));
+        if (!file.open(QIODevice::ReadOnly)) {
+            return pixmap;
+        }
+
+        QString svg = QString::fromUtf8(file.readAll());
+        svg.replace("currentColor", color.name(QColor::HexRgb));
+
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QSvgRenderer renderer(svg.toUtf8());
+        renderer.render(&painter, QRectF(2, 2, 20, 20));
+
+        return pixmap;
+    };
+
+    QIcon icon;
+    icon.addPixmap(drawIcon(QColor("#aeb3bd")), QIcon::Normal);
+    icon.addPixmap(drawIcon(QColor("#f5f7fb")), QIcon::Selected);
+    icon.addPixmap(drawIcon(QColor("#f5f7fb")), QIcon::Active);
+    return icon;
+}
+
+static QListWidgetItem* addSidebarItem(QListWidget* list, const QIcon& icon,
                                         const QString& title, int pageIndex) {
-    auto* item = new QListWidgetItem(QString("%1  %2").arg(icon, title));
+    auto* item = new QListWidgetItem(icon, title);
     item->setData(Qt::UserRole, pageIndex);
-    item->setSizeHint(QSize(0, 34));
+    item->setSizeHint(QSize(0, 36));
     list->addItem(item);
     return item;
 }
@@ -588,7 +688,9 @@ void MainWindow::setupUi() {
 
     // Sidebar
     m_sidebarList = new QListWidget();
-    m_sidebarList->setFixedWidth(220);
+    m_sidebarList->setFixedWidth(232);
+    m_sidebarList->setIconSize(QSize(24, 24));
+    m_sidebarList->setSpacing(1);
     m_sidebarList->setFocusPolicy(Qt::NoFocus);
     m_sidebarList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
@@ -620,9 +722,9 @@ void MainWindow::setupUi() {
 }
 
 void MainWindow::setupSidebar() {
-    addSidebarItem(m_sidebarList, QString::fromUtf8("\xF0\x9F\x93\xA5"), "Receiver", m_pageReceive);
-    addSidebarItem(m_sidebarList, QString::fromUtf8("\xE2\x9A\x99"), "Settings", m_pageSettings);
-    addSidebarItem(m_sidebarList, QString::fromUtf8("\xF0\x9F\x93\x9C"), "Logs", m_pageLogs);
+    addSidebarItem(m_sidebarList, makeSidebarIcon("receiver"), "Receiver", m_pageReceive);
+    addSidebarItem(m_sidebarList, makeSidebarIcon("settings"), "Settings", m_pageSettings);
+    addSidebarItem(m_sidebarList, makeSidebarIcon("logs"), "Logs", m_pageLogs);
 }
 
 // ─── Overview Page ──────────────────────────────────────────────────────────────
