@@ -231,7 +231,7 @@ class ReceiverManager: ObservableObject {
 struct ReceiverModeView: View {
     @ObservedObject private var manager = ReceiverManager.shared
     @ObservedObject private var listener = ReceiverManager.shared.networkListener
-    @AppStorage("receiverListeningEnabled") private var receiverAutoStartEnabled = false
+    @AppStorage("receiverAutoStartEnabled") private var receiverAutoStartEnabled = false
     @State private var cachedLocalIPs: String = ""
 
     var body: some View {

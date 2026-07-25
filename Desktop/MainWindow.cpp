@@ -1011,6 +1011,38 @@ void MainWindow::setupReceivePage() {
     pageDesc->setWordWrap(true);
     layout->addWidget(pageDesc);
 
+    auto* autoStartCard = makePanel();
+    autoStartCard->setMaximumWidth(680);
+    auto* autoStartRow = new QHBoxLayout(autoStartCard);
+    autoStartRow->setContentsMargins(24, 18, 24, 18);
+    autoStartRow->setSpacing(14);
+
+    auto* autoStartText = new QVBoxLayout();
+    autoStartText->setSpacing(4);
+    auto* autoStartTitle = new QLabel("Start Listening at Launch");
+    autoStartTitle->setStyleSheet("font-size: 13px; font-weight: 700; color: #f2f2f2;");
+    autoStartText->addWidget(autoStartTitle);
+    auto* autoStartDesc = new QLabel("Automatically start receiver listening when ExtendCast opens.");
+    autoStartDesc->setWordWrap(true);
+    autoStartDesc->setStyleSheet("font-size: 12px; color: #9a9a9a;");
+    autoStartText->addWidget(autoStartDesc);
+    autoStartRow->addLayout(autoStartText, 1);
+
+    m_receiverAutoStartToggle = new QPushButton(receiverAutoStartEnabledPreference() ? "On" : "Off");
+    m_receiverAutoStartToggle->setCheckable(true);
+    m_receiverAutoStartToggle->setChecked(receiverAutoStartEnabledPreference());
+    m_receiverAutoStartToggle->setCursor(Qt::PointingHandCursor);
+    m_receiverAutoStartToggle->setFixedSize(74, 32);
+    m_receiverAutoStartToggle->setStyleSheet(
+        "QPushButton { background-color: #2b2b2b; border: 1px solid #3a3a3a; border-radius: 16px; "
+        "color: #bdbdbd; font-size: 12px; font-weight: 700; padding: 0 12px; text-align: center; }"
+        "QPushButton:checked { background-color: #248a46; border-color: #2fbf62; color: white; }"
+        "QPushButton:hover { border-color: #555555; }");
+    connect(m_receiverAutoStartToggle, &QPushButton::toggled,
+            this, &MainWindow::onReceiverAutoStartToggled);
+    autoStartRow->addWidget(m_receiverAutoStartToggle, 0, Qt::AlignVCenter);
+    layout->addWidget(autoStartCard);
+
     auto* statusTitle = new QLabel("Status");
     statusTitle->setMaximumWidth(680);
     statusTitle->setStyleSheet("font-size: 14px; font-weight: 700; color: #a7a7a7; padding-top: 14px;");
@@ -1125,13 +1157,6 @@ void MainWindow::setupSettingsPage() {
     auto* portInfo = new QLabel("Listening on port 51820 (TCP)");
     portInfo->setStyleSheet("font-size: 13px; color: #ccc;");
     connLayout->addWidget(portInfo);
-
-    m_receiverAutoStartCheck = new QCheckBox("Start listening on launch");
-    m_receiverAutoStartCheck->setChecked(receiverAutoStartEnabledPreference());
-    m_receiverAutoStartCheck->setStyleSheet("font-size: 13px; color: #ddd;");
-    connect(m_receiverAutoStartCheck, &QCheckBox::toggled,
-            this, &MainWindow::onReceiverAutoStartToggled);
-    connLayout->addWidget(m_receiverAutoStartCheck);
 
     auto* ipInfo = new QLabel(formatAddressLines(localAddressInfos()));
     ipInfo->setStyleSheet("font-size: 12px; color: #888;");
@@ -1429,6 +1454,9 @@ void MainWindow::onReceiverListeningToggled(bool checked) {
 }
 
 void MainWindow::onReceiverAutoStartToggled(bool checked) {
+    if (m_receiverAutoStartToggle) {
+        m_receiverAutoStartToggle->setText(checked ? "On" : "Off");
+    }
     QSettings settings;
     settings.setValue("receiverAutoStartEnabled", checked);
     settings.sync();

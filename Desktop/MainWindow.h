@@ -149,7 +149,7 @@ private:
     QLabel* m_recvPrimaryHintLabel = nullptr;
     QVBoxLayout* m_recvAddressListLayout = nullptr;
     QPushButton* m_receiverListenToggle = nullptr;
-    QCheckBox* m_receiverAutoStartCheck = nullptr;
+    QPushButton* m_receiverAutoStartToggle = nullptr;
     bool m_receiverListening = false;
     uint16_t m_receiverPort = 51820;
     QLineEdit* m_hostEdit = nullptr;
