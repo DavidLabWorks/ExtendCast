@@ -719,7 +719,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
         )
     }
 
-    func testLocalThunderboltDoesNotAddModeToWindowsReceiverFoundOnlyOverWiFi() {
+    func testActiveLocalThunderboltAddsModeToWindowsReceiverFoundOnlyOverWiFi() {
         let client = NetworkClient(
             localConnectionAddressProvider: {
                 [
@@ -729,6 +729,14 @@ final class DiscoveryBehaviorTests: XCTestCase {
                         address: "169.254.204.112:51820",
                         usageHint: "Connect directly over Thunderbolt.",
                         priority: 20
+                    ),
+                ]
+            },
+            thunderboltPeerRouteProvider: {
+                [
+                    ThunderboltPeerAddressProvider.PeerRoute(
+                        host: "169.254.204.111",
+                        interfaceName: "bridge0"
                     ),
                 ]
             }
@@ -748,11 +756,235 @@ final class DiscoveryBehaviorTests: XCTestCase {
 
         XCTAssertEqual(
             client.availableConnectionModes(for: service),
+            [.auto, .routerOnly, .thunderboltBridge]
+        )
+    }
+
+    func testOutboundRouteCatalogOwnsSenderRouteAvailabilityAndResolution() {
+        let remoteReceiver = DiscoveredService(
+            name: "Dang-Surface (Windows)",
+            endpoint: .service(
+                name: "Dang-Surface (Windows)",
+                type: "_bettercast._tcp",
+                domain: "local.",
+                interface: nil
+            ),
+            discoveryInterfaces: [
+                DiscoveredNetworkInterface(name: "en0", type: .wifi),
+            ]
+        )
+        let catalog = OutboundRouteCatalog(
+            remoteReceiver: remoteReceiver,
+            discoveredReceivers: [remoteReceiver],
+            localAddresses: [
+                ReceiverConnectionAddress(
+                    interfaceName: "bridge0",
+                    title: "Thunderbolt Bridge",
+                    address: "169.254.205.130:51820",
+                    usageHint: "Connect directly over Thunderbolt.",
+                    priority: 20
+                ),
+            ],
+            thunderboltPeerRoutes: [
+                ThunderboltPeerAddressProvider.PeerRoute(
+                    host: "169.254.204.111",
+                    interfaceName: "bridge0"
+                ),
+            ]
+        )
+
+        XCTAssertEqual(
+            catalog.availableModes,
+            [.auto, .routerOnly, .thunderboltBridge]
+        )
+        XCTAssertEqual(catalog.resolve(.auto), .thunderboltBridge)
+        XCTAssertEqual(
+            catalog.candidateThunderboltInterfaceNames,
+            Set(["bridge0"])
+        )
+        XCTAssertEqual(
+            catalog.thunderboltPeerRoute(),
+            ThunderboltPeerAddressProvider.PeerRoute(
+                host: "169.254.204.111",
+                interfaceName: "bridge0"
+            )
+        )
+    }
+
+    func testOutboundRouteCatalogDoesNotGuessThunderboltTarget() {
+        let target = DiscoveredService(
+            name: "Office PC (Windows)",
+            endpoint: .service(
+                name: "Office PC (Windows)",
+                type: "_bettercast._tcp",
+                domain: "local.",
+                interface: nil
+            ),
+            discoveryInterfaces: [
+                DiscoveredNetworkInterface(name: "en0", type: .wifi),
+            ]
+        )
+        let otherReceiver = DiscoveredService(
+            name: "Lab PC (Windows)",
+            endpoint: .service(
+                name: "Lab PC (Windows)",
+                type: "_bettercast._tcp",
+                domain: "local.",
+                interface: nil
+            )
+        )
+        let localAddresses = [
+            ReceiverConnectionAddress(
+                interfaceName: "bridge0",
+                title: "Thunderbolt Bridge",
+                address: "169.254.205.130:51820",
+                usageHint: "Connect directly over Thunderbolt.",
+                priority: 20
+            ),
+        ]
+
+        XCTAssertEqual(
+            OutboundRouteCatalog(
+                remoteReceiver: target,
+                discoveredReceivers: [target],
+                localAddresses: localAddresses
+            ).availableModes,
+            [.auto, .routerOnly]
+        )
+        XCTAssertEqual(
+            OutboundRouteCatalog(
+                remoteReceiver: target,
+                discoveredReceivers: [target, otherReceiver],
+                localAddresses: localAddresses,
+                thunderboltPeerRoutes: [
+                    ThunderboltPeerAddressProvider.PeerRoute(
+                        host: "169.254.204.111",
+                        interfaceName: "bridge0"
+                    ),
+                ]
+            ).availableModes,
+            [.auto, .routerOnly]
+        )
+        XCTAssertEqual(
+            OutboundRouteCatalog(
+                remoteReceiver: target,
+                discoveredReceivers: [target],
+                localAddresses: localAddresses,
+                thunderboltPeerRoutes: [
+                    ThunderboltPeerAddressProvider.PeerRoute(
+                        host: "169.254.204.111",
+                        interfaceName: "bridge0"
+                    ),
+                    ThunderboltPeerAddressProvider.PeerRoute(
+                        host: "169.254.204.112",
+                        interfaceName: "bridge0"
+                    ),
+                ]
+            ).availableModes,
             [.auto, .routerOnly]
         )
     }
 
-    func testThunderboltModeRequiresTheSameLocalBridgeAsTheReceiver() {
+    func testAvailableModesReuseRecentThunderboltTopologySnapshot() {
+        var peerLookupCount = 0
+        let client = NetworkClient(
+            localConnectionAddressProvider: {
+                [
+                    ReceiverConnectionAddress(
+                        interfaceName: "bridge0",
+                        title: "Thunderbolt Bridge",
+                        address: "169.254.205.130:51820",
+                        usageHint: "Connect directly over Thunderbolt.",
+                        priority: 20
+                    ),
+                ]
+            },
+            thunderboltPeerRouteProvider: {
+                peerLookupCount += 1
+                return [
+                    ThunderboltPeerAddressProvider.PeerRoute(
+                        host: "169.254.204.111",
+                        interfaceName: "bridge0"
+                    ),
+                ]
+            }
+        )
+        let receiver = DiscoveredService(
+            name: "Office PC (Windows)",
+            endpoint: .service(
+                name: "Office PC (Windows)",
+                type: "_bettercast._tcp",
+                domain: "local.",
+                interface: nil
+            ),
+            discoveryInterfaces: [
+                DiscoveredNetworkInterface(name: "en0", type: .wifi),
+            ]
+        )
+
+        XCTAssertTrue(
+            client.availableConnectionModes(for: receiver)
+                .contains(.thunderboltBridge)
+        )
+        XCTAssertTrue(
+            client.availableConnectionModes(for: receiver)
+                .contains(.thunderboltBridge)
+        )
+        XCTAssertEqual(peerLookupCount, 1)
+    }
+
+    func testConnectCardUsesUniqueThunderboltPeerWhenBonjourFoundOnlyOverWiFi() {
+        let client = NetworkClient(
+            localConnectionAddressProvider: {
+                [
+                    ReceiverConnectionAddress(
+                        interfaceName: "en0",
+                        title: "Wi-Fi",
+                        address: "192.168.31.194:51820",
+                        usageHint: "Connect through the Wi-Fi network.",
+                        priority: 10
+                    ),
+                    ReceiverConnectionAddress(
+                        interfaceName: "bridge0",
+                        title: "Thunderbolt Bridge",
+                        address: "169.254.155.125:51820",
+                        usageHint: "Connect directly over Thunderbolt.",
+                        priority: 20
+                    ),
+                ]
+            },
+            thunderboltPeerRouteProvider: {
+                [
+                    ThunderboltPeerAddressProvider.PeerRoute(
+                        host: "169.254.204.111",
+                        interfaceName: "bridge0"
+                    ),
+                ]
+            }
+        )
+        let service = DiscoveredService(
+            name: "Dang-Surface (Windows)",
+            endpoint: .service(
+                name: "Dang-Surface (Windows)",
+                type: "_bettercast._tcp",
+                domain: "local.",
+                interface: nil
+            ),
+            discoveryInterfaces: [
+                DiscoveredNetworkInterface(name: "en0", type: .wifi),
+            ]
+        )
+
+        XCTAssertEqual(
+            client.connectionEndpointDescription(
+                for: service,
+                preference: .thunderboltBridge
+            ),
+            "169.254.204.111%bridge0:51820"
+        )
+    }
+
+    func testActiveLocalThunderboltOverridesStaleDiscoveryInterface() {
         let client = NetworkClient(
             localConnectionAddressProvider: {
                 [
@@ -762,6 +994,14 @@ final class DiscoveryBehaviorTests: XCTestCase {
                         address: "169.254.205.130:51820",
                         usageHint: "Connect directly over Thunderbolt.",
                         priority: 20
+                    ),
+                ]
+            },
+            thunderboltPeerRouteProvider: {
+                [
+                    ThunderboltPeerAddressProvider.PeerRoute(
+                        host: "169.254.204.111",
+                        interfaceName: "bridge1"
                     ),
                 ]
             }
@@ -784,7 +1024,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
 
         XCTAssertEqual(
             client.availableConnectionModes(for: service),
-            [.auto]
+            [.auto, .thunderboltBridge]
         )
     }
 

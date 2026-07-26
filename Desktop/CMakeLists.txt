@@ -126,7 +126,7 @@ set(HEADERS
     VideoRenderer.h
     VideoWindow.h
     ReceiverSession.h
-    ReceiverSessionRegistry.h
+    InboundSessionRegistry.h
     InputHandler.h
     InputEvent.h
     ServiceDiscovery.h
@@ -193,13 +193,13 @@ add_executable(BetterCastReceiver ${SOURCES} ${HEADERS} ${RESOURCES})
 
 if(BUILD_TESTING)
     add_executable(
-        ReceiverSessionRegistryTests
-        tests/ReceiverSessionRegistryTests.cpp
-        ReceiverSessionRegistry.h
+        InboundSessionRegistryTests
+        tests/InboundSessionRegistryTests.cpp
+        InboundSessionRegistry.h
     )
     add_test(
-        NAME ReceiverSessionRegistryTests
-        COMMAND ReceiverSessionRegistryTests
+        NAME InboundSessionRegistryTests
+        COMMAND InboundSessionRegistryTests
     )
 endif()
 

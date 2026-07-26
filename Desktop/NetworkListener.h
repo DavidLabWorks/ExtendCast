@@ -12,7 +12,7 @@
 #include <QString>
 
 #include "InputEvent.h"
-#include "ReceiverSessionRegistry.h"
+#include "InboundSessionRegistry.h"
 
 class NetworkListener : public QObject {
     Q_OBJECT
@@ -24,7 +24,7 @@ public:
     void start();
     void stop();
     bool isListening() const;
-    void connectTo(const QString& host, uint16_t port);
+    void connectToRemoteSender(const QString& host, uint16_t port);
     void disconnectAll();
     const QList<QTcpSocket*>& clients() const { return m_clients; }
     uint16_t actualTcpPort() const;
@@ -79,7 +79,7 @@ private:
     QHash<QTcpSocket*, QByteArray> m_tcpBuffers;
     QHash<QTcpSocket*, QString> m_connectionIds;
     QHash<QString, QTcpSocket*> m_socketsByConnectionId;
-    ReceiverSessionRegistry m_sessionRegistry;
+    InboundSessionRegistry m_inboundSessions;
 
     // Per-connection admission state: -1 = waiting for identity,
     // 1 = typed framing with an admitted sender identity.

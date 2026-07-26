@@ -108,10 +108,10 @@ void NetworkListener::disconnectAll() {
     m_connectionFormat.clear();
     m_connectionIds.clear();
     m_socketsByConnectionId.clear();
-    m_sessionRegistry.clear();
+    m_inboundSessions.clear();
 }
 
-void NetworkListener::connectTo(const QString& host, uint16_t port) {
+void NetworkListener::connectToRemoteSender(const QString& host, uint16_t port) {
     auto* socket = new QTcpSocket(this);
     socket->setSocketOption(QAbstractSocket::LowDelayOption, 1);
     socket->setSocketOption(QAbstractSocket::KeepAliveOption, 1);
@@ -167,7 +167,7 @@ void NetworkListener::registerSocket(QTcpSocket* socket) {
     m_connectionFormat[socket] = -1;
     m_connectionIds[socket] = connectionId;
     m_socketsByConnectionId[connectionId] = socket;
-    m_sessionRegistry.open(
+    m_inboundSessions.open(
         connectionId.toStdString(),
         peerAddress.toStdString(),
         peerAddress.toStdString()
@@ -278,7 +278,7 @@ bool NetworkListener::handleIdentity(
         return false;
     }
 
-    const auto existing = m_sessionRegistry.sessionForConnection(
+    const auto existing = m_inboundSessions.sessionForConnection(
         connectionId.toStdString()
     );
     if (existing.has_value()) {
@@ -292,7 +292,7 @@ bool NetworkListener::handleIdentity(
         return true;
     }
 
-    const auto result = m_sessionRegistry.identify(
+    const auto result = m_inboundSessions.identify(
         connectionId.toStdString(),
         deviceId.toStdString(),
         deviceName.toStdString()
@@ -331,7 +331,7 @@ bool NetworkListener::handleIdentity(
     emit statusChanged(
         QString("Connected to %1 sender(s)")
             .arg(static_cast<qulonglong>(
-                m_sessionRegistry.activeSessionCount()
+                m_inboundSessions.activeSessionCount()
             ))
     );
     return true;
@@ -360,7 +360,7 @@ void NetworkListener::handleVideoData(
     const QByteArray& data,
     bool hasPtsPrefix
 ) {
-    const auto binding = m_sessionRegistry.sessionForConnection(
+    const auto binding = m_inboundSessions.sessionForConnection(
         connectionIdFor(socket).toStdString()
     );
     if (!binding.has_value()) {
@@ -391,7 +391,7 @@ void NetworkListener::handleAudioData(
     QTcpSocket* socket,
     const QByteArray& data
 ) {
-    const auto binding = m_sessionRegistry.sessionForConnection(
+    const auto binding = m_inboundSessions.sessionForConnection(
         connectionIdFor(socket).toStdString()
     );
     if (!binding.has_value()) {
@@ -416,8 +416,8 @@ void NetworkListener::onTcpDisconnected() {
 
     qDebug() << "TCP client disconnected:" << socket->peerAddress().toString();
     const QString connectionId = connectionIdFor(socket);
-    const ReceiverCloseResult closed =
-        m_sessionRegistry.close(connectionId.toStdString());
+    const InboundCloseResult closed =
+        m_inboundSessions.close(connectionId.toStdString());
     m_clients.removeAll(socket);
     m_tcpBuffers.remove(socket);
     m_connectionFormat.remove(socket);
@@ -433,13 +433,13 @@ void NetworkListener::onTcpDisconnected() {
     }
 
     emit connectionLost(QString::fromStdString(closed.deviceId));
-    if (m_sessionRegistry.activeSessionCount() == 0) {
+    if (m_inboundSessions.activeSessionCount() == 0) {
         emit statusChanged("Waiting for connection...");
     } else {
         emit statusChanged(
             QString("Connected to %1 sender(s)")
                 .arg(static_cast<qulonglong>(
-                    m_sessionRegistry.activeSessionCount()
+                    m_inboundSessions.activeSessionCount()
                 ))
         );
     }
@@ -509,7 +509,7 @@ void NetworkListener::handleUdpPacket(const QByteArray& data) {
                     kIDRRequestKeyCode
                 );
                 for (auto* client : m_clients) {
-                    if (m_sessionRegistry.sessionForConnection(
+                    if (m_inboundSessions.sessionForConnection(
                             connectionIdFor(client).toStdString()
                         ).has_value()) {
                         writeInputEvent(client, request);
@@ -553,7 +553,7 @@ void NetworkListener::onHeartbeatTick() {
     QByteArray packet = heartbeat.toPacket();
 
     for (auto* client : m_clients) {
-        if (m_sessionRegistry.sessionForConnection(
+        if (m_inboundSessions.sessionForConnection(
                 connectionIdFor(client).toStdString()
             ).has_value()) {
             client->write(packet);
@@ -589,7 +589,7 @@ void NetworkListener::sendInputEvent(
     const InputEvent& event
 ) {
     const auto binding =
-        m_sessionRegistry.sessionForDevice(deviceId.toStdString());
+        m_inboundSessions.sessionForDevice(deviceId.toStdString());
     if (!binding.has_value()) {
         return;
     }

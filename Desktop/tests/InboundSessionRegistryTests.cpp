@@ -1,10 +1,10 @@
-#include "../ReceiverSessionRegistry.h"
+#include "../InboundSessionRegistry.h"
 
 #include <cassert>
 #include <iostream>
 
 int main() {
-    ReceiverSessionRegistry registry;
+    InboundSessionRegistry registry;
 
     registry.open("connection-a", "192.168.1.10", "192.168.1.10");
     registry.open("connection-b", "192.168.1.11", "192.168.1.11");
@@ -63,6 +63,6 @@ int main() {
     assert(registry.sessionForConnection("connection-b").has_value());
     assert(registry.activeSessionCount() == 1);
 
-    std::cout << "ReceiverSessionRegistry tests passed\n";
+    std::cout << "InboundSessionRegistry tests passed\n";
     return 0;
 }

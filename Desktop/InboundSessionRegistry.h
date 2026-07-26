@@ -6,26 +6,26 @@
 #include <unordered_map>
 #include <utility>
 
-struct ReceiverSessionBinding {
+struct InboundSessionBinding {
     std::string connectionId;
     std::string deviceId;
     std::string displayName;
     std::string peerAddress;
 };
 
-struct ReceiverIdentificationResult {
-    ReceiverSessionBinding binding;
+struct InboundIdentificationResult {
+    InboundSessionBinding binding;
     std::optional<std::string> replacedConnectionId;
     bool newlyAdmitted = false;
 };
 
-struct ReceiverCloseResult {
+struct InboundCloseResult {
     std::string connectionId;
     std::string deviceId;
     bool wasActive = false;
 };
 
-class ReceiverSessionRegistry {
+class InboundSessionRegistry {
 public:
     void open(
         const std::string& connectionId,
@@ -38,7 +38,7 @@ public:
         m_pendingByConnection[connectionId] = std::move(pending);
     }
 
-    std::optional<ReceiverIdentificationResult> identify(
+    std::optional<InboundIdentificationResult> identify(
         const std::string& connectionId,
         const std::string& deviceId,
         const std::string& displayName
@@ -48,14 +48,14 @@ public:
             return std::nullopt;
         }
 
-        ReceiverSessionBinding binding;
+        InboundSessionBinding binding;
         binding.connectionId = connectionId;
         binding.deviceId = deviceId;
         binding.displayName =
             displayName.empty() ? pending->second.fallbackDisplayName : displayName;
         binding.peerAddress = pending->second.peerAddress;
 
-        ReceiverIdentificationResult result;
+        InboundIdentificationResult result;
         result.binding = binding;
 
         const auto active = m_activeByDevice.find(deviceId);
@@ -73,7 +73,7 @@ public:
         return result;
     }
 
-    std::optional<ReceiverSessionBinding> sessionForConnection(
+    std::optional<InboundSessionBinding> sessionForConnection(
         const std::string& connectionId
     ) const {
         const auto device = m_deviceByConnection.find(connectionId);
@@ -88,7 +88,7 @@ public:
         return active->second;
     }
 
-    std::optional<ReceiverSessionBinding> sessionForDevice(
+    std::optional<InboundSessionBinding> sessionForDevice(
         const std::string& deviceId
     ) const {
         const auto active = m_activeByDevice.find(deviceId);
@@ -98,8 +98,8 @@ public:
         return active->second;
     }
 
-    ReceiverCloseResult close(const std::string& connectionId) {
-        ReceiverCloseResult result;
+    InboundCloseResult close(const std::string& connectionId) {
+        InboundCloseResult result;
         result.connectionId = connectionId;
         m_pendingByConnection.erase(connectionId);
 
@@ -138,5 +138,5 @@ private:
 
     std::unordered_map<std::string, PendingConnection> m_pendingByConnection;
     std::unordered_map<std::string, std::string> m_deviceByConnection;
-    std::unordered_map<std::string, ReceiverSessionBinding> m_activeByDevice;
+    std::unordered_map<std::string, InboundSessionBinding> m_activeByDevice;
 };

@@ -7,21 +7,29 @@
 #include <QTimer>
 #include <QHostAddress>
 
-struct DiscoveredService {
+struct DiscoveredRemoteReceiver {
     QString name;
     QString host;
     uint16_t port = 0;
 
-    bool operator==(const DiscoveredService& o) const {
+    bool operator==(const DiscoveredRemoteReceiver& o) const {
         return name == o.name && host == o.host && port == o.port;
     }
+};
+
+enum class ServiceDiscoveryRole {
+    receiverAdvertiser,
+    outboundReceiverBrowser,
 };
 
 class ServiceDiscovery : public QObject {
     Q_OBJECT
 
 public:
-    explicit ServiceDiscovery(QObject* parent = nullptr);
+    explicit ServiceDiscovery(
+        ServiceDiscoveryRole role,
+        QObject* parent = nullptr
+    );
     ~ServiceDiscovery();
 
     // Start advertising as a BetterCast receiver
@@ -32,10 +40,12 @@ public:
     void startBrowsing();
     void stopBrowsing();
 
-    const QList<DiscoveredService>& discoveredServices() const { return m_discovered; }
+    const QList<DiscoveredRemoteReceiver>& discoveredReceivers() const {
+        return m_discoveredReceivers;
+    }
 
 signals:
-    void serviceFound(const DiscoveredService& service);
+    void serviceFound(const DiscoveredRemoteReceiver& receiver);
     void serviceLost(const QString& name);
 
 private slots:
@@ -44,6 +54,8 @@ private slots:
     void sendBrowseQuery();
 
 private:
+    ServiceDiscoveryRole m_role;
+
     void handleMdnsQuery(const QByteArray& packet, const QHostAddress& sender, uint16_t senderPort);
     void handleMdnsResponse(const QByteArray& packet);
     QByteArray buildMdnsResponse(uint16_t transactionId, const QHostAddress& targetAddr);
@@ -71,5 +83,5 @@ private:
     // Browsing
     QTimer* m_browseTimer = nullptr;
     bool m_browsing = false;
-    QList<DiscoveredService> m_discovered;
+    QList<DiscoveredRemoteReceiver> m_discoveredReceivers;
 };

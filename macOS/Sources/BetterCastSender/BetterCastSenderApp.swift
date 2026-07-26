@@ -3792,75 +3792,15 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         thunderboltInterfaceName: String? = nil,
         discoveredEndpointMatchesPreference: Bool = false
     ) -> NWEndpoint {
-        let cachedEndpoint = preferredBonjourEndpoint(
+        OutboundRouteCatalog.preferredConnectionEndpoint(
             for: preference,
-            resolvedRoute: resolvedRoute
+            resolvedRoute: resolvedRoute,
+            discoveredEndpoint: discoveredEndpoint,
+            thunderboltPeerHost: thunderboltPeerHost,
+            thunderboltInterfaceName: thunderboltInterfaceName,
+            discoveredEndpointMatchesPreference:
+                discoveredEndpointMatchesPreference
         )
-        let verifiedEndpoint =
-            preference == .auto
-                && resolvedRoute?.supports(.thunderboltBridge) == true
-                && thunderboltInterfaceName == nil
-                    ? nil
-                    : cachedEndpoint
-        if preference == .thunderboltBridge {
-            if discoveredEndpointMatchesPreference {
-                return discoveredEndpoint
-            }
-            if let thunderboltInterfaceName {
-                switch discoveredEndpoint {
-                case .hostPort(let host, _):
-                    if String(describing: host).lowercased()
-                        .hasSuffix("%\(thunderboltInterfaceName.lowercased())") {
-                        return discoveredEndpoint
-                    }
-                case .service(_, _, _, let interface):
-                    if interface?.name.lowercased()
-                        == thunderboltInterfaceName.lowercased() {
-                        return discoveredEndpoint
-                    }
-                default:
-                    break
-                }
-            }
-            if let thunderboltPeerHost,
-               let thunderboltInterfaceName,
-               let port = NWEndpoint.Port(rawValue: 51820) {
-                if let verifiedEndpoint,
-                   case .hostPort(let verifiedHost, _) = verifiedEndpoint {
-                    let verifiedHostText = String(describing: verifiedHost)
-                    let verifiedAddress =
-                        verifiedHostText.split(separator: "%", maxSplits: 1)
-                            .first
-                            .map(String.init)
-                    let verifiedScope =
-                        verifiedHostText.split(separator: "%", maxSplits: 1)
-                            .dropFirst()
-                            .first
-                            .map(String.init)
-                    if verifiedAddress == thunderboltPeerHost,
-                       verifiedScope == thunderboltInterfaceName.lowercased() {
-                        return verifiedEndpoint
-                    }
-                }
-                return .hostPort(
-                    host: NWEndpoint.Host(
-                        "\(thunderboltPeerHost)%\(thunderboltInterfaceName)"
-                    ),
-                    port: port
-                )
-            }
-            if let verifiedEndpoint {
-                return verifiedEndpoint
-            }
-            if let thunderboltPeerHost,
-               let port = NWEndpoint.Port(rawValue: 51820) {
-                return .hostPort(
-                    host: NWEndpoint.Host(thunderboltPeerHost),
-                    port: port
-                )
-            }
-        }
-        return verifiedEndpoint ?? discoveredEndpoint
     }
 
     static func infrastructureFallbackEndpoint(
@@ -3946,6 +3886,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private let localConnectionAddressProvider: () -> [ReceiverConnectionAddress]
     private let thunderboltPeerRouteProvider:
         () -> [ThunderboltPeerAddressProvider.PeerRoute]
+    private var cachedThunderboltPeerRoutes:
+        [ThunderboltPeerAddressProvider.PeerRoute] = []
+    private var lastThunderboltPeerRouteRefresh = Date.distantPast
+    private static let thunderboltPeerRouteCacheInterval: TimeInterval = 1
     private var focusedBonjourServiceName: String?
     private var browsedTCPServicesByName: [String: DiscoveredService] = [:]
     private var reachableTCPServiceNames: Set<String> = []
@@ -4911,75 +4855,50 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
 
+    private func outboundRouteCatalog(
+        for service: DiscoveredService,
+        localAddresses: [ReceiverConnectionAddress]? = nil,
+        thunderboltPeerRoutes: [
+            ThunderboltPeerAddressProvider.PeerRoute
+        ]? = nil
+    ) -> OutboundRouteCatalog {
+        OutboundRouteCatalog(
+            remoteReceiver: service,
+            discoveredReceivers: foundServices,
+            localAddresses:
+                localAddresses ?? localConnectionAddressProvider(),
+            thunderboltPeerRoutes:
+                thunderboltPeerRoutes ?? currentThunderboltPeerRoutes()
+        )
+    }
+
+    private func currentThunderboltPeerRoutes(
+        forceRefresh: Bool = false
+    ) -> [ThunderboltPeerAddressProvider.PeerRoute] {
+        let now = Date()
+        if forceRefresh
+            || now.timeIntervalSince(lastThunderboltPeerRouteRefresh)
+                >= Self.thunderboltPeerRouteCacheInterval {
+            cachedThunderboltPeerRoutes = thunderboltPeerRouteProvider()
+            lastThunderboltPeerRouteRefresh = now
+        }
+        return cachedThunderboltPeerRoutes
+    }
+
     func availableConnectionModes(
         for service: DiscoveredService
     ) -> [NetworkInterfacePreference] {
-        var modes: [NetworkInterfacePreference] = [.auto]
-        let lowercasedName = service.name.lowercased()
-        let isAppleReceiver = !lowercasedName.contains("android")
-            && !lowercasedName.contains("windows")
-            && !lowercasedName.contains("linux")
-        let baseName = service.name.hasSuffix(" P2P")
-            ? String(service.name.dropLast(4))
-            : service.name
-        let hasP2PCompanion = foundServices.contains {
-            $0.name == "\(baseName) P2P"
-        }
-
-        if isAppleReceiver
-            && (hasP2PCompanion || service.supportsApplePeerToPeerConnection) {
-            modes.append(.p2pOnly)
-        }
-        let localAddresses = localConnectionAddressProvider()
-        let isWindowsReceiver = lowercasedName.contains("windows")
-        let hasActiveLocalWiFi = localAddresses.contains {
-            $0.title == NetworkInterfacePreference.routerOnly.connectTitle
-        }
-        if service.supportsWiFiConnection
-            || (isWindowsReceiver && hasActiveLocalWiFi) {
-            modes.append(.routerOnly)
-        }
-        if service.supportsEthernetConnection {
-            modes.append(.ethernet)
-        }
-        let activeLocalThunderboltInterfaces = Set(
-            localAddresses.compactMap {
-                $0.title
-                        == NetworkInterfacePreference.thunderboltBridge.connectTitle
-                    ? $0.interfaceName.lowercased()
-                    : nil
-            }
-        )
-        let discoveredThunderboltInterfaces = Set(
-            service.discoveryInterfaces.compactMap {
-                $0.isThunderboltBridge ? $0.name.lowercased() : nil
-            }
-        )
-        let deviceIsOnActiveLocalThunderbolt =
-            !activeLocalThunderboltInterfaces
-                .isDisjoint(with: discoveredThunderboltInterfaces)
-        if isWindowsReceiver
-            ? deviceIsOnActiveLocalThunderbolt
-            : service.supportsThunderboltConnection {
-            modes.append(.thunderboltBridge)
-        }
-        return modes
+        outboundRouteCatalog(for: service).availableModes
     }
 
     static func preferredAutomaticConnectionMode(
         receiverName: String,
         availableModes: [NetworkInterfacePreference]
     ) -> NetworkInterfacePreference {
-        guard receiverName.lowercased().contains("windows") else {
-            return .auto
-        }
-        if availableModes.contains(.thunderboltBridge) {
-            return .thunderboltBridge
-        }
-        if availableModes.contains(.ethernet) {
-            return .ethernet
-        }
-        return .auto
+        OutboundRouteCatalog.preferredAutomaticMode(
+            receiverName: receiverName,
+            availableModes: availableModes
+        )
     }
 
     static func preferredThunderboltPeerHost(
@@ -4997,57 +4916,34 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         availableRoutes: [ThunderboltPeerAddressProvider.PeerRoute],
         allowedInterfaceNames: Set<String>
     ) -> ThunderboltPeerAddressProvider.PeerRoute? {
-        guard receiverName.lowercased().contains("windows") else {
-            return nil
-        }
-        let matchingRoutes = availableRoutes.filter {
-            allowedInterfaceNames.contains($0.interfaceName.lowercased())
-        }
-        let uniqueRoutes = Array(Set(matchingRoutes.map {
-            "\($0.host)%\($0.interfaceName)"
-        }))
-        guard uniqueRoutes.count == 1 else { return nil }
-        return matchingRoutes.first
+        OutboundRouteCatalog.preferredThunderboltPeerRoute(
+            receiverName: receiverName,
+            availableRoutes: availableRoutes,
+            allowedInterfaceNames: allowedInterfaceNames
+        )
     }
 
     private func resolvedConnectionPreference(
         _ preference: NetworkInterfacePreference,
         for service: DiscoveredService
     ) -> NetworkInterfacePreference {
-        let availableModes = availableConnectionModes(for: service)
-        if preference == .auto {
-            return Self.preferredAutomaticConnectionMode(
-                receiverName: service.name,
-                availableModes: availableModes
-            )
-        }
-        if availableModes.contains(preference) {
-            return preference
-        }
-        if preference == .wiredCable {
-            if availableModes.contains(.thunderboltBridge) {
-                return .thunderboltBridge
-            }
-            if availableModes.contains(.ethernet) {
-                return .ethernet
-            }
-        }
-        return .auto
+        outboundRouteCatalog(for: service).resolve(preference)
     }
 
     func connectionEndpointDescription(
         for service: DiscoveredService,
         preference: NetworkInterfacePreference
     ) -> String? {
-        let selectedPreference = resolvedConnectionPreference(
-            preference,
-            for: service
-        )
-
         if case .hostPort = service.endpoint {
             return Self.endpointDescription(service.endpoint)
         }
 
+        let localAddresses = localConnectionAddressProvider()
+        let routeCatalog = outboundRouteCatalog(
+            for: service,
+            localAddresses: localAddresses
+        )
+        let selectedPreference = routeCatalog.resolve(preference)
         let lowercasedName = service.name.lowercased()
         let isAppleReceiver = !lowercasedName.contains("android")
             && !lowercasedName.contains("windows")
@@ -5062,36 +4958,17 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             return Self.endpointDescription(p2pEndpoint)
         }
 
-        let thunderboltInterfaces = Set(
-            service.discoveryInterfaces.compactMap {
-                $0.isThunderboltBridge ? $0.name.lowercased() : nil
-            }
-        )
-        let thunderboltPeerRoute =
-            selectedPreference == .thunderboltBridge
-                ? Self.preferredThunderboltPeerRoute(
-                    receiverName: service.name,
-                    availableRoutes: thunderboltPeerRouteProvider(),
-                    allowedInterfaceNames: thunderboltInterfaces
-                )
-                : nil
-        let thunderboltInterfaceName = thunderboltPeerRoute?.interfaceName
-            ?? localConnectionAddressProvider()
-                .first { $0.title == "Thunderbolt Bridge" }?
-                .interfaceName
         let resolvedRoute = Self.preferredBonjourRoute(
             for: selectedPreference,
             resolvedRoutes:
                 resolvedBonjourRoutesByName[service.name] ?? []
         )
-        let endpoint = Self.preferredConnectionEndpoint(
+        let endpoint = routeCatalog.connectionEndpoint(
             for: selectedPreference,
             resolvedRoute: resolvedRoute,
             discoveredEndpoint: service.connectionEndpoint(
                 for: selectedPreference
-            ),
-            thunderboltPeerHost: thunderboltPeerRoute?.host,
-            thunderboltInterfaceName: thunderboltInterfaceName
+            )
         )
         return Self.endpointDescription(endpoint)
     }
@@ -5819,15 +5696,20 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             connectionID: connectionId
         ) else { return }
 
+        let localConnectionAddresses = localConnectionAddressProvider()
+        let routeCatalog = outboundRouteCatalog(
+            for: service,
+            localAddresses: localConnectionAddresses,
+            thunderboltPeerRoutes:
+                currentThunderboltPeerRoutes(forceRefresh: true)
+        )
         var receiverSettings = restoringSavedSettings ? settings(for: service) : currentReceiverSettings()
         let requestedInterfacePreference = interfacePreferenceOverride
             ?? receiverSettings.interfacePreferenceRawValue
                 .flatMap { NetworkInterfacePreference(rawValue: $0) }
             ?? interfacePreference
-        let selectedInterfacePreference = resolvedConnectionPreference(
-            requestedInterfacePreference,
-            for: service
-        )
+        let selectedInterfacePreference =
+            routeCatalog.resolve(requestedInterfacePreference)
         let selectedConnectionType = selectedInterfacePreference.allowsUDP
             ? receiverSettings.connectionType ?? connectionType
             : "TCP"
@@ -5845,7 +5727,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             "\($0.name):\($0.type)"
         }.joined(separator: ",")
         let cachedRoutes = resolvedBonjourRoutesByName[service.name] ?? []
-        let availableModes = availableConnectionModes(for: service)
+        let availableModes = routeCatalog.availableModes
             .map(\.rawValue)
             .joined(separator: ",")
         let cachedEndpoint = cachedRoutes.map {
@@ -5854,7 +5736,6 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         let cachedRouteInterfaces = cachedRoutes.map {
             $0.interfaceNames.joined(separator: ",")
         }.joined(separator: ";")
-        let localConnectionAddresses = localConnectionAddressProvider()
         let localAddresses = localConnectionAddresses.map {
             "\($0.interfaceName):\($0.address):\($0.title)"
         }.joined(separator: ",")
@@ -5928,19 +5809,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             discoveredEndpoint:
                 discoveredService.infrastructureConnectionEndpoint
         )
-        let thunderboltInterfaces = Set(
-            discoveredService.discoveryInterfaces.compactMap {
-                $0.isThunderboltBridge ? $0.name.lowercased() : nil
-            }
-        )
-        let thunderboltPeerRoute =
-            selectedInterfacePreference == .thunderboltBridge
-                ? Self.preferredThunderboltPeerRoute(
-                    receiverName: service.name,
-                    availableRoutes: thunderboltPeerRouteProvider(),
-                    allowedInterfaceNames: thunderboltInterfaces
-                )
-                : nil
+        let thunderboltPeerRoute = routeCatalog.thunderboltPeerRoute()
         let thunderboltInterfaceName = thunderboltPeerRoute?.interfaceName
             ?? localConnectionAddresses
                 .first { $0.title == "Thunderbolt Bridge" }?
@@ -5950,13 +5819,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             resolvedRoutes:
                 resolvedBonjourRoutesByName[service.name] ?? []
         )
-        var connectEndpoint = Self.preferredConnectionEndpoint(
+        var connectEndpoint = routeCatalog.connectionEndpoint(
             for: selectedInterfacePreference,
             resolvedRoute: resolvedRoute,
             discoveredEndpoint: discoveredEndpoint,
-            thunderboltPeerHost: thunderboltPeerRoute?.host,
-            thunderboltInterfaceName: thunderboltInterfaceName,
-            discoveredEndpointMatchesPreference:
+            discoveredEndpointMatchesMode:
                 discoveredService.hasConnectionEndpoint(
                     for: selectedInterfacePreference
                 )

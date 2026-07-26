@@ -50,7 +50,7 @@ private:
     QStringList m_entries;
 };
 
-struct DiscoveredService;
+struct DiscoveredRemoteReceiver;
 class NetworkListener;
 class ServiceDiscovery;
 #ifdef ENABLE_ANDROID_ADB
@@ -125,7 +125,7 @@ private slots:
 #ifdef ENABLE_SENDER
     void onSendScreenClicked();
     void onStopSendingClicked();
-    void onReceiverDiscovered(const DiscoveredService& service);
+    void onReceiverDiscovered(const DiscoveredRemoteReceiver& receiver);
     void onReceiverSelected(int index);
     void onCreateVirtualDisplay();
     void onRemoveVirtualDisplay();
@@ -154,7 +154,7 @@ private:
 
     // Core components
     NetworkListener* m_network = nullptr;
-    ServiceDiscovery* m_discovery = nullptr;
+    ServiceDiscovery* m_receiverServiceAdvertiser = nullptr;
 #ifdef ENABLE_ANDROID_ADB
     AdbHelper* m_adbHelper = nullptr;
 #endif
@@ -165,6 +165,7 @@ private:
 #endif
 #ifdef ENABLE_SENDER
     SenderController* m_sender = nullptr;
+    ServiceDiscovery* m_outboundReceiverBrowser = nullptr;
 #endif
 
     // Layout

@@ -32,8 +32,12 @@ static const uint16_t kTypeA   = 1;
 static const uint16_t kClassIN = 1;
 static const uint16_t kClassFlush = 0x8001; // Cache flush + IN
 
-ServiceDiscovery::ServiceDiscovery(QObject* parent)
+ServiceDiscovery::ServiceDiscovery(
+    ServiceDiscoveryRole role,
+    QObject* parent
+)
     : QObject(parent)
+    , m_role(role)
 {
 }
 
@@ -65,6 +69,10 @@ QList<QHostAddress> ServiceDiscovery::getLocalAddresses() {
 }
 
 void ServiceDiscovery::startAdvertising(uint16_t tcpPort) {
+    if (m_role != ServiceDiscoveryRole::receiverAdvertiser) {
+        qWarning() << "Ignoring receiver advertisement on outbound route browser";
+        return;
+    }
 #ifdef HAS_MDNS
     // Use system Bonjour/Avahi if available
     DNSServiceRef ref = nullptr;
@@ -145,6 +153,10 @@ void ServiceDiscovery::stopAdvertising() {
 }
 
 void ServiceDiscovery::startBrowsing() {
+    if (m_role != ServiceDiscoveryRole::outboundReceiverBrowser) {
+        qWarning() << "Ignoring outbound browse on receiver advertiser";
+        return;
+    }
     if (m_browsing) return;
     m_browsing = true;
 
@@ -166,7 +178,7 @@ void ServiceDiscovery::stopBrowsing() {
         delete m_browseTimer;
         m_browseTimer = nullptr;
     }
-    m_discovered.clear();
+    m_discoveredReceivers.clear();
 
 #ifdef HAS_MDNS
     if (m_browseRef) {
@@ -379,17 +391,19 @@ void ServiceDiscovery::handleMdnsResponse(const QByteArray& packet) {
 
         if (host.isEmpty()) return;
 
-        // Skip our own service
-        if (isOwnAddress(QHostAddress(host)) && srvPort == m_advertisedPort) return;
+        // Sender browsing and Receiver advertising intentionally use separate
+        // discovery instances. Self-filtering therefore cannot depend on the
+        // advertiser's port state.
+        if (isOwnAddress(QHostAddress(host))) return;
 
-        DiscoveredService svc;
+        DiscoveredRemoteReceiver svc;
         svc.name = instanceName;
         svc.host = host;
         svc.port = srvPort;
 
         // Check if already discovered
         bool found = false;
-        for (auto& existing : m_discovered) {
+        for (auto& existing : m_discoveredReceivers) {
             if (existing.name == svc.name) {
                 existing.host = svc.host;
                 existing.port = svc.port;
@@ -399,7 +413,7 @@ void ServiceDiscovery::handleMdnsResponse(const QByteArray& packet) {
         }
 
         if (!found) {
-            m_discovered.append(svc);
+            m_discoveredReceivers.append(svc);
             MDNS_LOG(QString("Discovered receiver: %1 at %2:%3 (from mDNS SRV record)")
                          .arg(svc.name, svc.host).arg(svc.port));
             if (svc.port != 51820) {

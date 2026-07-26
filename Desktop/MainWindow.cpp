@@ -707,7 +707,10 @@ MainWindow::MainWindow(QWidget* parent)
 
     // Create core components
     m_network = new NetworkListener(this);
-    m_discovery = new ServiceDiscovery(this);
+    m_receiverServiceAdvertiser = new ServiceDiscovery(
+        ServiceDiscoveryRole::receiverAdvertiser,
+        this
+    );
     m_updateManager = new QNetworkAccessManager(this);
     m_reconnectTimer = new QTimer(this);
     m_reconnectTimer->setInterval(3000);
@@ -718,6 +721,10 @@ MainWindow::MainWindow(QWidget* parent)
 
 #ifdef ENABLE_SENDER
     m_sender = new SenderController(this);
+    m_outboundReceiverBrowser = new ServiceDiscovery(
+        ServiceDiscoveryRole::outboundReceiverBrowser,
+        this
+    );
     connect(m_sender, &SenderController::statusChanged, this, [this](const QString& status) {
         if (m_senderStatusLabel) m_senderStatusLabel->setText(status);
         LogManager::instance().log("Sender: " + status);
@@ -744,7 +751,7 @@ MainWindow::MainWindow(QWidget* parent)
     });
 
     // mDNS browsing for receiver discovery
-    connect(m_discovery, &ServiceDiscovery::serviceFound,
+    connect(m_outboundReceiverBrowser, &ServiceDiscovery::serviceFound,
             this, &MainWindow::onReceiverDiscovered);
 #endif
 
@@ -778,7 +785,7 @@ MainWindow::MainWindow(QWidget* parent)
         // receiverAutoStartEnabled preference is enabled.
         onReceiverListeningToggled(receiverAutoStartEnabledPreference());
 #ifdef ENABLE_SENDER
-        m_discovery->startBrowsing();
+        m_outboundReceiverBrowser->startBrowsing();
 #endif
         LogManager::instance().log(QString("ExtendCast started - receiver listening %1")
                                        .arg(m_receiverListening ? "enabled" : "disabled"));
@@ -800,7 +807,10 @@ MainWindow::~MainWindow() {
     if (m_trayIcon) {
         m_trayIcon->hide();
     }
-    m_discovery->stopAdvertising();
+    m_receiverServiceAdvertiser->stopAdvertising();
+#ifdef ENABLE_SENDER
+    m_outboundReceiverBrowser->stopBrowsing();
+#endif
     qDeleteAll(m_receiverSessions);
     m_receiverSessions.clear();
     // Clean exit — remove crash marker
@@ -1928,7 +1938,7 @@ void MainWindow::onConnectClicked() {
     uint16_t port = m_portEdit->text().toUShort(&ok);
     if (!ok) port = 51820;
 
-    m_network->connectTo(m_hostEdit->text(), port);
+    m_network->connectToRemoteSender(m_hostEdit->text(), port);
     m_connectBtn->setEnabled(false);
     m_recvStatusLabel->setText("Connecting...");
     m_recvStatusLabel->setStyleSheet("font-size: 15px; font-weight: bold; color: #4da6ff;");
@@ -1953,7 +1963,7 @@ void MainWindow::onAdbConnectClicked() {
             if (success) {
                 m_recvStatusLabel->setText("ADB tunnel ready — connecting...");
                 LogManager::instance().log(QString("ADB tunnel established, connecting to localhost:%1...").arg(localPort));
-                m_network->connectTo("localhost", localPort);
+                m_network->connectToRemoteSender("localhost", localPort);
             }
         });
     }).detach();
@@ -2180,7 +2190,7 @@ void MainWindow::onReceiverListeningToggled(bool checked) {
     if (checked) {
         m_network->start();
         m_receiverPort = m_network->actualTcpPort();
-        m_discovery->startAdvertising(m_receiverPort);
+        m_receiverServiceAdvertiser->startAdvertising(m_receiverPort);
         m_receiverListening = true;
         if (m_recvStatusLabel) {
             m_recvStatusLabel->setText(QString("Listening on port %1").arg(m_receiverPort));
@@ -2195,7 +2205,7 @@ void MainWindow::onReceiverListeningToggled(bool checked) {
         }
         LogManager::instance().log(QString("Receiver listening enabled on port %1").arg(m_receiverPort));
     } else {
-        m_discovery->stopAdvertising();
+        m_receiverServiceAdvertiser->stopAdvertising();
         m_network->stop();
         qDeleteAll(m_receiverSessions);
         m_receiverSessions.clear();
@@ -2251,7 +2261,7 @@ void MainWindow::attemptAdbReconnect() {
                 m_reconnectTimer->stop();
                 m_recvStatusLabel->setText("ADB tunnel restored — connecting...");
                 LogManager::instance().log("ADB tunnel restored, reconnecting...");
-                m_network->connectTo("localhost", localPort);
+                m_network->connectToRemoteSender("localhost", localPort);
             }
         });
     }).detach();
@@ -2417,7 +2427,9 @@ void MainWindow::onStopSendingClicked() {
     LogManager::instance().log("Sender stopped");
 }
 
-void MainWindow::onReceiverDiscovered(const DiscoveredService& service) {
+void MainWindow::onReceiverDiscovered(
+    const DiscoveredRemoteReceiver& receiver
+) {
     if (!m_receiverCombo) return;
 
     // Remove the "Searching..." placeholder on first discovery
@@ -2433,13 +2445,15 @@ void MainWindow::onReceiverDiscovered(const DiscoveredService& service) {
     uint16_t port = 51820;
 
     // Check if already in the list
-    QString entry = QString("%1  (%2:%3)").arg(service.name, service.host).arg(port);
+    QString entry = QString("%1  (%2:%3)")
+                        .arg(receiver.name, receiver.host)
+                        .arg(port);
     for (int i = 0; i < m_receiverCombo->count(); i++) {
         QVariantMap existing = m_receiverCombo->itemData(i).toMap();
-        if (existing.value("host").toString() == service.host) {
+        if (existing.value("host").toString() == receiver.host) {
             m_receiverCombo->setItemText(i, entry);
             QVariantMap updated;
-            updated["host"] = service.host;
+            updated["host"] = receiver.host;
             updated["port"] = port;
             m_receiverCombo->setItemData(i, updated);
             return;
@@ -2447,15 +2461,15 @@ void MainWindow::onReceiverDiscovered(const DiscoveredService& service) {
     }
 
     QVariantMap data;
-    data["host"] = service.host;
+    data["host"] = receiver.host;
     data["port"] = port;
     m_receiverCombo->addItem(entry, data);
-    if (service.port != port) {
+    if (receiver.port != port) {
         LogManager::instance().log(QString("Discovered receiver: %1 at %2 (mDNS reported port %3, using standard port %4)")
-                                       .arg(service.name, service.host).arg(service.port).arg(port));
+                                       .arg(receiver.name, receiver.host).arg(receiver.port).arg(port));
     } else {
         LogManager::instance().log(QString("Discovered receiver: %1 at %2:%3")
-                                       .arg(service.name, service.host).arg(port));
+                                       .arg(receiver.name, receiver.host).arg(port));
     }
 }
 
