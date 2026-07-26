@@ -524,7 +524,7 @@ struct ReceiverModeView: View {
                 }
 
                 if manager.isRunning {
-                    sectionTitle("Available Connections")
+                    sectionTitle("Advertised Receiver Routes")
 
                     DashboardCard {
                         if availableAddresses.isEmpty {
@@ -650,7 +650,9 @@ struct ReceiverModeView: View {
         if listener.status?.hasPrefix("Failed") == true {
             return listener.status
         }
-        return isConnected ? "Video is playing in a separate window." : nil
+        return isConnected
+            ? "Video is playing in a separate window."
+            : "Senders discover this Receiver and initiate the connection."
     }
 
     private var listeningPort: UInt16 {

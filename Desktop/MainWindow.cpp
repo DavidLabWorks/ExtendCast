@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "InboundSessionConnector.h"
 #include "NetworkListener.h"
 #include "InputEvent.h"
 #include "ReceiverSession.h"
@@ -36,6 +37,7 @@
 #include <QDir>
 #include <QDebug>
 #include <QNetworkInterface>
+#include <QTcpSocket>
 #include <QUrl>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -707,6 +709,8 @@ MainWindow::MainWindow(QWidget* parent)
 
     // Create core components
     m_network = new NetworkListener(this);
+    m_inboundCompatibilityConnector =
+        new InboundSessionConnector(this);
     m_receiverServiceAdvertiser = new ServiceDiscovery(
         ServiceDiscoveryRole::receiverAdvertiser,
         this
@@ -770,6 +774,18 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::onAudioDataReceived);
     connect(m_network, &NetworkListener::statusChanged,
             this, &MainWindow::onStatusChanged);
+    connect(
+        m_inboundCompatibilityConnector,
+        &InboundSessionConnector::connectionReady,
+        m_network,
+        &NetworkListener::adoptConnectedRemoteSender
+    );
+    connect(
+        m_inboundCompatibilityConnector,
+        &InboundSessionConnector::statusChanged,
+        this,
+        &MainWindow::onStatusChanged
+    );
 
     // LogManager
     connect(&LogManager::instance(), &LogManager::logAdded,
@@ -1594,7 +1610,7 @@ void MainWindow::setupReceivePage() {
 
     layout->addWidget(statusCard);
 
-    m_receiverConnectionsTitle = new QLabel("Available Connections");
+    m_receiverConnectionsTitle = new QLabel("Advertised Receiver Routes");
     m_receiverConnectionsTitle->setMaximumWidth(680);
     m_receiverConnectionsTitle->setStyleSheet("font-size: 14px; font-weight: 700; color: #a7a7a7; padding-top: 8px;");
     layout->addWidget(m_receiverConnectionsTitle);
@@ -1933,18 +1949,6 @@ void MainWindow::selectSidebarItem(int pageIndex) {
 
 // ─── Connection Handlers ────────────────────────────────────────────────────────
 
-void MainWindow::onConnectClicked() {
-    bool ok = false;
-    uint16_t port = m_portEdit->text().toUShort(&ok);
-    if (!ok) port = 51820;
-
-    m_network->connectToRemoteSender(m_hostEdit->text(), port);
-    m_connectBtn->setEnabled(false);
-    m_recvStatusLabel->setText("Connecting...");
-    m_recvStatusLabel->setStyleSheet("font-size: 15px; font-weight: bold; color: #4da6ff;");
-    LogManager::instance().log("Connecting to " + m_hostEdit->text() + ":" + QString::number(port));
-}
-
 #ifdef ENABLE_ANDROID_ADB
 void MainWindow::onAdbConnectClicked() {
     m_adbBtn->setEnabled(false);
@@ -1963,7 +1967,9 @@ void MainWindow::onAdbConnectClicked() {
             if (success) {
                 m_recvStatusLabel->setText("ADB tunnel ready — connecting...");
                 LogManager::instance().log(QString("ADB tunnel established, connecting to localhost:%1...").arg(localPort));
-                m_network->connectToRemoteSender("localhost", localPort);
+                m_inboundCompatibilityConnector->connectExplicit(
+                    InboundCompatibilityEndpoint::adb(localPort)
+                );
             }
         });
     }).detach();
@@ -1976,9 +1982,6 @@ void MainWindow::onConnectionEstablished(
     const QString& connectionId,
     const QString& peerAddress
 ) {
-    if (m_connectBtn) {
-        m_connectBtn->setEnabled(true);
-    }
     m_reconnectTimer->stop();
     LogManager::instance().log(
         QString("Connection established — %1 (%2) via %3 [connection %4]")
@@ -2095,9 +2098,6 @@ void MainWindow::onConnectionEstablished(
 }
 
 void MainWindow::onConnectionLost(const QString& deviceId) {
-    if (m_connectBtn) {
-        m_connectBtn->setEnabled(true);
-    }
 
     if (auto* session = m_receiverSessions.take(deviceId)) {
         LogManager::instance().log(
@@ -2197,8 +2197,10 @@ void MainWindow::onReceiverListeningToggled(bool checked) {
             m_recvStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #d8d8d8;");
         }
         if (m_recvStatusDetailLabel) {
-            m_recvStatusDetailLabel->clear();
-            m_recvStatusDetailLabel->hide();
+            m_recvStatusDetailLabel->setText(
+                "Senders discover this Receiver and initiate the connection."
+            );
+            m_recvStatusDetailLabel->show();
         }
         if (m_recvStatusDot) {
             m_recvStatusDot->setStyleSheet("background-color: #34c759; border-radius: 5px;");
@@ -2261,7 +2263,9 @@ void MainWindow::attemptAdbReconnect() {
                 m_reconnectTimer->stop();
                 m_recvStatusLabel->setText("ADB tunnel restored — connecting...");
                 LogManager::instance().log("ADB tunnel restored, reconnecting...");
-                m_network->connectToRemoteSender("localhost", localPort);
+                m_inboundCompatibilityConnector->connectExplicit(
+                    InboundCompatibilityEndpoint::adb(localPort)
+                );
             }
         });
     }).detach();
@@ -2432,45 +2436,74 @@ void MainWindow::onReceiverDiscovered(
 ) {
     if (!m_receiverCombo) return;
 
-    // Remove the "Searching..." placeholder on first discovery
+    for (int i = 0; i < m_receiverCombo->count(); i++) {
+        QVariantMap existing = m_receiverCombo->itemData(i).toMap();
+        if (existing.value("host").toString() == receiver.host
+            && existing.value("port").toUInt() == receiver.port) {
+            return;
+        }
+    }
+
+    const QString candidateKey =
+        receiver.host + ":" + QString::number(receiver.port);
+    if (m_pendingReceiverProbes.contains(candidateKey)) return;
+    m_pendingReceiverProbes.insert(candidateKey);
+
+    auto* probe = new QTcpSocket(this);
+    auto* timeout = new QTimer(probe);
+    timeout->setSingleShot(true);
+    timeout->setInterval(1500);
+    connect(timeout, &QTimer::timeout, probe, [this, probe, candidateKey]() {
+        if (!m_pendingReceiverProbes.remove(candidateKey)) return;
+        LogManager::instance().log(
+            "Discarded unreachable receiver route " + candidateKey
+        );
+        probe->abort();
+        probe->deleteLater();
+    });
+    connect(probe, &QTcpSocket::connected, probe,
+            [this, probe, timeout, receiver, candidateKey]() {
+        if (!m_pendingReceiverProbes.remove(candidateKey)) return;
+        timeout->stop();
+        probe->disconnectFromHost();
+        probe->deleteLater();
+        admitVerifiedReceiver(receiver);
+    });
+    connect(probe, &QTcpSocket::errorOccurred, probe,
+            [this, probe, candidateKey](QAbstractSocket::SocketError) {
+        if (!m_pendingReceiverProbes.remove(candidateKey)) return;
+        LogManager::instance().log(
+            "Discarded receiver route " + candidateKey
+                + ": " + probe->errorString()
+        );
+        probe->deleteLater();
+    });
+    timeout->start();
+    probe->connectToHost(receiver.host, receiver.port);
+}
+
+void MainWindow::admitVerifiedReceiver(
+    const DiscoveredRemoteReceiver& receiver
+) {
+    if (!m_receiverCombo) return;
     if (m_receiverCombo->count() == 1 && !m_receiverCombo->isEnabled()) {
         m_receiverCombo->clear();
         m_receiverCombo->setEnabled(true);
         m_receiverCombo->addItem("Select a receiver...");
     }
 
-    // All BetterCast receivers listen on port 51820. mDNS may report a different port
-    // (e.g., from the P2P/AWDL listener) which is unreachable from Windows/Linux.
-    // Always use the standard port for reliability.
-    uint16_t port = 51820;
-
-    // Check if already in the list
     QString entry = QString("%1  (%2:%3)")
                         .arg(receiver.name, receiver.host)
-                        .arg(port);
-    for (int i = 0; i < m_receiverCombo->count(); i++) {
-        QVariantMap existing = m_receiverCombo->itemData(i).toMap();
-        if (existing.value("host").toString() == receiver.host) {
-            m_receiverCombo->setItemText(i, entry);
-            QVariantMap updated;
-            updated["host"] = receiver.host;
-            updated["port"] = port;
-            m_receiverCombo->setItemData(i, updated);
-            return;
-        }
-    }
-
+                        .arg(receiver.port);
     QVariantMap data;
     data["host"] = receiver.host;
-    data["port"] = port;
+    data["port"] = receiver.port;
     m_receiverCombo->addItem(entry, data);
-    if (receiver.port != port) {
-        LogManager::instance().log(QString("Discovered receiver: %1 at %2 (mDNS reported port %3, using standard port %4)")
-                                       .arg(receiver.name, receiver.host).arg(receiver.port).arg(port));
-    } else {
-        LogManager::instance().log(QString("Discovered receiver: %1 at %2:%3")
-                                       .arg(receiver.name, receiver.host).arg(port));
-    }
+    LogManager::instance().log(
+        QString("Verified receiver route: %1 at %2:%3")
+            .arg(receiver.name, receiver.host)
+            .arg(receiver.port)
+    );
 }
 
 void MainWindow::onReceiverSelected(int index) {

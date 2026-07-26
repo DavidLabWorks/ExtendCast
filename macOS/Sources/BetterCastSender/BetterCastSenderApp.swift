@@ -4046,22 +4046,16 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: searchWork)
 
         startBrowser(protocolType: "TCP")
-        startBrowser(protocolType: "UDP")
     }
 
     private func startBrowser(protocolType: String) {
         let serviceType: String
         let parameters: NWParameters
-        if protocolType == "UDP" {
-            serviceType = "_bettercast._udp"
-            parameters = NWParameters.udp
-        } else {
-            serviceType = "_bettercast._tcp"
-            let tcpOptions = NWProtocolTCP.Options()
-            tcpOptions.enableKeepalive = true
-            tcpOptions.noDelay = true
-            parameters = NWParameters(tls: nil, tcp: tcpOptions)
-        }
+        serviceType = "_bettercast._tcp"
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.enableKeepalive = true
+        tcpOptions.noDelay = true
+        parameters = NWParameters(tls: nil, tcp: tcpOptions)
         // Discovery stays unrestricted. The selected per-device mode is applied
         // only when that receiver is connected.
         parameters.includePeerToPeer = true
@@ -5828,6 +5822,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     for: selectedInterfacePreference
                 )
         )
+        if selectedConnectionType == "UDP",
+           case .hostPort(let host, _) = connectEndpoint {
+            connectEndpoint = .hostPort(
+                host: host,
+                port: NWEndpoint.Port(rawValue: BCConstants.udpPort)!
+            )
+        }
         if let resolvedBonjourEndpoint,
            connectEndpoint == resolvedBonjourEndpoint {
             LogManager.shared.log(

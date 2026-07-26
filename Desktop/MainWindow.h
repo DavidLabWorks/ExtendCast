@@ -20,6 +20,7 @@
 #include <QStringList>
 #include <QTime>
 #include <QHash>
+#include <QSet>
 
 // Simple log manager (mirrors macOS LogManager)
 class LogManager : public QObject {
@@ -52,6 +53,7 @@ private:
 
 struct DiscoveredRemoteReceiver;
 class NetworkListener;
+class InboundSessionConnector;
 class ServiceDiscovery;
 #ifdef ENABLE_ANDROID_ADB
 class AdbHelper;
@@ -83,7 +85,6 @@ protected:
 
 private slots:
     void onSidebarSelectionChanged(int row);
-    void onConnectClicked();
 #ifdef ENABLE_ANDROID_ADB
     void onAdbConnectClicked();
 #endif
@@ -144,6 +145,7 @@ private:
     void setupLogsPage();
 #ifdef ENABLE_SENDER
     void setupSendPage();
+    void admitVerifiedReceiver(const DiscoveredRemoteReceiver& receiver);
 #endif
     void setupTrayIcon();
     void updateTrayActions();
@@ -154,6 +156,7 @@ private:
 
     // Core components
     NetworkListener* m_network = nullptr;
+    InboundSessionConnector* m_inboundCompatibilityConnector = nullptr;
     ServiceDiscovery* m_receiverServiceAdvertiser = nullptr;
 #ifdef ENABLE_ANDROID_ADB
     AdbHelper* m_adbHelper = nullptr;
@@ -208,9 +211,6 @@ private:
     bool m_receiverListening = false;
     uint16_t m_receiverPort = 51820;
     QString m_receiverAddressSignature;
-    QLineEdit* m_hostEdit = nullptr;
-    QLineEdit* m_portEdit = nullptr;
-    QPushButton* m_connectBtn = nullptr;
 #ifdef ENABLE_ANDROID_ADB
     QPushButton* m_adbBtn = nullptr;
     QLabel* m_adbHelpLabel = nullptr;
@@ -241,6 +241,7 @@ private:
     QPushButton* m_sendBtn = nullptr;
     QPushButton* m_stopSendBtn = nullptr;
     QLabel* m_senderStatusLabel = nullptr;
+    QSet<QString> m_pendingReceiverProbes;
 
     // Virtual Display (VDD) controls
     QComboBox* m_monitorCombo = nullptr;

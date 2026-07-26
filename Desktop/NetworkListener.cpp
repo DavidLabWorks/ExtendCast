@@ -111,24 +111,26 @@ void NetworkListener::disconnectAll() {
     m_inboundSessions.clear();
 }
 
-void NetworkListener::connectToRemoteSender(const QString& host, uint16_t port) {
-    auto* socket = new QTcpSocket(this);
-    socket->setSocketOption(QAbstractSocket::LowDelayOption, 1);
-    socket->setSocketOption(QAbstractSocket::KeepAliveOption, 1);
+void NetworkListener::adoptConnectedRemoteSender(QTcpSocket* socket) {
+    if (!socket || socket->state() != QAbstractSocket::ConnectedState) {
+        return;
+    }
+    socket->setParent(this);
+    adoptInboundSocket(
+        socket,
+        "Compatibility TCP connected to "
+            + socket->peerAddress().toString()
+    );
+}
 
-    connect(socket, &QTcpSocket::connected, this, [this, socket]() {
-        registerSocket(socket);
-        LogManager::instance().log(
-            "TCP connected to " + socket->peerAddress().toString()
-                + " — waiting for sender identity"
-        );
-    });
-
+void NetworkListener::adoptInboundSocket(
+    QTcpSocket* socket,
+    const QString& logDescription
+) {
+    registerSocket(socket);
     connect(socket, &QTcpSocket::readyRead, this, &NetworkListener::onTcpReadyRead);
     connect(socket, &QTcpSocket::disconnected, this, &NetworkListener::onTcpDisconnected);
-
-    emit statusChanged(QString("Connecting to %1:%2...").arg(host).arg(port));
-    socket->connectToHost(host, port);
+    LogManager::instance().log(logDescription + " — waiting for sender identity");
 }
 
 void NetworkListener::onNewTcpConnection() {
@@ -138,14 +140,9 @@ void NetworkListener::onNewTcpConnection() {
         socket->setSocketOption(QAbstractSocket::KeepAliveOption, 1);
 
         qDebug() << "New TCP connection from" << socket->peerAddress().toString();
-        registerSocket(socket);
-
-        connect(socket, &QTcpSocket::readyRead, this, &NetworkListener::onTcpReadyRead);
-        connect(socket, &QTcpSocket::disconnected, this, &NetworkListener::onTcpDisconnected);
-
-        LogManager::instance().log(
+        adoptInboundSocket(
+            socket,
             "TCP accepted from " + socket->peerAddress().toString()
-                + " — waiting for sender identity"
         );
     }
 }

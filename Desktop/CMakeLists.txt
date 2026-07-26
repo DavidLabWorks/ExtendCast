@@ -108,6 +108,7 @@ endif()
 set(SOURCES
     main.cpp
     MainWindow.cpp
+    InboundSessionConnector.cpp
     NetworkListener.cpp
     VideoDecoder.cpp
     VideoRenderer.cpp
@@ -121,6 +122,8 @@ set(SOURCES
 
 set(HEADERS
     MainWindow.h
+    InboundCompatibilityEndpoint.h
+    InboundSessionConnector.h
     NetworkListener.h
     VideoDecoder.h
     VideoRenderer.h
@@ -197,9 +200,18 @@ if(BUILD_TESTING)
         tests/InboundSessionRegistryTests.cpp
         InboundSessionRegistry.h
     )
+    add_executable(
+        InboundCompatibilityEndpointTests
+        tests/InboundCompatibilityEndpointTests.cpp
+        InboundCompatibilityEndpoint.h
+    )
     add_test(
         NAME InboundSessionRegistryTests
         COMMAND InboundSessionRegistryTests
+    )
+    add_test(
+        NAME InboundCompatibilityEndpointTests
+        COMMAND InboundCompatibilityEndpointTests
     )
 endif()
 

@@ -401,12 +401,14 @@ void ServiceDiscovery::handleMdnsResponse(const QByteArray& packet) {
         svc.host = host;
         svc.port = srvPort;
 
-        // Check if already discovered
+        // One Receiver can advertise the same service over multiple physical
+        // routes. Keep every address as an independent candidate so the Sender
+        // can probe Wi-Fi, Ethernet, and Thunderbolt separately.
         bool found = false;
         for (auto& existing : m_discoveredReceivers) {
-            if (existing.name == svc.name) {
-                existing.host = svc.host;
-                existing.port = svc.port;
+            if (existing.name == svc.name
+                && existing.host == svc.host
+                && existing.port == svc.port) {
                 found = true;
                 break;
             }

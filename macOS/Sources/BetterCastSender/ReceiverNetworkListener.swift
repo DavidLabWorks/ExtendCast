@@ -9,10 +9,12 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
 
     @Published var status: String? = "Initializing..."
     @Published var connectedClients: [NWConnection] = []
-    @Published var manualConnectHost: String = "localhost"
-    @Published var manualConnectPort: String = "51820"
 
     private let networkQueue = DispatchQueue(label: "com.bettercast.receiver-network", qos: .userInteractive)
+    private lazy var inboundCompatibilityConnector =
+        InboundSessionConnector { [weak self] connection in
+            self?.handleNewConnection(connection, type: .tcp)
+        }
 
     var videoRenderer: ReceiverVideoRenderer?
     var videoDecoder: ReceiverVideoDecoder?
@@ -145,7 +147,7 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
                     DispatchQueue.main.async {
                         self?.adbInputInjector = injector
                     }
-                    self?.connectTo(host: "localhost", port: localPort)
+                    self?.connectCompatibility(to: .adb(localPort: localPort))
                     self?.isConnectingADB = false
                 } else {
                     self?.isConnectingADB = false
@@ -251,22 +253,23 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
 
     // MARK: - TCP/UDP
 
-    func connectTo(host: String, port: UInt16) {
-        let tcpOptions = NWProtocolTCP.Options()
-        tcpOptions.enableKeepalive = true
-        tcpOptions.noDelay = true
-        let parameters = NWParameters(tls: nil, tcp: tcpOptions)
-        parameters.serviceClass = .interactiveVideo
+    /// Explicit compatibility fallback. Normal Receiver operation advertises
+    /// the listener and waits for the Remote Sender to connect.
+    func connectManuallyToRemoteSender(host: String, port: UInt16) {
+        connectCompatibility(to: .manual(host: host, port: port))
+    }
 
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!)
-        let connection = NWConnection(to: endpoint, using: parameters)
-
-        LogManager.shared.log("Receiver: Connecting to \(host):\(port)...")
+    private func connectCompatibility(
+        to endpoint: InboundCompatibilityEndpoint
+    ) {
+        LogManager.shared.log(
+            "Receiver: Starting explicit compatibility connection to "
+                + "\(endpoint.networkEndpoint)"
+        )
         DispatchQueue.main.async {
-            self.status = "Connecting to \(host):\(port)..."
+            self.status = "Starting compatibility connection..."
         }
-
-        handleNewConnection(connection, type: .tcp)
+        inboundCompatibilityConnector.connect(to: endpoint)
     }
 
     private func startHeartbeat() {
@@ -342,10 +345,10 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
             parameters.serviceClass = .responsiveData
             parameters.preferNoProxies = true
 
-            let listener = try NWListener(using: parameters)
-            let udpName = (Host.current().localizedName ?? ProcessInfo.processInfo.hostName) + " UDP"
-            listener.service = NWListener.Service(name: udpName, type: "_bettercast._udp")
-
+            let listener = try NWListener(
+                using: parameters,
+                on: NWEndpoint.Port(rawValue: BCConstants.udpPort)!
+            )
             listener.stateUpdateHandler = { [weak self] state in
                 self?.handleListenerState(state, type: "UDP", listener: listener)
             }
@@ -688,7 +691,9 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
                         // The ADB forward succeeds but the TCP connection may still fail.
                         // Reset happens in didDecode() when frames actually arrive.
                     }
-                    self.connectTo(host: "localhost", port: localPort)
+                    self.connectCompatibility(
+                        to: .adb(localPort: localPort)
+                    )
                 }
             } catch {
                 LogManager.shared.log("Receiver: ADB reconnect error: \(error)")

@@ -24,7 +24,7 @@ public:
     void start();
     void stop();
     bool isListening() const;
-    void connectToRemoteSender(const QString& host, uint16_t port);
+    void adoptConnectedRemoteSender(QTcpSocket* socket);
     void disconnectAll();
     const QList<QTcpSocket*>& clients() const { return m_clients; }
     uint16_t actualTcpPort() const;
@@ -59,6 +59,10 @@ private slots:
     void onHeartbeatTick();
 
 private:
+    void adoptInboundSocket(
+        QTcpSocket* socket,
+        const QString& logDescription
+    );
     void processTcpBuffer(QTcpSocket* socket);
     bool handleIdentity(QTcpSocket* socket, const QByteArray& payload);
     void handleVideoData(

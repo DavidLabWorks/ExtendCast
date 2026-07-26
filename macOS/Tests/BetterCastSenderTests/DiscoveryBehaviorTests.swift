@@ -4,6 +4,41 @@ import XCTest
 
 @MainActor
 final class DiscoveryBehaviorTests: XCTestCase {
+    func testInboundSessionConnectorOnlyDialsExplicitCompatibilityEndpoint() {
+        var createdEndpoint: NWEndpoint?
+        var adoptedConnection: NWConnection?
+        let expectedConnection = NWConnection(
+            to: .hostPort(host: "localhost", port: 51821),
+            using: .tcp
+        )
+        let connector = InboundSessionConnector(
+            connectionFactory: { endpoint in
+                createdEndpoint = endpoint
+                return expectedConnection
+            },
+            connectionHandler: { connection in
+                adoptedConnection = connection
+            }
+        )
+
+        connector.connect(to: .adb(localPort: 51821))
+
+        XCTAssertEqual(
+            createdEndpoint,
+            .hostPort(host: "localhost", port: 51821)
+        )
+        XCTAssertTrue(adoptedConnection === expectedConnection)
+
+        connector.connect(
+            to: .manual(host: "192.168.1.50", port: 51820)
+        )
+
+        XCTAssertEqual(
+            createdEndpoint,
+            .hostPort(host: "192.168.1.50", port: 51820)
+        )
+    }
+
     func testReceiverAddressesClassifyPhysicalConnections() {
         XCTAssertEqual(
             ReceiverConnectionAddressProvider.connectionAddress(
