@@ -2,6 +2,13 @@ import XCTest
 @testable import BetterCastSender
 
 final class UpdateCheckerTests: XCTestCase {
+    func testDisplayVersionIncludesLabeledBuildNumber() {
+        XCTAssertEqual(
+            UpdateChecker.displayVersion(shortVersion: "1.0.0", build: "42"),
+            "1.0.0 (Build 42)"
+        )
+    }
+
     func testParsesCommonGitHubReleaseTagFormats() {
         XCTAssertEqual(UpdateChecker.versionComponents(from: "v1.2.3"), [1, 2, 3])
         XCTAssertEqual(UpdateChecker.versionComponents(from: "release-2.5"), [2, 5])

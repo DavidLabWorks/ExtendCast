@@ -82,6 +82,48 @@ final class DiscoveryBehaviorTests: XCTestCase {
         )
     }
 
+    func testThunderboltPeerLookupUsesCurrentBridgeInterfaceNames() {
+        let addresses = [
+            ReceiverConnectionAddress(
+                interfaceName: "en1",
+                title: "Wi-Fi",
+                address: "192.168.31.194:51820",
+                usageHint: "Connect through the Wi-Fi network.",
+                priority: 10
+            ),
+            ReceiverConnectionAddress(
+                interfaceName: "bridge1",
+                title: "Thunderbolt Bridge",
+                address: "169.254.205.130:51820",
+                usageHint: "Connect directly over Thunderbolt.",
+                priority: 20
+            ),
+        ]
+
+        XCTAssertEqual(
+            ThunderboltPeerAddressProvider.bridgeInterfaceNames(
+                from: addresses
+            ),
+            ["bridge1"]
+        )
+    }
+
+    func testThunderboltPeerRouteKeepsHostPairedWithItsBridge() {
+        let route = ThunderboltPeerAddressProvider.PeerRoute(
+            host: "169.254.204.111",
+            interfaceName: "bridge1"
+        )
+
+        XCTAssertEqual(
+            NetworkClient.preferredThunderboltPeerRoute(
+                receiverName: "Dang-Surface (Windows)",
+                availableRoutes: [route],
+                allowedInterfaceNames: ["bridge1"]
+            ),
+            route
+        )
+    }
+
     func testReceiverDisconnectTransitionShowsAlertOnlyForSameDevice() {
         XCTAssertEqual(
             ReceiverDetailAvailability.disconnectedReceiverName(
@@ -250,7 +292,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
         let client = NetworkClient(
             bonjourReachabilityProbe: { _, completion in
                 probeCount += 1
-                completion(true)
+                completion(.reachable)
                 return {}
             }
         )
@@ -270,10 +312,37 @@ final class DiscoveryBehaviorTests: XCTestCase {
         XCTAssertEqual(probeCount, 0)
     }
 
+    func testBonjourProbeAliasesShareConnectedReceiverIdentity() {
+        XCTAssertEqual(
+            NetworkClient.bonjourReceiverIdentity(
+                "Dang-Surface (Windows) P2P"
+            ),
+            NetworkClient.bonjourReceiverIdentity(
+                "Dang-Surface (Windows)"
+            )
+        )
+        XCTAssertEqual(
+            NetworkClient.bonjourReceiverIdentity(
+                "Dang-Surface (Windows) (2)"
+            ),
+            NetworkClient.bonjourReceiverIdentity(
+                "Dang-Surface (Windows)"
+            )
+        )
+        XCTAssertEqual(
+            NetworkClient.bonjourReceiverIdentity(
+                "Dang-Surface (Windows) P2P (2)"
+            ),
+            NetworkClient.bonjourReceiverIdentity(
+                "Dang-Surface (Windows)"
+            )
+        )
+    }
+
     func testUnverifiedBonjourServiceIsNotShownAsAvailable() {
         let client = NetworkClient(
             bonjourReachabilityProbe: { _, completion in
-                completion(false)
+                completion(.unreachable)
                 return {}
             }
         )
@@ -295,7 +364,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
     func testReachableBonjourServiceIsShownAsAvailable() {
         let client = NetworkClient(
             bonjourReachabilityProbe: { _, completion in
-                completion(true)
+                completion(.reachable)
                 return {}
             }
         )
@@ -321,7 +390,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
             bonjourReachabilityRecheckInterval: 0.01,
             bonjourReachabilityProbe: { _, completion in
                 let result = probeResults.isEmpty ? false : probeResults.removeFirst()
-                completion(result)
+                completion(result ? .reachable : .unreachable)
                 return {}
             }
         )
@@ -347,7 +416,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
         let client = NetworkClient(
             discoveryRemovalDelay: 0.1,
             bonjourReachabilityProbe: { _, completion in
-                completion(true)
+                completion(.reachable)
                 return {}
             }
         )
@@ -446,7 +515,26 @@ final class DiscoveryBehaviorTests: XCTestCase {
     }
 
     func testWindowsReceiverShowsWiFiAndThunderboltSeparately() {
-        let client = NetworkClient()
+        let client = NetworkClient(
+            localConnectionAddressProvider: {
+                [
+                    ReceiverConnectionAddress(
+                        interfaceName: "en0",
+                        title: "Wi-Fi",
+                        address: "192.168.31.194:51820",
+                        usageHint: "Connect through the Wi-Fi network.",
+                        priority: 10
+                    ),
+                    ReceiverConnectionAddress(
+                        interfaceName: "bridge0",
+                        title: "Thunderbolt Bridge",
+                        address: "169.254.205.130:51820",
+                        usageHint: "Connect directly over Thunderbolt.",
+                        priority: 20
+                    ),
+                ]
+            }
+        )
         let service = DiscoveredService(
             name: "Dang-Surface (Windows)",
             endpoint: .service(
@@ -464,6 +552,128 @@ final class DiscoveryBehaviorTests: XCTestCase {
         XCTAssertEqual(
             client.availableConnectionModes(for: service),
             [.auto, .routerOnly, .thunderboltBridge]
+        )
+    }
+
+    func testWindowsReceiverShowsBothModesFromCurrentLocalRoutes() {
+        let client = NetworkClient(
+            localConnectionAddressProvider: {
+                [
+                    ReceiverConnectionAddress(
+                        interfaceName: "en1",
+                        title: "Wi-Fi",
+                        address: "192.168.31.194:51820",
+                        usageHint: "Connect through the Wi-Fi network.",
+                        priority: 10
+                    ),
+                    ReceiverConnectionAddress(
+                        interfaceName: "bridge0",
+                        title: "Thunderbolt Bridge",
+                        address: "169.254.205.130:51820",
+                        usageHint: "Connect directly over Thunderbolt.",
+                        priority: 20
+                    ),
+                ]
+            }
+        )
+        let service = DiscoveredService(
+            name: "Dang-Surface (Windows)",
+            endpoint: .service(
+                name: "Dang-Surface (Windows)",
+                type: "_bettercast._tcp",
+                domain: "local.",
+                interface: nil
+            ),
+            discoveryInterfaces: [
+                DiscoveredNetworkInterface(
+                    name: "bridge0",
+                    type: .wiredEthernet
+                ),
+            ]
+        )
+
+        XCTAssertEqual(
+            client.availableConnectionModes(for: service),
+            [.auto, .routerOnly, .thunderboltBridge]
+        )
+    }
+
+    func testMergedBonjourServiceKeepsEndpointForEachConnectionMode() {
+        let wifiEndpoint = NWEndpoint.service(
+            name: "Dang-Surface (Windows)",
+            type: "_bettercast._tcp",
+            domain: "local.",
+            interface: nil
+        )
+        let thunderboltEndpoint = NWEndpoint.hostPort(
+            host: "169.254.204.111%bridge0",
+            port: 51820
+        )
+        let wifiService = DiscoveredService(
+            name: "Dang-Surface (Windows)",
+            endpoint: wifiEndpoint,
+            discoveryInterfaces: [
+                DiscoveredNetworkInterface(name: "en1", type: .wifi),
+            ]
+        )
+        let thunderboltService = DiscoveredService(
+            name: "Dang-Surface (Windows)",
+            endpoint: thunderboltEndpoint,
+            discoveryInterfaces: [
+                DiscoveredNetworkInterface(
+                    name: "bridge0",
+                    type: .wiredEthernet
+                ),
+            ]
+        )
+
+        let merged = wifiService.mergingDiscoveryInterfaces(
+            from: thunderboltService
+        )
+
+        XCTAssertEqual(
+            merged.connectionEndpoint(for: .routerOnly),
+            wifiEndpoint
+        )
+        XCTAssertEqual(
+            merged.connectionEndpoint(for: .thunderboltBridge),
+            thunderboltEndpoint
+        )
+    }
+
+    func testWindowsReceiverDropsThunderboltWhenLocalBridgeDisappears() {
+        let client = NetworkClient(
+            localConnectionAddressProvider: {
+                [
+                    ReceiverConnectionAddress(
+                        interfaceName: "en1",
+                        title: "Wi-Fi",
+                        address: "192.168.31.194:51820",
+                        usageHint: "Connect through the Wi-Fi network.",
+                        priority: 10
+                    ),
+                ]
+            }
+        )
+        let service = DiscoveredService(
+            name: "Dang-Surface (Windows)",
+            endpoint: .service(
+                name: "Dang-Surface (Windows)",
+                type: "_bettercast._tcp",
+                domain: "local.",
+                interface: nil
+            ),
+            discoveryInterfaces: [
+                DiscoveredNetworkInterface(
+                    name: "bridge0",
+                    type: .wiredEthernet
+                ),
+            ]
+        )
+
+        XCTAssertEqual(
+            client.availableConnectionModes(for: service),
+            [.auto, .routerOnly]
         )
     }
 
@@ -509,7 +719,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
         )
     }
 
-    func testActiveLocalThunderboltBridgeAddsModeForWindowsReceiverFoundOverWiFi() {
+    func testLocalThunderboltDoesNotAddModeToWindowsReceiverFoundOnlyOverWiFi() {
         let client = NetworkClient(
             localConnectionAddressProvider: {
                 [
@@ -538,7 +748,43 @@ final class DiscoveryBehaviorTests: XCTestCase {
 
         XCTAssertEqual(
             client.availableConnectionModes(for: service),
-            [.auto, .routerOnly, .thunderboltBridge]
+            [.auto, .routerOnly]
+        )
+    }
+
+    func testThunderboltModeRequiresTheSameLocalBridgeAsTheReceiver() {
+        let client = NetworkClient(
+            localConnectionAddressProvider: {
+                [
+                    ReceiverConnectionAddress(
+                        interfaceName: "bridge1",
+                        title: "Thunderbolt Bridge",
+                        address: "169.254.205.130:51820",
+                        usageHint: "Connect directly over Thunderbolt.",
+                        priority: 20
+                    ),
+                ]
+            }
+        )
+        let service = DiscoveredService(
+            name: "Dang-Surface (Windows)",
+            endpoint: .service(
+                name: "Dang-Surface (Windows)",
+                type: "_bettercast._tcp",
+                domain: "local.",
+                interface: nil
+            ),
+            discoveryInterfaces: [
+                DiscoveredNetworkInterface(
+                    name: "bridge0",
+                    type: .wiredEthernet
+                ),
+            ]
+        )
+
+        XCTAssertEqual(
+            client.availableConnectionModes(for: service),
+            [.auto]
         )
     }
 
@@ -588,6 +834,634 @@ final class DiscoveryBehaviorTests: XCTestCase {
         )
     }
 
+    func testConnectCardShowsSelectedThunderboltEndpoint() {
+        let client = NetworkClient(
+            localConnectionAddressProvider: {
+                [
+                    ReceiverConnectionAddress(
+                        interfaceName: "bridge0",
+                        title: "Thunderbolt Bridge",
+                        address: "169.254.204.112:51820",
+                        usageHint: "Connect directly over Thunderbolt.",
+                        priority: 20
+                    ),
+                ]
+            },
+            thunderboltPeerRouteProvider: {
+                [
+                    ThunderboltPeerAddressProvider.PeerRoute(
+                        host: "169.254.204.111",
+                        interfaceName: "bridge0"
+                    ),
+                ]
+            }
+        )
+        let service = DiscoveredService(
+            name: "Dang-Surface (Windows)",
+            endpoint: .service(
+                name: "Dang-Surface (Windows)",
+                type: "_bettercast._tcp",
+                domain: "local.",
+                interface: nil
+            ),
+            discoveryInterfaces: [
+                DiscoveredNetworkInterface(name: "en0", type: .wifi),
+                DiscoveredNetworkInterface(
+                    name: "bridge0",
+                    type: .wiredEthernet
+                ),
+            ]
+        )
+
+        XCTAssertEqual(
+            client.connectionEndpointDescription(
+                for: service,
+                preference: .thunderboltBridge
+            ),
+            "169.254.204.111%bridge0:51820"
+        )
+    }
+
+    func testConnectCardShowsVerifiedScopedThunderboltEndpoint() {
+        let verifiedEndpoint = NWEndpoint.hostPort(
+            host: "169.254.204.111%bridge0",
+            port: 51820
+        )
+        let route = BonjourResolvedRoute(
+            endpoint: verifiedEndpoint,
+            interfaceNames: ["bridge0"],
+            usesWiFi: false,
+            usesWiredEthernet: true
+        )
+        let client = NetworkClient(
+            bonjourReachabilityProbe: { _, completion in
+                completion(
+                    BonjourReachabilityResult(
+                        isReachable: true,
+                        resolvedRoute: route
+                    )
+                )
+                return {}
+            },
+            localConnectionAddressProvider: {
+                [
+                    ReceiverConnectionAddress(
+                        interfaceName: "bridge0",
+                        title: "Thunderbolt Bridge",
+                        address: "169.254.204.112:51820",
+                        usageHint: "Connect directly over Thunderbolt.",
+                        priority: 20
+                    ),
+                ]
+            },
+            thunderboltPeerRouteProvider: {
+                [
+                    ThunderboltPeerAddressProvider.PeerRoute(
+                        host: "169.254.204.111",
+                        interfaceName: "bridge0"
+                    ),
+                ]
+            }
+        )
+        let service = DiscoveredService(
+            name: "Dang-Surface (Windows)",
+            endpoint: .service(
+                name: "Dang-Surface (Windows)",
+                type: "_bettercast._tcp",
+                domain: "local.",
+                interface: nil
+            ),
+            discoveryInterfaces: [
+                DiscoveredNetworkInterface(
+                    name: "bridge0",
+                    type: .wiredEthernet
+                ),
+            ]
+        )
+
+        client.updateDiscoveredServices([service], for: "TCP")
+
+        XCTAssertEqual(
+            client.connectionEndpointDescription(
+                for: service,
+                preference: .thunderboltBridge
+            ),
+            "169.254.204.111%bridge0:51820"
+        )
+    }
+
+    func testConnectCardShowsManualHostAndPort() {
+        let client = NetworkClient()
+        let service = DiscoveredService(
+            name: "192.168.31.235:51820",
+            endpoint: .hostPort(host: "192.168.31.235", port: 51820)
+        )
+
+        XCTAssertEqual(
+            client.connectionEndpointDescription(
+                for: service,
+                preference: .routerOnly
+            ),
+            "192.168.31.235:51820"
+        )
+    }
+
+    func testConnectCardFormatsIPv6EndpointWithBrackets() {
+        XCTAssertEqual(
+            NetworkClient.endpointDescription(
+                .hostPort(host: "fe80::1", port: 51820)
+            ),
+            "[fe80::1]:51820"
+        )
+    }
+
+    func testConnectCardHidesIPv4InterfaceScope() {
+        XCTAssertEqual(
+            NetworkClient.endpointDescription(
+                .hostPort(host: "192.168.31.235%en0", port: 51820)
+            ),
+            "192.168.31.235:51820"
+        )
+    }
+
+    func testResolvedBonjourRoutesAreSelectedPerConnectionMode() {
+        let wifiRoute = BonjourResolvedRoute(
+            endpoint: .hostPort(
+                host: "192.168.31.235%en0",
+                port: 51820
+            ),
+            interfaceNames: ["en0"],
+            usesWiFi: true,
+            usesWiredEthernet: false
+        )
+        let thunderboltRoute = BonjourResolvedRoute(
+            endpoint: .hostPort(
+                host: "169.254.204.111%bridge0",
+                port: 51820
+            ),
+            interfaceNames: ["bridge0"],
+            usesWiFi: false,
+            usesWiredEthernet: true
+        )
+
+        XCTAssertEqual(
+            NetworkClient.preferredBonjourEndpoint(
+                for: .routerOnly,
+                resolvedRoutes: [thunderboltRoute, wifiRoute]
+            ),
+            wifiRoute.endpoint
+        )
+        XCTAssertEqual(
+            NetworkClient.preferredBonjourEndpoint(
+                for: .thunderboltBridge,
+                resolvedRoutes: [wifiRoute, thunderboltRoute]
+            ),
+            thunderboltRoute.endpoint
+        )
+    }
+
+    func testConnectCardUsesTheResolvedWiFiRouteWhenThunderboltAlsoExists() {
+        let wifiRoute = BonjourResolvedRoute(
+            endpoint: .hostPort(
+                host: "192.168.31.235%en0",
+                port: 51820
+            ),
+            interfaceNames: ["en0"],
+            usesWiFi: true,
+            usesWiredEthernet: false
+        )
+        let thunderboltRoute = BonjourResolvedRoute(
+            endpoint: .hostPort(
+                host: "169.254.204.111%bridge0",
+                port: 51820
+            ),
+            interfaceNames: ["bridge0"],
+            usesWiFi: false,
+            usesWiredEthernet: true
+        )
+        let client = NetworkClient(
+            bonjourReachabilityProbe: { _, completion in
+                completion(
+                    BonjourReachabilityResult(
+                        isReachable: true,
+                        resolvedRoutes: [thunderboltRoute, wifiRoute]
+                    )
+                )
+                return {}
+            },
+            localConnectionAddressProvider: {
+                [
+                    ReceiverConnectionAddress(
+                        interfaceName: "en0",
+                        title: "Wi-Fi",
+                        address: "192.168.31.194:51820",
+                        usageHint: "Connect through the Wi-Fi network.",
+                        priority: 10
+                    ),
+                    ReceiverConnectionAddress(
+                        interfaceName: "bridge0",
+                        title: "Thunderbolt Bridge",
+                        address: "169.254.205.130:51820",
+                        usageHint: "Connect directly over Thunderbolt.",
+                        priority: 20
+                    ),
+                ]
+            }
+        )
+        let service = DiscoveredService(
+            name: "Dang-Surface (Windows)",
+            endpoint: .service(
+                name: "Dang-Surface (Windows)",
+                type: "_bettercast._tcp",
+                domain: "local.",
+                interface: nil
+            ),
+            discoveryInterfaces: [
+                DiscoveredNetworkInterface(name: "en0", type: .wifi),
+                DiscoveredNetworkInterface(
+                    name: "bridge0",
+                    type: .wiredEthernet
+                ),
+            ]
+        )
+
+        client.updateDiscoveredServices([service], for: "TCP")
+
+        XCTAssertEqual(
+            client.connectionEndpointDescription(
+                for: service,
+                preference: .routerOnly
+            ),
+            "192.168.31.235:51820"
+        )
+    }
+
+    func testAvailableConnectReusesReachableBonjourWiFiEndpoint() {
+        let resolvedEndpoint = NWEndpoint.hostPort(
+            host: "192.168.31.235",
+            port: 51820
+        )
+        let route = BonjourResolvedRoute(
+            endpoint: resolvedEndpoint,
+            interfaceNames: ["en1"],
+            usesWiFi: true,
+            usesWiredEthernet: false
+        )
+
+        XCTAssertEqual(
+            NetworkClient.preferredBonjourEndpoint(
+                for: .routerOnly,
+                resolvedRoute: route
+            ),
+            resolvedEndpoint
+        )
+    }
+
+    func testVerifiedThunderboltRouteWinsOverUnscopedARPPeer() {
+        let verifiedEndpoint = NWEndpoint.hostPort(
+            host: "169.254.204.111%bridge0",
+            port: 51820
+        )
+        let route = BonjourResolvedRoute(
+            endpoint: verifiedEndpoint,
+            interfaceNames: ["bridge0"],
+            usesWiFi: false,
+            usesWiredEthernet: true
+        )
+
+        XCTAssertEqual(
+            NetworkClient.preferredConnectionEndpoint(
+                for: .thunderboltBridge,
+                resolvedRoute: route,
+                discoveredEndpoint: .service(
+                    name: "Dang-Surface (Windows)",
+                    type: "_bettercast._tcp",
+                    domain: "local.",
+                    interface: nil
+                ),
+                thunderboltPeerHost: "169.254.204.111"
+            ),
+            verifiedEndpoint
+        )
+    }
+
+    func testThunderboltDeviceSwitchScopesTheNewPeerToCurrentBridge() {
+        let oldRoute = BonjourResolvedRoute(
+            endpoint: .hostPort(
+                host: "169.254.204.111%bridge0",
+                port: 51820
+            ),
+            interfaceNames: ["bridge0"],
+            usesWiFi: false,
+            usesWiredEthernet: true
+        )
+
+        XCTAssertEqual(
+            NetworkClient.preferredConnectionEndpoint(
+                for: .thunderboltBridge,
+                resolvedRoute: oldRoute,
+                discoveredEndpoint: .service(
+                    name: "New-Surface (Windows)",
+                    type: "_bettercast._tcp",
+                    domain: "local.",
+                    interface: nil
+                ),
+                thunderboltPeerHost: "169.254.204.222",
+                thunderboltInterfaceName: "bridge0"
+            ),
+            .hostPort(
+                host: "169.254.204.222%bridge0",
+                port: 51820
+            )
+        )
+    }
+
+    func testThunderboltInterfaceSwitchReplacesOldScopeWhenPeerIsUnchanged() {
+        let oldRoute = BonjourResolvedRoute(
+            endpoint: .hostPort(
+                host: "169.254.204.111%bridge0",
+                port: 51820
+            ),
+            interfaceNames: ["bridge0"],
+            usesWiFi: false,
+            usesWiredEthernet: true
+        )
+
+        XCTAssertEqual(
+            NetworkClient.preferredConnectionEndpoint(
+                for: .thunderboltBridge,
+                resolvedRoute: oldRoute,
+                discoveredEndpoint: .service(
+                    name: "Dang-Surface (Windows)",
+                    type: "_bettercast._tcp",
+                    domain: "local.",
+                    interface: nil
+                ),
+                thunderboltPeerHost: "169.254.204.111",
+                thunderboltInterfaceName: "bridge1"
+            ),
+            .hostPort(
+                host: "169.254.204.111%bridge1",
+                port: 51820
+            )
+        )
+    }
+
+    func testAutomaticIgnoresOldThunderboltRouteAfterBridgeDisappears() {
+        let oldRoute = BonjourResolvedRoute(
+            endpoint: .hostPort(
+                host: "169.254.204.111%bridge0",
+                port: 51820
+            ),
+            interfaceNames: ["bridge0"],
+            usesWiFi: false,
+            usesWiredEthernet: true
+        )
+        let currentWiFiEndpoint = NWEndpoint.hostPort(
+            host: "192.168.31.235",
+            port: 51820
+        )
+
+        XCTAssertEqual(
+            NetworkClient.preferredConnectionEndpoint(
+                for: .auto,
+                resolvedRoute: oldRoute,
+                discoveredEndpoint: currentWiFiEndpoint,
+                thunderboltPeerHost: nil,
+                thunderboltInterfaceName: nil
+            ),
+            currentWiFiEndpoint
+        )
+    }
+
+    func testAutomaticDirectRouteFallbackUsesCurrentBonjourEndpoint() {
+        let oldThunderboltEndpoint = NWEndpoint.hostPort(
+            host: "169.254.204.111%bridge0",
+            port: 51820
+        )
+        let currentBonjourEndpoint = NWEndpoint.hostPort(
+            host: "192.168.31.235",
+            port: 51820
+        )
+
+        XCTAssertEqual(
+            NetworkClient.infrastructureFallbackEndpoint(
+                shouldFallback: true,
+                resolvedEndpoint: oldThunderboltEndpoint,
+                discoveredEndpoint: currentBonjourEndpoint
+            ),
+            currentBonjourEndpoint
+        )
+    }
+
+    func testAutomaticThunderboltFallbackUsesWiFiCandidate() {
+        let wifiEndpoint = NWEndpoint.hostPort(
+            host: "192.168.31.235",
+            port: 51820
+        )
+        let service = DiscoveredService(
+            name: "Dang-Surface (Windows)",
+            endpoint: .service(
+                name: "Dang-Surface (Windows)",
+                type: "_bettercast._tcp",
+                domain: "local.",
+                interface: nil
+            ),
+            discoveryInterfaces: [
+                DiscoveredNetworkInterface(name: "en1", type: .wifi),
+                DiscoveredNetworkInterface(
+                    name: "bridge0",
+                    type: .wiredEthernet
+                ),
+            ],
+            connectionEndpoints: [
+                DiscoveredServiceEndpoint(
+                    endpoint: wifiEndpoint,
+                    discoveryInterfaces: [
+                        DiscoveredNetworkInterface(
+                            name: "en1",
+                            type: .wifi
+                        ),
+                    ]
+                ),
+                DiscoveredServiceEndpoint(
+                    endpoint: .hostPort(
+                        host: "169.254.204.111%bridge0",
+                        port: 51820
+                    ),
+                    discoveryInterfaces: [
+                        DiscoveredNetworkInterface(
+                            name: "bridge0",
+                            type: .wiredEthernet
+                        ),
+                    ]
+                ),
+            ]
+        )
+
+        XCTAssertEqual(
+            NetworkClient.infrastructureFallbackEndpoint(
+                shouldFallback: true,
+                resolvedEndpoint: .hostPort(
+                    host: "169.254.204.111%bridge0",
+                    port: 51820
+                ),
+                discoveredEndpoint:
+                    service.infrastructureConnectionEndpoint
+            ),
+            wifiEndpoint
+        )
+    }
+
+    func testCurrentScopedThunderboltCandidateBeatsOldVerifiedRoute() {
+        let oldRoute = BonjourResolvedRoute(
+            endpoint: .hostPort(
+                host: "169.254.204.111%bridge0",
+                port: 51820
+            ),
+            interfaceNames: ["bridge0"],
+            usesWiFi: false,
+            usesWiredEthernet: true
+        )
+        let currentEndpoint = NWEndpoint.hostPort(
+            host: "169.254.204.222%bridge0",
+            port: 51820
+        )
+
+        XCTAssertEqual(
+            NetworkClient.preferredConnectionEndpoint(
+                for: .thunderboltBridge,
+                resolvedRoute: oldRoute,
+                discoveredEndpoint: currentEndpoint,
+                thunderboltPeerHost: nil,
+                thunderboltInterfaceName: "bridge0"
+            ),
+            currentEndpoint
+        )
+    }
+
+    func testCurrentScopedThunderboltCandidateBeatsStaleARPPeer() {
+        let currentEndpoint = NWEndpoint.hostPort(
+            host: "169.254.204.222%bridge0",
+            port: 51820
+        )
+
+        XCTAssertEqual(
+            NetworkClient.preferredConnectionEndpoint(
+                for: .thunderboltBridge,
+                resolvedRoute: nil,
+                discoveredEndpoint: currentEndpoint,
+                thunderboltPeerHost: "169.254.204.111",
+                thunderboltInterfaceName: "bridge0",
+                discoveredEndpointMatchesPreference: true
+            ),
+            currentEndpoint
+        )
+    }
+
+    func testWiFiRouteIsNotMistakenForThunderboltWhenBridgeIsAvailable() {
+        let wifiRoute = BonjourResolvedRoute(
+            endpoint: .hostPort(host: "192.168.31.235", port: 51820),
+            interfaceNames: ["en1", "bridge0"],
+            usesWiFi: true,
+            usesWiredEthernet: false
+        )
+
+        XCTAssertFalse(wifiRoute.supports(.thunderboltBridge))
+    }
+
+    func testEthernetRouteIsNotMistakenForThunderboltWhenBridgeIsAvailable() {
+        let ethernetRoute = BonjourResolvedRoute(
+            endpoint: .hostPort(host: "10.0.0.25", port: 51820),
+            interfaceNames: ["en7", "bridge0"],
+            usesWiFi: false,
+            usesWiredEthernet: true
+        )
+
+        XCTAssertTrue(ethernetRoute.supports(.ethernet))
+        XCTAssertFalse(ethernetRoute.supports(.thunderboltBridge))
+    }
+
+    func testLinkLocalEthernetIsNotThunderboltWithoutBridgeScope() {
+        let ethernetRoute = BonjourResolvedRoute(
+            endpoint: .hostPort(host: "169.254.20.25", port: 51820),
+            interfaceNames: ["en7", "bridge0"],
+            usesWiFi: false,
+            usesWiredEthernet: true
+        )
+
+        XCTAssertTrue(ethernetRoute.supports(.ethernet))
+        XCTAssertFalse(ethernetRoute.supports(.thunderboltBridge))
+    }
+
+    func testThunderboltARPPeerRemainsFallbackWithoutVerifiedRoute() {
+        XCTAssertEqual(
+            NetworkClient.preferredConnectionEndpoint(
+                for: .thunderboltBridge,
+                resolvedRoute: nil,
+                discoveredEndpoint: .service(
+                    name: "Dang-Surface (Windows)",
+                    type: "_bettercast._tcp",
+                    domain: "local.",
+                    interface: nil
+                ),
+                thunderboltPeerHost: "169.254.204.111"
+            ),
+            .hostPort(host: "169.254.204.111", port: 51820)
+        )
+    }
+
+    func testAvailableConnectDoesNotReuseRouteFromWrongInterface() {
+        let resolvedEndpoint = NWEndpoint.hostPort(
+            host: "169.254.204.111",
+            port: 51820
+        )
+        let route = BonjourResolvedRoute(
+            endpoint: resolvedEndpoint,
+            interfaceNames: ["bridge0"],
+            usesWiFi: false,
+            usesWiredEthernet: true
+        )
+
+        XCTAssertNil(
+            NetworkClient.preferredBonjourEndpoint(
+                for: .routerOnly,
+                resolvedRoute: route
+            )
+        )
+    }
+
+    func testAvailableConnectionWatchdogAllowsTCPAddressTimeoutToFinish() {
+        XCTAssertGreaterThan(
+            NetworkClient.availableConnectionAttemptTimeout,
+            TimeInterval(NetworkClient.tcpConnectionTimeout)
+        )
+    }
+
+    func testWindowsBonjourConnectionsPreferIPv4() {
+        XCTAssertTrue(
+            BonjourConnectionPolicy.prefersIPv4(
+                receiverName: "Dang-Surface (Windows)"
+            )
+        )
+        XCTAssertFalse(
+            BonjourConnectionPolicy.prefersIPv4(
+                receiverName: "Test iPad"
+            )
+        )
+    }
+
+    func testBonjourLocalNetworkConnectionsBypassSystemProxy() {
+        let parameters = NWParameters.tcp
+
+        BonjourConnectionPolicy.applyLocalNetworkPolicy(
+            to: parameters,
+            receiverName: "Dang-Surface (Windows)"
+        )
+
+        XCTAssertTrue(parameters.preferNoProxies)
+    }
+
     func testAppleAutomaticModeKeepsPeerToPeerRoutingPolicy() {
         XCTAssertEqual(
             NetworkClient.preferredAutomaticConnectionMode(
@@ -601,7 +1475,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
     func testAppleP2PCompanionAddsWiFiDirectMode() {
         let client = NetworkClient(
             bonjourReachabilityProbe: { _, completion in
-                completion(true)
+                completion(.reachable)
                 return {}
             }
         )
@@ -659,4 +1533,5 @@ final class DiscoveryBehaviorTests: XCTestCase {
         XCTAssertEqual(client.interfacePreference, .auto)
         XCTAssertEqual(client.connectionType, "TCP")
     }
+
 }

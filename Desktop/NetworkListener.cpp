@@ -1,12 +1,12 @@
 #include "NetworkListener.h"
 #include "MainWindow.h"  // for LogManager
-#include "VideoDecoder.h"
-#include "VideoRenderer.h"
-#include "AudioDecoder.h"
 
 #include <QHostAddress>
-#include <QtEndian>
 #include <QDebug>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QUuid>
+#include <QtEndian>
 
 NetworkListener::NetworkListener(QObject* parent)
     : QObject(parent)
@@ -17,12 +17,6 @@ NetworkListener::NetworkListener(QObject* parent)
 
 NetworkListener::~NetworkListener() {
     stop();
-}
-
-void NetworkListener::setup(VideoDecoder* decoder, VideoRenderer* renderer, AudioDecoder* audioDecoder) {
-    m_decoder = decoder;
-    m_renderer = renderer;
-    m_audioDecoder = audioDecoder;
 }
 
 uint16_t NetworkListener::actualTcpPort() const {
@@ -112,27 +106,22 @@ void NetworkListener::disconnectAll() {
     m_clients.clear();
     m_tcpBuffers.clear();
     m_connectionFormat.clear();
-    // Reset decoder so next connection starts fresh
-    if (m_decoder) {
-        m_decoder->reset();
-    }
+    m_connectionIds.clear();
+    m_socketsByConnectionId.clear();
+    m_sessionRegistry.clear();
 }
 
 void NetworkListener::connectTo(const QString& host, uint16_t port) {
-    // Disconnect any existing outgoing connections to avoid duplicates
-    disconnectAll();
-
     auto* socket = new QTcpSocket(this);
     socket->setSocketOption(QAbstractSocket::LowDelayOption, 1);
     socket->setSocketOption(QAbstractSocket::KeepAliveOption, 1);
 
     connect(socket, &QTcpSocket::connected, this, [this, socket]() {
-        LogManager::instance().log("Connected to " + socket->peerAddress().toString());
-        m_clients.append(socket);
-        m_tcpBuffers[socket] = QByteArray();
-        m_connectionFormat[socket] = -1; // auto-detect on first frame
-        emit connectionEstablished();
-        emit statusChanged("Connected to " + socket->peerAddress().toString());
+        registerSocket(socket);
+        LogManager::instance().log(
+            "TCP connected to " + socket->peerAddress().toString()
+                + " — waiting for sender identity"
+        );
     });
 
     connect(socket, &QTcpSocket::readyRead, this, &NetworkListener::onTcpReadyRead);
@@ -149,16 +138,40 @@ void NetworkListener::onNewTcpConnection() {
         socket->setSocketOption(QAbstractSocket::KeepAliveOption, 1);
 
         qDebug() << "New TCP connection from" << socket->peerAddress().toString();
-        m_clients.append(socket);
-        m_tcpBuffers[socket] = QByteArray();
-        m_connectionFormat[socket] = -1; // auto-detect on first frame
+        registerSocket(socket);
 
         connect(socket, &QTcpSocket::readyRead, this, &NetworkListener::onTcpReadyRead);
         connect(socket, &QTcpSocket::disconnected, this, &NetworkListener::onTcpDisconnected);
 
-        emit connectionEstablished();
-        emit statusChanged("Connected from " + socket->peerAddress().toString());
+        LogManager::instance().log(
+            "TCP accepted from " + socket->peerAddress().toString()
+                + " — waiting for sender identity"
+        );
     }
+}
+
+QString NetworkListener::connectionIdFor(QTcpSocket* socket) const {
+    return m_connectionIds.value(socket);
+}
+
+void NetworkListener::registerSocket(QTcpSocket* socket) {
+    if (!socket || m_connectionIds.contains(socket)) {
+        return;
+    }
+    const QString connectionId =
+        QUuid::createUuid().toString(QUuid::WithoutBraces).toLower();
+    const QString peerAddress = socket->peerAddress().toString();
+
+    m_clients.append(socket);
+    m_tcpBuffers[socket] = QByteArray();
+    m_connectionFormat[socket] = -1;
+    m_connectionIds[socket] = connectionId;
+    m_socketsByConnectionId[connectionId] = socket;
+    m_sessionRegistry.open(
+        connectionId.toStdString(),
+        peerAddress.toStdString(),
+        peerAddress.toStdString()
+    );
 }
 
 void NetworkListener::onTcpReadyRead() {
@@ -205,34 +218,33 @@ void NetworkListener::processTcpBuffer(QTcpSocket* socket) {
         QByteArray body = buffer.mid(consumed + 4, static_cast<int>(length));
         consumed += totalNeeded;
 
-        // Auto-detect framing format on first frame per connection.
-        // Type-byte format (Mac sender): [0x01=video|0x02=audio][payload]
-        // Legacy format (Android/Swift): [8-byte PTS][NALUs] — first frame PTS=0 so byte[0]=0x00
+        // Every media connection must start with a typed identity message.
         int& format = m_connectionFormat[socket];
-        if (format < 0 && body.size() > 1) {
-            uint8_t firstByte = static_cast<uint8_t>(body[0]);
-            if (firstByte == 0x01 || firstByte == 0x02) {
-                format = 1; // type-byte framing
-                LogManager::instance().log("Detected type-byte framing (desktop sender)");
-            } else {
-                format = 0; // legacy framing
-                LogManager::instance().log("Detected legacy framing (Android/Swift sender)");
+        const uint8_t typeByte =
+            body.isEmpty() ? 0 : static_cast<uint8_t>(body[0]);
+        if (format < 0) {
+            if (typeByte != 0x03 || body.size() <= 1) {
+                rejectUnidentifiedConnection(
+                    socket,
+                    "first protocol message was not sender identity"
+                );
+                return;
             }
+            format = 1;
         }
 
         if (format == 1 && body.size() > 1) {
-            uint8_t typeByte = static_cast<uint8_t>(body[0]);
-            if (typeByte == 0x01) {
+            if (typeByte == 0x03) {
+                if (!handleIdentity(socket, body.mid(1))) {
+                    return;
+                }
+            } else if (typeByte == 0x01) {
                 // The type byte only wraps the existing video payload. That payload
                 // is still [8-byte PTS][AVCC NALUs] for both Mac and desktop senders.
-                handleVideoData(body.mid(1), true);
+                handleVideoData(socket, body.mid(1), true);
             } else if (typeByte == 0x02) {
-                handleAudioData(body.mid(1));
+                handleAudioData(socket, body.mid(1));
             }
-            // else: unknown type, skip
-        } else {
-            // Legacy: has 8-byte PTS prefix
-            handleVideoData(body, true);
         }
     }
 
@@ -242,7 +254,120 @@ void NetworkListener::processTcpBuffer(QTcpSocket* socket) {
     }
 }
 
-void NetworkListener::handleVideoData(const QByteArray& data, bool hasPtsPrefix) {
+bool NetworkListener::handleIdentity(
+    QTcpSocket* socket,
+    const QByteArray& payload
+) {
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(payload, &parseError);
+    const QJsonObject identity = document.object();
+    const QString deviceId = identity.value("deviceId").toString().trimmed();
+    const QString deviceName = identity.value("deviceName").toString().trimmed();
+    const int protocolVersion = identity.value("protocolVersion").toInt();
+    const QString connectionId = connectionIdFor(socket);
+
+    if (parseError.error != QJsonParseError::NoError
+        || !document.isObject()
+        || protocolVersion != 1
+        || deviceId.isEmpty()
+        || deviceName.isEmpty()
+        || deviceId.size() > 128
+        || deviceName.size() > 128
+        || connectionId.isEmpty()) {
+        rejectUnidentifiedConnection(socket, "invalid sender identity");
+        return false;
+    }
+
+    const auto existing = m_sessionRegistry.sessionForConnection(
+        connectionId.toStdString()
+    );
+    if (existing.has_value()) {
+        if (existing->deviceId != deviceId.toStdString()) {
+            rejectUnidentifiedConnection(
+                socket,
+                "sender identity changed on an active connection"
+            );
+            return false;
+        }
+        return true;
+    }
+
+    const auto result = m_sessionRegistry.identify(
+        connectionId.toStdString(),
+        deviceId.toStdString(),
+        deviceName.toStdString()
+    );
+    if (!result.has_value()) {
+        rejectUnidentifiedConnection(socket, "identity could not be registered");
+        return false;
+    }
+
+    if (result->replacedConnectionId.has_value()) {
+        const QString replacedId =
+            QString::fromStdString(*result->replacedConnectionId);
+        if (auto* replacedSocket = m_socketsByConnectionId.value(replacedId)) {
+            LogManager::instance().log(
+                QString("Receiver: %1 moved to a new connection; replacing %2")
+                    .arg(deviceName, replacedId)
+            );
+            replacedSocket->abort();
+        }
+    }
+
+    const QString peerAddress = socket->peerAddress().toString();
+    LogManager::instance().log(
+        QString("Receiver: Identified %1 (%2) from %3 [connection %4]")
+            .arg(deviceName)
+            .arg(deviceId)
+            .arg(peerAddress)
+            .arg(connectionId)
+    );
+    emit connectionEstablished(
+        deviceId,
+        deviceName,
+        connectionId,
+        peerAddress
+    );
+    emit statusChanged(
+        QString("Connected to %1 sender(s)")
+            .arg(static_cast<qulonglong>(
+                m_sessionRegistry.activeSessionCount()
+            ))
+    );
+    return true;
+}
+
+void NetworkListener::rejectUnidentifiedConnection(
+    QTcpSocket* socket,
+    const QString& reason
+) {
+    LogManager::instance().log(
+        QString("Receiver: Ignoring unidentified TCP connection from %1 — %2")
+            .arg(
+                socket
+                    ? socket->peerAddress().toString()
+                    : QStringLiteral("unknown")
+            )
+            .arg(reason)
+    );
+    if (socket) {
+        socket->abort();
+    }
+}
+
+void NetworkListener::handleVideoData(
+    QTcpSocket* socket,
+    const QByteArray& data,
+    bool hasPtsPrefix
+) {
+    const auto binding = m_sessionRegistry.sessionForConnection(
+        connectionIdFor(socket).toStdString()
+    );
+    if (!binding.has_value()) {
+        rejectUnidentifiedConnection(socket, "video arrived before sender identity");
+        return;
+    }
+
     static int frameCount = 0;
     frameCount++;
     if (frameCount <= 5 || frameCount % 300 == 0) {
@@ -255,20 +380,34 @@ void NetworkListener::handleVideoData(const QByteArray& data, bool hasPtsPrefix)
         LogManager::instance().log(QString("Video: frame %1, %2 bytes, pts=%3 [%4]")
                                    .arg(frameCount).arg(data.size()).arg(hasPtsPrefix).arg(hexPreview.trimmed()));
     }
-    if (m_decoder) {
-        m_decoder->decode(data, hasPtsPrefix);
-    }
+    emit videoDataReceived(
+        QString::fromStdString(binding->deviceId),
+        data,
+        hasPtsPrefix
+    );
 }
 
-void NetworkListener::handleAudioData(const QByteArray& data) {
+void NetworkListener::handleAudioData(
+    QTcpSocket* socket,
+    const QByteArray& data
+) {
+    const auto binding = m_sessionRegistry.sessionForConnection(
+        connectionIdFor(socket).toStdString()
+    );
+    if (!binding.has_value()) {
+        rejectUnidentifiedConnection(socket, "audio arrived before sender identity");
+        return;
+    }
+
     static int audioCount = 0;
     audioCount++;
     if (audioCount <= 3 || audioCount % 200 == 0) {
         qDebug() << "NetworkListener: Received audio data" << data.size() << "bytes (packet" << audioCount << ")";
     }
-    if (m_audioDecoder) {
-        m_audioDecoder->decode(data);
-    }
+    emit audioDataReceived(
+        QString::fromStdString(binding->deviceId),
+        data
+    );
 }
 
 void NetworkListener::onTcpDisconnected() {
@@ -276,18 +415,33 @@ void NetworkListener::onTcpDisconnected() {
     if (!socket) return;
 
     qDebug() << "TCP client disconnected:" << socket->peerAddress().toString();
+    const QString connectionId = connectionIdFor(socket);
+    const ReceiverCloseResult closed =
+        m_sessionRegistry.close(connectionId.toStdString());
     m_clients.removeAll(socket);
     m_tcpBuffers.remove(socket);
     m_connectionFormat.remove(socket);
+    m_connectionIds.remove(socket);
+    m_socketsByConnectionId.remove(connectionId);
     socket->deleteLater();
 
-    if (m_clients.isEmpty()) {
-        // Reset decoder so next connection starts fresh
-        if (m_decoder) {
-            m_decoder->reset();
-        }
-        emit connectionLost();
+    if (!closed.wasActive) {
+        LogManager::instance().log(
+            "Receiver: Unidentified/probe connection closed without affecting a window"
+        );
+        return;
+    }
+
+    emit connectionLost(QString::fromStdString(closed.deviceId));
+    if (m_sessionRegistry.activeSessionCount() == 0) {
         emit statusChanged("Waiting for connection...");
+    } else {
+        emit statusChanged(
+            QString("Connected to %1 sender(s)")
+                .arg(static_cast<qulonglong>(
+                    m_sessionRegistry.activeSessionCount()
+                ))
+        );
     }
 }
 
@@ -348,27 +502,35 @@ void NetworkListener::handleUdpPacket(const QByteArray& data) {
         if (diff > 1 && diff < 1000) {
             if (m_lastKeyframeRequest.msecsTo(now) > 2000) {
                 qDebug() << "Frame gap detected" << m_lastDecodedFrameId << "->" << frameId << "requesting IDR";
-                sendInputEvent(InputEvent(InputEventType::Command, 0, 0, kIDRRequestKeyCode));
+                const InputEvent request(
+                    InputEventType::Command,
+                    0,
+                    0,
+                    kIDRRequestKeyCode
+                );
+                for (auto* client : m_clients) {
+                    if (m_sessionRegistry.sessionForConnection(
+                            connectionIdFor(client).toStdString()
+                        ).has_value()) {
+                        writeInputEvent(client, request);
+                    }
+                }
                 m_lastKeyframeRequest = now;
             }
         }
         m_lastDecodedFrameId = frameId;
 
-        // Reassemble in chunk order
-        auto& entry = m_udpBuffer[frameId];
-        QList<uint16_t> keys = entry.chunks.keys();
-        std::sort(keys.begin(), keys.end());
-
-        QByteArray fullData;
-        for (uint16_t k : keys) {
-            fullData.append(entry.chunks[k]);
-        }
-
         m_udpBuffer.remove(frameId);
 
         // Unlock before decode (decode may be slow)
         lock.unlock();
-        handleVideoData(fullData);
+        static bool loggedMissingUdpIdentity = false;
+        if (!loggedMissingUdpIdentity) {
+            LogManager::instance().log(
+                "Receiver: UDP media ignored because it has no sender identity"
+            );
+            loggedMissingUdpIdentity = true;
+        }
         return;
     }
 
@@ -391,11 +553,21 @@ void NetworkListener::onHeartbeatTick() {
     QByteArray packet = heartbeat.toPacket();
 
     for (auto* client : m_clients) {
-        client->write(packet);
+        if (m_sessionRegistry.sessionForConnection(
+                connectionIdFor(client).toStdString()
+            ).has_value()) {
+            client->write(packet);
+        }
     }
 }
 
-void NetworkListener::sendInputEvent(const InputEvent& event) {
+void NetworkListener::writeInputEvent(
+    QTcpSocket* socket,
+    const InputEvent& event
+) {
+    if (!socket) {
+        return;
+    }
     bool isCritical = (event.type == InputEventType::LeftMouseDown ||
                        event.type == InputEventType::LeftMouseUp ||
                        event.type == InputEventType::RightMouseDown ||
@@ -407,9 +579,23 @@ void NetworkListener::sendInputEvent(const InputEvent& event) {
     int repeatCount = isCritical ? 3 : 1;
     QByteArray packet = event.toPacket();
 
-    for (auto* client : m_clients) {
-        for (int i = 0; i < repeatCount; i++) {
-            client->write(packet);
-        }
+    for (int i = 0; i < repeatCount; i++) {
+        socket->write(packet);
+    }
+}
+
+void NetworkListener::sendInputEvent(
+    const QString& deviceId,
+    const InputEvent& event
+) {
+    const auto binding =
+        m_sessionRegistry.sessionForDevice(deviceId.toStdString());
+    if (!binding.has_value()) {
+        return;
+    }
+    if (auto* socket = m_socketsByConnectionId.value(
+            QString::fromStdString(binding->connectionId)
+        )) {
+        writeInputEvent(socket, event);
     }
 }

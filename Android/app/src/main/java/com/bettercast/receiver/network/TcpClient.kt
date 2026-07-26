@@ -170,7 +170,7 @@ class TcpClient {
                     input.readFully(buffer)
 
                     // Check for type byte prefix (added with audio streaming)
-                    // 0x01 = video, 0x02 = audio
+                    // 0x01 = video, 0x02 = audio, 0x03 = sender identity
                     if (buffer.isNotEmpty()) {
                         val typeByte = buffer[0].toInt() and 0xFF
                         if (typeByte == 0x01 && buffer.size > 1) {
@@ -191,6 +191,9 @@ class TcpClient {
                                 Log.i(TAG, "Audio packet #$audioCount: ${audioData.size} bytes")
                             }
                             onAudioReceived?.invoke(audioData)
+                            continue
+                        } else if (typeByte == 0x03) {
+                            Log.i(TAG, "Sender identity received")
                             continue
                         }
                     }

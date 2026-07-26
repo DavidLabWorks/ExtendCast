@@ -1,15 +1,9 @@
 #include "MainWindow.h"
-#include "VideoDecoder.h"
-#include "VideoRenderer.h"
-#include "VideoWindow.h"
 #include "NetworkListener.h"
-#include "InputHandler.h"
 #include "InputEvent.h"
+#include "ReceiverSession.h"
 #include "ServiceDiscovery.h"
-#include "AudioDecoder.h"
-#include "AudioPlayer.h"
 #include "AdbHelper.h"
-#include "ServiceDiscovery.h"
 #ifdef ENABLE_SENDER
 #include "sender/SenderController.h"
 #include "sender/VirtualDisplayVDD.h"
@@ -48,6 +42,7 @@
 #include <QWindow>
 #include <QStyledItemDelegate>
 #include <QStyleOptionViewItem>
+#include <QtAlgorithms>
 #include <algorithm>
 #include <thread>
 
@@ -702,13 +697,8 @@ MainWindow::MainWindow(QWidget* parent)
     marker.close();
 
     // Create core components
-    m_decoder = new VideoDecoder(this);
-    m_renderer = new VideoRenderer();
     m_network = new NetworkListener(this);
-    m_inputHandler = new InputHandler(this);
     m_discovery = new ServiceDiscovery(this);
-    m_audioDecoder = new AudioDecoder(this);
-    m_audioPlayer = new AudioPlayer(this);
     m_adbHelper = new AdbHelper(this);
     m_updateManager = new QNetworkAccessManager(this);
     m_reconnectTimer = new QTimer(this);
@@ -747,33 +737,6 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::onReceiverDiscovered);
 #endif
 
-    // Wire up core components
-    m_network->setup(m_decoder, m_renderer, m_audioDecoder);
-
-    connect(m_audioDecoder, &AudioDecoder::pcmDecoded,
-            m_audioPlayer, &AudioPlayer::onPcmDecoded);
-
-    connect(m_decoder, &VideoDecoder::frameDecoded,
-            m_renderer, &VideoRenderer::onFrameDecoded);
-    connect(m_decoder, &VideoDecoder::dimensionsChanged,
-            m_renderer, [this](int w, int h) {
-                m_inputHandler->setContentSize(QSize(w, h));
-            });
-    connect(m_decoder, &VideoDecoder::keyframeNeeded,
-            this, [this]() {
-                // Request IDR from sender on decode errors (throttled to every 2s)
-                static QDateTime lastRequest;
-                if (lastRequest.msecsTo(QDateTime::currentDateTime()) > 2000) {
-                    LogManager::instance().log("Decoder: Requesting keyframe from sender (decode error recovery)");
-                    m_network->sendInputEvent(InputEvent(InputEventType::Command, 0, 0, kIDRRequestKeyCode));
-                    lastRequest = QDateTime::currentDateTime();
-                }
-            });
-
-    m_inputHandler->attach(m_renderer);
-    connect(m_inputHandler, &InputHandler::inputEvent,
-            m_network, &NetworkListener::sendInputEvent);
-
     connect(m_adbHelper, &AdbHelper::statusChanged,
             this, &MainWindow::onStatusChanged);
 
@@ -781,11 +744,12 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::onConnectionEstablished);
     connect(m_network, &NetworkListener::connectionLost,
             this, &MainWindow::onConnectionLost);
+    connect(m_network, &NetworkListener::videoDataReceived,
+            this, &MainWindow::onVideoDataReceived);
+    connect(m_network, &NetworkListener::audioDataReceived,
+            this, &MainWindow::onAudioDataReceived);
     connect(m_network, &NetworkListener::statusChanged,
             this, &MainWindow::onStatusChanged);
-
-    connect(m_renderer, &VideoRenderer::videoSizeChanged,
-            this, &MainWindow::onVideoSizeChanged);
 
     // LogManager
     connect(&LogManager::instance(), &LogManager::logAdded,
@@ -826,10 +790,8 @@ MainWindow::MainWindow(QWidget* parent)
 
 MainWindow::~MainWindow() {
     m_discovery->stopAdvertising();
-    delete m_videoWindow;
-    m_videoWindow = nullptr;
-    delete m_renderer;
-    m_renderer = nullptr;
+    qDeleteAll(m_receiverSessions);
+    m_receiverSessions.clear();
     // Clean exit — remove crash marker
     QString crashMarker = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/running.lock";
     QFile::remove(crashMarker);
@@ -1843,39 +1805,109 @@ void MainWindow::onAdbConnectClicked() {
     }).detach();
 }
 
-void MainWindow::onConnectionEstablished() {
+void MainWindow::onConnectionEstablished(
+    const QString& deviceId,
+    const QString& deviceName,
+    const QString& connectionId,
+    const QString& peerAddress
+) {
     if (m_connectBtn) {
         m_connectBtn->setEnabled(true);
     }
     m_reconnectTimer->stop();
-    LogManager::instance().log("Connection established — streaming video");
+    LogManager::instance().log(
+        QString("Connection established — %1 (%2) via %3 [connection %4]")
+            .arg(deviceName)
+            .arg(deviceId)
+            .arg(peerAddress)
+            .arg(connectionId)
+    );
 
-    // Open the video in a separate window
-    if (!m_videoWindow) {
-        m_videoWindow = new VideoWindow(m_renderer, m_inputHandler, this);
-        connect(m_videoWindow, &VideoWindow::windowClosed, this, [this]() {
-            LogManager::instance().log("Video window closed by user");
-        });
-    }
-    if (m_videoWindow) {
-        m_videoWindow->showForVideo();
+    ReceiverSession* session = m_receiverSessions.value(deviceId);
+    if (session) {
+        session->replaceConnection(connectionId, deviceName);
+        session->show();
+        LogManager::instance().log(
+            QString("Receiver: Reused window %1 for %2")
+                .arg(deviceId.left(8), deviceName)
+        );
+    } else {
+        session = new ReceiverSession(
+            deviceId,
+            deviceName,
+            connectionId,
+            this
+        );
+        m_receiverSessions[deviceId] = session;
+        connect(
+            session,
+            &ReceiverSession::inputEvent,
+            m_network,
+            &NetworkListener::sendInputEvent
+        );
+        connect(
+            session,
+            &ReceiverSession::keyframeRequested,
+            this,
+            [this](const QString& targetDeviceId) {
+                LogManager::instance().log(
+                    "Decoder: Requesting keyframe from " + targetDeviceId.left(8)
+                );
+                m_network->sendInputEvent(
+                    targetDeviceId,
+                    InputEvent(
+                        InputEventType::Command,
+                        0,
+                        0,
+                        kIDRRequestKeyCode
+                    )
+                );
+            }
+        );
+        connect(
+            session,
+            &ReceiverSession::windowClosed,
+            this,
+            [](const QString& closedDeviceId) {
+                LogManager::instance().log(
+                    "Video window closed by user [" + closedDeviceId.left(8) + "]"
+                );
+            }
+        );
+        session->show();
+        LogManager::instance().log(
+            QString("Receiver: Created isolated window %1 for %2")
+                .arg(deviceId.left(8), deviceName)
+        );
     }
 
-    QTimer::singleShot(200, this, [this]() {
-        if (!m_network->clients().isEmpty()) {
-            LogManager::instance().log("Receiver: Requesting keyframe for new connection");
-            m_network->sendInputEvent(InputEvent(InputEventType::Command, 0, 0, kIDRRequestKeyCode));
+    QTimer::singleShot(200, this, [this, deviceId]() {
+        if (m_receiverSessions.contains(deviceId)) {
+            LogManager::instance().log(
+                "Receiver: Requesting keyframe for " + deviceId.left(8)
+            );
+            m_network->sendInputEvent(
+                deviceId,
+                InputEvent(
+                    InputEventType::Command,
+                    0,
+                    0,
+                    kIDRRequestKeyCode
+                )
+            );
         }
     });
 
-    m_recvStatusLabel->setText("Connected — video window opened");
+    m_recvStatusLabel->setText(
+        QString("Connected — %1 Receiving window(s)")
+            .arg(m_receiverSessions.size())
+    );
     m_recvStatusLabel->setStyleSheet("font-size: 15px; font-weight: bold; color: #4caf50;");
 
     // Reset reconnect counter only after video actually starts flowing
     // (delayed so brief connect-then-disconnect during reconnect doesn't reset it)
-    QTimer::singleShot(3000, this, [this]() {
-        // Only reset if we're still connected (not in a reconnect cycle)
-        if (!m_network->clients().isEmpty()) {
+    QTimer::singleShot(3000, this, [this, deviceId]() {
+        if (m_receiverSessions.contains(deviceId)) {
             m_reconnectAttempts = 0;
         }
     });
@@ -1895,12 +1927,20 @@ void MainWindow::onConnectionEstablished() {
     }
 }
 
-void MainWindow::onConnectionLost() {
+void MainWindow::onConnectionLost(const QString& deviceId) {
     if (m_connectBtn) {
         m_connectBtn->setEnabled(true);
     }
 
-    if (m_adbHelper->wasAdbConnection()) {
+    if (auto* session = m_receiverSessions.take(deviceId)) {
+        LogManager::instance().log(
+            QString("Receiver: Closing isolated window %1 for %2")
+                .arg(deviceId.left(8), session->deviceName())
+        );
+        delete session;
+    }
+
+    if (m_adbHelper->wasAdbConnection() && m_receiverSessions.isEmpty()) {
         // Don't reset m_reconnectAttempts here — if the reconnect itself
         // succeeds briefly then disconnects, we'd loop forever.
         // The counter only resets after a sustained connection (3s in onConnectionEstablished).
@@ -1912,14 +1952,40 @@ void MainWindow::onConnectionLost() {
             attemptAdbReconnect();
             m_reconnectTimer->start();
         });
-    } else {
-        // Close video window when non-ADB connection is lost
-        if (m_videoWindow && m_videoWindow->isVisible()) {
-            m_videoWindow->close();
-        }
+    } else if (m_receiverSessions.isEmpty()) {
         m_recvStatusLabel->setText("Connection lost — still listening on port 51820");
         m_recvStatusLabel->setStyleSheet("font-size: 15px; font-weight: bold; color: orange;");
-        LogManager::instance().log("Connection lost");
+        LogManager::instance().log("Connection lost [" + deviceId.left(8) + "]");
+    } else {
+        m_recvStatusLabel->setText(
+            QString("Connected — %1 Receiving window(s)")
+                .arg(m_receiverSessions.size())
+        );
+        m_recvStatusLabel->setStyleSheet("font-size: 15px; font-weight: bold; color: #4caf50;");
+        LogManager::instance().log(
+            QString("Connection lost [%1]; %2 sender(s) remain")
+                .arg(deviceId.left(8))
+                .arg(m_receiverSessions.size())
+        );
+    }
+}
+
+void MainWindow::onVideoDataReceived(
+    const QString& deviceId,
+    const QByteArray& data,
+    bool hasPtsPrefix
+) {
+    if (auto* session = m_receiverSessions.value(deviceId)) {
+        session->decodeVideo(data, hasPtsPrefix);
+    }
+}
+
+void MainWindow::onAudioDataReceived(
+    const QString& deviceId,
+    const QByteArray& data
+) {
+    if (auto* session = m_receiverSessions.value(deviceId)) {
+        session->decodeAudio(data);
     }
 }
 
@@ -1971,6 +2037,8 @@ void MainWindow::onReceiverListeningToggled(bool checked) {
     } else {
         m_discovery->stopAdvertising();
         m_network->stop();
+        qDeleteAll(m_receiverSessions);
+        m_receiverSessions.clear();
         m_receiverListening = false;
         if (m_recvStatusLabel) {
             m_recvStatusLabel->setText("Receiver is not listening");
@@ -1997,13 +2065,6 @@ void MainWindow::onReceiverAutoStartToggled(bool checked) {
     settings.setValue("receiverAutoStartEnabled", checked);
     settings.sync();
     LogManager::instance().log(QString("Receiver start-on-launch %1").arg(checked ? "enabled" : "disabled"));
-}
-
-void MainWindow::onVideoSizeChanged(QSize size) {
-    if (size.width() > 0 && size.height() > 0 && m_videoWindow) {
-        LogManager::instance().log(QString("Video size: %1x%2").arg(size.width()).arg(size.height()));
-        m_videoWindow->resizeToFitVideo(size.width(), size.height());
-    }
 }
 
 void MainWindow::attemptAdbReconnect() {

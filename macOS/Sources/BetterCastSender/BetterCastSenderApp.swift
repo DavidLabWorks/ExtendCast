@@ -1062,9 +1062,7 @@ private struct SidebarIcon: View {
     }
 
     private func sharedIconURL(named name: String) -> URL? {
-        Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "SidebarIcons")
-            ?? Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Resources/SidebarIcons")
-            ?? Bundle.module.url(forResource: name, withExtension: "svg")
+        Bundle.main.url(forResource: name, withExtension: "svg", subdirectory: "SidebarIcons")
     }
 
     private func fallbackSystemImageName(for name: String) -> String {
@@ -1527,7 +1525,7 @@ struct DetailPanelView: View {
             Section("About") {
                 LabeledContent("Version") {
                     HStack(spacing: 8) {
-                        Text("ExtendCast \(UpdateChecker.currentVersion)")
+                        Text("ExtendCast \(UpdateChecker.displayVersion)")
                             .foregroundStyle(.secondary)
 
                         Button {
@@ -2823,6 +2821,12 @@ struct DiscoveredDeviceView: View {
                         Text(connectCardDescription)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if selectedModeIsAvailable {
+                            Text("Endpoint: \(connectEndpointDescription ?? "Resolving…")")
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
                     }
                     Spacer()
                     Button {
@@ -2907,6 +2911,13 @@ struct DiscoveredDeviceView: View {
         }
         return client.interfacePreference.connectDescription
     }
+
+    private var connectEndpointDescription: String? {
+        client.connectionEndpointDescription(
+            for: service,
+            preference: client.interfacePreference
+        )
+    }
 }
 
 // MARK: - Info Tip
@@ -2989,20 +3000,55 @@ struct DiscoveredNetworkInterface: Hashable {
     }
 }
 
+struct DiscoveredServiceEndpoint {
+    let endpoint: NWEndpoint
+    let discoveryInterfaces: [DiscoveredNetworkInterface]
+
+    func supports(_ preference: NetworkInterfacePreference) -> Bool {
+        switch preference {
+        case .auto:
+            return true
+        case .routerOnly:
+            return discoveryInterfaces.contains { $0.type == .wifi }
+        case .ethernet:
+            return discoveryInterfaces.contains(where: \.isEthernet)
+        case .thunderboltBridge:
+            return discoveryInterfaces.contains(where: \.isThunderboltBridge)
+        case .wiredCable:
+            return discoveryInterfaces.contains {
+                $0.isEthernet || $0.isThunderboltBridge
+            }
+        case .p2pOnly:
+            return discoveryInterfaces.contains {
+                let name = $0.name.lowercased()
+                return name == "awdl0" || name == "llw0"
+            }
+        }
+    }
+}
+
 struct DiscoveredService: Identifiable {
     let id = UUID()
     let name: String
     let endpoint: NWEndpoint
     let discoveryInterfaces: [DiscoveredNetworkInterface]
+    let connectionEndpoints: [DiscoveredServiceEndpoint]
 
     init(
         name: String,
         endpoint: NWEndpoint,
-        discoveryInterfaces: [DiscoveredNetworkInterface] = []
+        discoveryInterfaces: [DiscoveredNetworkInterface] = [],
+        connectionEndpoints: [DiscoveredServiceEndpoint]? = nil
     ) {
         self.name = name
         self.endpoint = endpoint
         self.discoveryInterfaces = discoveryInterfaces
+        self.connectionEndpoints = connectionEndpoints ?? [
+            DiscoveredServiceEndpoint(
+                endpoint: endpoint,
+                discoveryInterfaces: discoveryInterfaces
+            ),
+        ]
     }
 
     var supportsEthernetConnection: Bool {
@@ -3025,43 +3071,305 @@ struct DiscoveredService: Identifiable {
     }
 
     func mergingDiscoveryInterfaces(from other: DiscoveredService) -> DiscoveredService {
-        DiscoveredService(
+        var mergedEndpoints = connectionEndpoints
+        for candidate in other.connectionEndpoints where
+            !mergedEndpoints.contains(where: {
+                $0.endpoint == candidate.endpoint
+                    && $0.discoveryInterfaces == candidate.discoveryInterfaces
+            }) {
+            mergedEndpoints.append(candidate)
+        }
+
+        return DiscoveredService(
             name: name,
-            endpoint: endpoint,
+            endpoint: Self.unscopedServiceEndpoint(endpoint),
             discoveryInterfaces: Array(
                 Set(discoveryInterfaces + other.discoveryInterfaces)
-            ).sorted { $0.name < $1.name }
+            ).sorted { $0.name < $1.name },
+            connectionEndpoints: mergedEndpoints
+        )
+    }
+
+    func connectionEndpoint(
+        for preference: NetworkInterfacePreference
+    ) -> NWEndpoint {
+        connectionEndpoints.first { $0.supports(preference) }?.endpoint
+            ?? endpoint
+    }
+
+    func hasConnectionEndpoint(
+        for preference: NetworkInterfacePreference
+    ) -> Bool {
+        connectionEndpoints.contains { $0.supports(preference) }
+    }
+
+    var infrastructureConnectionEndpoint: NWEndpoint {
+        connectionEndpoints.first { $0.supports(.routerOnly) }?.endpoint
+            ?? connectionEndpoints.first { $0.supports(.ethernet) }?.endpoint
+            ?? endpoint
+    }
+
+    private static func unscopedServiceEndpoint(
+        _ endpoint: NWEndpoint
+    ) -> NWEndpoint {
+        guard case .service(let name, let type, let domain, _) = endpoint else {
+            return endpoint
+        }
+        return .service(
+            name: name,
+            type: type,
+            domain: domain,
+            interface: nil
         )
     }
 }
 
+struct BonjourResolvedRoute {
+    let endpoint: NWEndpoint
+    let interfaceNames: [String]
+    let usesWiFi: Bool
+    let usesWiredEthernet: Bool
+
+    init(
+        endpoint: NWEndpoint,
+        interfaceNames: [String],
+        usesWiFi: Bool,
+        usesWiredEthernet: Bool
+    ) {
+        self.endpoint = endpoint
+        self.interfaceNames = interfaceNames
+        self.usesWiFi = usesWiFi
+        self.usesWiredEthernet = usesWiredEthernet
+    }
+
+    private var hostDescription: String? {
+        guard case .hostPort(let host, _) = endpoint else {
+            return nil
+        }
+        return String(describing: host).lowercased()
+    }
+
+    var scopedInterfaceName: String? {
+        guard let hostDescription,
+              let separator = hostDescription.lastIndex(of: "%") else {
+            return nil
+        }
+        return String(hostDescription[hostDescription.index(after: separator)...])
+    }
+
+    private var isThunderboltRoute: Bool {
+        guard !usesWiFi else { return false }
+        if let scopedInterfaceName {
+            return scopedInterfaceName.contains("bridge")
+                || scopedInterfaceName.contains("thunderbolt")
+        }
+        return false
+    }
+
+    func supports(_ preference: NetworkInterfacePreference) -> Bool {
+        switch preference {
+        case .auto:
+            return true
+        case .routerOnly:
+            return usesWiFi
+        case .ethernet:
+            return usesWiredEthernet && !isThunderboltRoute
+        case .thunderboltBridge:
+            return isThunderboltRoute
+        case .wiredCable:
+            return usesWiredEthernet && !usesWiFi
+        case .p2pOnly:
+            return interfaceNames.contains {
+                let name = $0.lowercased()
+                return name == "awdl0" || name == "llw0"
+            }
+        }
+    }
+}
+
+enum BonjourConnectionPolicy {
+    static func prefersIPv4(receiverName: String) -> Bool {
+        receiverName.lowercased().contains("windows")
+    }
+
+    static func applyLocalNetworkPolicy(
+        to parameters: NWParameters,
+        receiverName: String
+    ) {
+        // Bonjour receivers are always on the local network. A system proxy can
+        // accept the TCP probe on loopback and create a false-positive Available
+        // device while the real receiver remains unreachable.
+        parameters.preferNoProxies = true
+
+        guard prefersIPv4(receiverName: receiverName),
+              let ipOptions =
+                parameters.defaultProtocolStack.internetProtocol
+                    as? NWProtocolIP.Options else {
+            return
+        }
+        ipOptions.version = .v4
+    }
+}
+
+struct BonjourReachabilityResult {
+    let isReachable: Bool
+    let resolvedRoutes: [BonjourResolvedRoute]
+
+    init(
+        isReachable: Bool,
+        resolvedRoute: BonjourResolvedRoute?
+    ) {
+        self.isReachable = isReachable
+        resolvedRoutes = resolvedRoute.map { [$0] } ?? []
+    }
+
+    init(
+        isReachable: Bool,
+        resolvedRoutes: [BonjourResolvedRoute]
+    ) {
+        self.isReachable = isReachable
+        self.resolvedRoutes = resolvedRoutes
+    }
+
+    var resolvedRoute: BonjourResolvedRoute? {
+        resolvedRoutes.first
+    }
+
+    static let reachable = BonjourReachabilityResult(
+        isReachable: true,
+        resolvedRoute: nil
+    )
+    static let unreachable = BonjourReachabilityResult(
+        isReachable: false,
+        resolvedRoute: nil
+    )
+}
+
 typealias BonjourReachabilityProbe = (
     DiscoveredService,
-    @escaping (Bool) -> Void
+    @escaping (BonjourReachabilityResult) -> Void
 ) -> () -> Void
+
+private enum ConnectDiagnostics {
+    static let tag = "[DEBUG-CONNECT-7F3A]"
+
+    static func log(_ message: String) {
+        LogManager.shared.log("\(tag) \(message)")
+    }
+
+    static func stateSummary(_ state: NWConnection.State) -> String {
+        switch state {
+        case .setup:
+            return "setup"
+        case .preparing:
+            return "preparing"
+        case .ready:
+            return "ready"
+        case .waiting(let error):
+            return "waiting error=\(error)"
+        case .failed(let error):
+            return "failed error=\(error)"
+        case .cancelled:
+            return "cancelled"
+        @unknown default:
+            return "unknown"
+        }
+    }
+
+    static func pathSummary(_ path: NWPath?) -> String {
+        guard let path else { return "path=nil" }
+        let interfaces = path.availableInterfaces.map {
+            "\($0.name):\($0.type)"
+        }.joined(separator: ",")
+        return [
+            "status=\(path.status)",
+            "local=\(String(describing: path.localEndpoint))",
+            "remote=\(String(describing: path.remoteEndpoint))",
+            "interfaces=[\(interfaces)]",
+            "usesWiFi=\(path.usesInterfaceType(.wifi))",
+            "usesWired=\(path.usesInterfaceType(.wiredEthernet))",
+            "usesOther=\(path.usesInterfaceType(.other))",
+            "ipv4=\(path.supportsIPv4)",
+            "ipv6=\(path.supportsIPv6)",
+            "dns=\(path.supportsDNS)",
+            "expensive=\(path.isExpensive)",
+            "constrained=\(path.isConstrained)",
+        ].joined(separator: " ")
+    }
+}
 
 private final class BonjourTCPReachabilityCheck {
     private let connection: NWConnection
-    private let completion: (Bool) -> Void
+    private let completion: (BonjourReachabilityResult) -> Void
+    private let service: DiscoveredService
+    private let startedAt = Date()
     private let lock = NSLock()
     private var isFinished = false
 
-    init(service: DiscoveredService, completion: @escaping (Bool) -> Void) {
+    init(
+        service: DiscoveredService,
+        completion: @escaping (BonjourReachabilityResult) -> Void
+    ) {
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.connectionTimeout = 2
         let parameters = NWParameters(tls: nil, tcp: tcpOptions)
         parameters.includePeerToPeer = true
+        if service.supportsWiFiConnection
+            && !service.supportsThunderboltConnection {
+            parameters.requiredInterfaceType = .wifi
+            parameters.includePeerToPeer = false
+        } else if service.supportsThunderboltConnection
+                    && !service.supportsWiFiConnection {
+            parameters.prohibitedInterfaceTypes = [.loopback, .wifi]
+            parameters.includePeerToPeer = false
+        }
+        BonjourConnectionPolicy.applyLocalNetworkPolicy(
+            to: parameters,
+            receiverName: service.name
+        )
         connection = NWConnection(to: service.endpoint, using: parameters)
+        self.service = service
         self.completion = completion
     }
 
     func start() {
+        ConnectDiagnostics.log(
+            "probe start service=\(service.name) endpoint=\(service.endpoint) " +
+            "preferIPv4=\(BonjourConnectionPolicy.prefersIPv4(receiverName: service.name)) " +
+            "preferNoProxies=true"
+        )
         connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            let elapsed = Date().timeIntervalSince(self.startedAt)
+            ConnectDiagnostics.log(
+                String(
+                    format: "probe state service=%@ elapsed=%.3fs state=%@ %@",
+                    self.service.name,
+                    elapsed,
+                    ConnectDiagnostics.stateSummary(state),
+                    ConnectDiagnostics.pathSummary(self.connection.currentPath)
+                )
+            )
             switch state {
             case .ready:
-                self?.finish(isReachable: true)
+                let path = self.connection.currentPath
+                let pathInterfaces = path?.availableInterfaces ?? []
+                let resolvedRoute = path?.remoteEndpoint.map {
+                    BonjourResolvedRoute(
+                        endpoint: $0,
+                        interfaceNames: pathInterfaces.map(\.name),
+                        usesWiFi: path?.usesInterfaceType(.wifi) ?? false,
+                        usesWiredEthernet: path?.usesInterfaceType(.wiredEthernet) ?? false
+                    )
+                }
+                self.finish(
+                    result: BonjourReachabilityResult(
+                        isReachable: true,
+                        resolvedRoute: resolvedRoute
+                    )
+                )
             case .waiting, .failed:
-                self?.finish(isReachable: false)
+                self.finish(result: .unreachable)
             default:
                 break
             }
@@ -3069,7 +3377,11 @@ private final class BonjourTCPReachabilityCheck {
         connection.start(queue: .global(qos: .utility))
 
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.5) {
-            self.finish(isReachable: false)
+            ConnectDiagnostics.log(
+                "probe watchdog service=\(self.service.name) elapsed=2.500s " +
+                ConnectDiagnostics.pathSummary(self.connection.currentPath)
+            )
+            self.finish(result: .unreachable)
         }
     }
 
@@ -3080,12 +3392,16 @@ private final class BonjourTCPReachabilityCheck {
         lock.unlock()
 
         if shouldCancel {
+            ConnectDiagnostics.log(
+                "probe cancel service=\(service.name) " +
+                ConnectDiagnostics.pathSummary(connection.currentPath)
+            )
             connection.stateUpdateHandler = nil
             connection.cancel()
         }
     }
 
-    private func finish(isReachable: Bool) {
+    private func finish(result: BonjourReachabilityResult) {
         lock.lock()
         guard !isFinished else {
             lock.unlock()
@@ -3096,7 +3412,101 @@ private final class BonjourTCPReachabilityCheck {
 
         connection.stateUpdateHandler = nil
         connection.cancel()
-        completion(isReachable)
+        ConnectDiagnostics.log(
+            "probe finish service=\(service.name) reachable=\(result.isReachable) " +
+            "resolved=\(String(describing: result.resolvedRoute?.endpoint))"
+        )
+        completion(result)
+    }
+}
+
+private final class BonjourTCPReachabilitySweep {
+    private let lock = NSLock()
+    private let completion: (BonjourReachabilityResult) -> Void
+    private var checks: [BonjourTCPReachabilityCheck] = []
+    private var remainingChecks = 0
+    private var anyRouteWasReachable = false
+    private var resolvedRoutes: [BonjourResolvedRoute] = []
+    private var isFinished = false
+
+    init(
+        service: DiscoveredService,
+        completion: @escaping (BonjourReachabilityResult) -> Void
+    ) {
+        self.completion = completion
+        let candidates = service.connectionEndpoints.isEmpty
+            ? [
+                DiscoveredServiceEndpoint(
+                    endpoint: service.endpoint,
+                    discoveryInterfaces: service.discoveryInterfaces
+                ),
+            ]
+            : service.connectionEndpoints
+        remainingChecks = candidates.count
+        checks = candidates.map { candidate in
+            let candidateService = DiscoveredService(
+                name: service.name,
+                endpoint: candidate.endpoint,
+                discoveryInterfaces: candidate.discoveryInterfaces
+            )
+            return BonjourTCPReachabilityCheck(
+                service: candidateService
+            ) { [weak self] result in
+                self?.received(result)
+            }
+        }
+    }
+
+    func start() {
+        checks.forEach { $0.start() }
+    }
+
+    func cancel() {
+        finish(result: nil)
+    }
+
+    private func received(_ result: BonjourReachabilityResult) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        if result.isReachable {
+            anyRouteWasReachable = true
+            for route in result.resolvedRoutes where
+                !resolvedRoutes.contains(where: {
+                    $0.endpoint == route.endpoint
+                }) {
+                resolvedRoutes.append(route)
+            }
+        }
+        remainingChecks -= 1
+        let allFinished = remainingChecks == 0
+        let finalResult = BonjourReachabilityResult(
+            isReachable: anyRouteWasReachable,
+            resolvedRoutes: resolvedRoutes
+        )
+        lock.unlock()
+        if allFinished {
+            finish(result: finalResult)
+        }
+    }
+
+    private func finish(result: BonjourReachabilityResult?) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        isFinished = true
+        let activeChecks = checks
+        checks.removeAll()
+        lock.unlock()
+
+        activeChecks.forEach { $0.cancel() }
+        if let result {
+            completion(result)
+        }
     }
 }
 
@@ -3314,6 +3724,161 @@ final class TransferStats: ObservableObject {
 }
 
 class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegate {
+    static let tcpConnectionTimeout = 10
+    static let availableConnectionAttemptTimeout: TimeInterval = 15
+
+    static func preferredBonjourEndpoint(
+        for preference: NetworkInterfacePreference,
+        resolvedRoute: BonjourResolvedRoute?
+    ) -> NWEndpoint? {
+        guard let resolvedRoute, resolvedRoute.supports(preference) else {
+            return nil
+        }
+        return resolvedRoute.endpoint
+    }
+
+    static func preferredBonjourEndpoint(
+        for preference: NetworkInterfacePreference,
+        resolvedRoutes: [BonjourResolvedRoute]
+    ) -> NWEndpoint? {
+        resolvedRoutes.first { $0.supports(preference) }?.endpoint
+    }
+
+    static func preferredBonjourRoute(
+        for preference: NetworkInterfacePreference,
+        resolvedRoutes: [BonjourResolvedRoute]
+    ) -> BonjourResolvedRoute? {
+        resolvedRoutes.first { $0.supports(preference) }
+    }
+
+    static func preferredConnectionEndpoint(
+        for preference: NetworkInterfacePreference,
+        resolvedRoute: BonjourResolvedRoute?,
+        discoveredEndpoint: NWEndpoint,
+        thunderboltPeerHost: String?,
+        thunderboltInterfaceName: String? = nil,
+        discoveredEndpointMatchesPreference: Bool = false
+    ) -> NWEndpoint {
+        let cachedEndpoint = preferredBonjourEndpoint(
+            for: preference,
+            resolvedRoute: resolvedRoute
+        )
+        let verifiedEndpoint =
+            preference == .auto
+                && resolvedRoute?.supports(.thunderboltBridge) == true
+                && thunderboltInterfaceName == nil
+                    ? nil
+                    : cachedEndpoint
+        if preference == .thunderboltBridge {
+            if discoveredEndpointMatchesPreference {
+                return discoveredEndpoint
+            }
+            if let thunderboltInterfaceName {
+                switch discoveredEndpoint {
+                case .hostPort(let host, _):
+                    if String(describing: host).lowercased()
+                        .hasSuffix("%\(thunderboltInterfaceName.lowercased())") {
+                        return discoveredEndpoint
+                    }
+                case .service(_, _, _, let interface):
+                    if interface?.name.lowercased()
+                        == thunderboltInterfaceName.lowercased() {
+                        return discoveredEndpoint
+                    }
+                default:
+                    break
+                }
+            }
+            if let thunderboltPeerHost,
+               let thunderboltInterfaceName,
+               let port = NWEndpoint.Port(rawValue: 51820) {
+                if let verifiedEndpoint,
+                   case .hostPort(let verifiedHost, _) = verifiedEndpoint {
+                    let verifiedHostText = String(describing: verifiedHost)
+                    let verifiedAddress =
+                        verifiedHostText.split(separator: "%", maxSplits: 1)
+                            .first
+                            .map(String.init)
+                    let verifiedScope =
+                        verifiedHostText.split(separator: "%", maxSplits: 1)
+                            .dropFirst()
+                            .first
+                            .map(String.init)
+                    if verifiedAddress == thunderboltPeerHost,
+                       verifiedScope == thunderboltInterfaceName.lowercased() {
+                        return verifiedEndpoint
+                    }
+                }
+                return .hostPort(
+                    host: NWEndpoint.Host(
+                        "\(thunderboltPeerHost)%\(thunderboltInterfaceName)"
+                    ),
+                    port: port
+                )
+            }
+            if let verifiedEndpoint {
+                return verifiedEndpoint
+            }
+            if let thunderboltPeerHost,
+               let port = NWEndpoint.Port(rawValue: 51820) {
+                return .hostPort(
+                    host: NWEndpoint.Host(thunderboltPeerHost),
+                    port: port
+                )
+            }
+        }
+        return verifiedEndpoint ?? discoveredEndpoint
+    }
+
+    static func infrastructureFallbackEndpoint(
+        shouldFallback: Bool,
+        resolvedEndpoint: NWEndpoint?,
+        discoveredEndpoint: NWEndpoint
+    ) -> NWEndpoint {
+        shouldFallback
+            ? discoveredEndpoint
+            : resolvedEndpoint ?? discoveredEndpoint
+    }
+
+    static func endpointDescription(_ endpoint: NWEndpoint) -> String? {
+        guard case .hostPort(let host, let port) = endpoint else {
+            return nil
+        }
+        let rawHostDescription = String(describing: host)
+        let hostDescription: String
+        if rawHostDescription.contains("."),
+           !rawHostDescription.hasPrefix("169.254."),
+           let scopeSeparator = rawHostDescription.lastIndex(of: "%") {
+            hostDescription = String(
+                rawHostDescription[..<scopeSeparator]
+            )
+        } else {
+            hostDescription = rawHostDescription
+        }
+        let formattedHost =
+            hostDescription.contains(":") && !hostDescription.hasPrefix("[")
+                ? "[\(hostDescription)]"
+                : hostDescription
+        return "\(formattedHost):\(port.rawValue)"
+    }
+
+    static func bonjourReceiverIdentity(_ name: String) -> String {
+        let withoutNumericSuffix = name
+            .replacingOccurrences(
+                of: #" \(\d+\)$"#,
+                with: "",
+                options: .regularExpression
+            )
+        return withoutNumericSuffix
+            .replacingOccurrences(
+                of: #" P2P$"#,
+                with: "",
+                options: .regularExpression
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
     private enum PreferenceKey {
         static let resolutionWidth = "senderResolutionWidth"
         static let resolutionHeight = "senderResolutionHeight"
@@ -3346,10 +3911,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private let focusedBonjourReachabilityRecheckInterval: TimeInterval
     private let bonjourReachabilityProbe: BonjourReachabilityProbe
     private let localConnectionAddressProvider: () -> [ReceiverConnectionAddress]
-    private let thunderboltPeerAddressProvider: () -> [String]
+    private let thunderboltPeerRouteProvider:
+        () -> [ThunderboltPeerAddressProvider.PeerRoute]
     private var focusedBonjourServiceName: String?
     private var browsedTCPServicesByName: [String: DiscoveredService] = [:]
     private var reachableTCPServiceNames: Set<String> = []
+    private var resolvedBonjourRoutesByName:
+        [String: [BonjourResolvedRoute]] = [:]
     private var bonjourReachabilityProbeIDs: [String: UUID] = [:]
     private var bonjourReachabilityProbeCancellations: [String: () -> Void] = [:]
     private var bonjourReachabilityRecheckWorkItems: [String: DispatchWorkItem] = [:]
@@ -3549,7 +4117,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 var servicesByName: [String: DiscoveredService] = [:]
                 for result in results {
                     if case .service(let name, _, _, _) = result.endpoint {
-                        servicesByName[name] = DiscoveredService(
+                        let discoveredService = DiscoveredService(
                             name: name,
                             endpoint: result.endpoint,
                             discoveryInterfaces: result.interfaces.map {
@@ -3559,6 +4127,14 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                                 )
                             }
                         )
+                        if let existing = servicesByName[name] {
+                            servicesByName[name] =
+                                existing.mergingDiscoveryInterfaces(
+                                    from: discoveredService
+                                )
+                        } else {
+                            servicesByName[name] = discoveredService
+                        }
                     }
                 }
                 self.updateDiscoveredServices(
@@ -3584,9 +4160,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     private func updateBrowsedTCPServices(_ services: [DiscoveredService]) {
-        let servicesByName = Dictionary(
-            uniqueKeysWithValues: services.map { ($0.name, $0) }
-        )
+        var servicesByName: [String: DiscoveredService] = [:]
+        for service in services {
+            let existing = servicesByName[service.name]
+            servicesByName[service.name] =
+                existing?.mergingDiscoveryInterfaces(from: service)
+                    ?? service
+        }
         let removedNames = Set(browsedTCPServicesByName.keys)
             .subtracting(servicesByName.keys)
 
@@ -3595,6 +4175,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             bonjourReachabilityProbeIDs.removeValue(forKey: name)
             bonjourReachabilityRecheckWorkItems.removeValue(forKey: name)?.cancel()
             reachableTCPServiceNames.remove(name)
+            resolvedBonjourRoutesByName.removeValue(forKey: name)
         }
 
         browsedTCPServicesByName = servicesByName
@@ -3620,13 +4201,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         let probeID = UUID()
         bonjourReachabilityProbeIDs[name] = probeID
-        let cancellation = bonjourReachabilityProbe(service) { [weak self] isReachable in
+        let cancellation = bonjourReachabilityProbe(service) { [weak self] result in
             let finish: () -> Void = {
                 guard let self else { return }
                 self.finishBonjourReachabilityProbe(
                     name: name,
                     probeID: probeID,
-                    isReachable: isReachable
+                    result: result
                 )
             }
             if Thread.isMainThread {
@@ -3646,18 +4227,28 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private func finishBonjourReachabilityProbe(
         name: String,
         probeID: UUID,
-        isReachable: Bool
+        result: BonjourReachabilityResult
     ) {
         guard bonjourReachabilityProbeIDs[name] == probeID else { return }
 
         bonjourReachabilityProbeIDs.removeValue(forKey: name)
         bonjourReachabilityProbeCancellations.removeValue(forKey: name)?()
 
-        if isReachable {
+        if result.isReachable {
             reachableTCPServiceNames.insert(name)
+            if !result.resolvedRoutes.isEmpty {
+                resolvedBonjourRoutesByName[name] = result.resolvedRoutes
+                let routeSummary = result.resolvedRoutes.map {
+                    "\($0.endpoint) via \($0.interfaceNames.joined(separator: ","))"
+                }.joined(separator: "; ")
+                LogManager.shared.log(
+                    "Sender: Resolved \(name) routes: \(routeSummary)"
+                )
+            }
             publishReachableTCPServices()
         } else {
             reachableTCPServiceNames.remove(name)
+            resolvedBonjourRoutesByName.removeValue(forKey: name)
             removeDiscoveredServiceImmediately(name, for: "TCP")
         }
 
@@ -3695,7 +4286,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     private func isReceiverConnected(_ name: String) -> Bool {
-        connectedServices.contains { $0.name == name }
+        let identity = Self.bonjourReceiverIdentity(name)
+        return connectedServices.contains {
+            Self.bonjourReceiverIdentity($0.name) == identity
+        }
     }
 
     private func refreshBonjourReachabilityProbeScheduling() {
@@ -3866,8 +4460,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         localConnectionAddressProvider: @escaping () -> [ReceiverConnectionAddress] = {
             ReceiverConnectionAddressProvider.availableAddresses(port: 51820)
         },
-        thunderboltPeerAddressProvider: @escaping () -> [String] = {
-            ThunderboltPeerAddressProvider.availableIPv4Addresses()
+        thunderboltPeerRouteProvider:
+            @escaping () -> [ThunderboltPeerAddressProvider.PeerRoute] = {
+                ThunderboltPeerAddressProvider.availablePeerRoutes()
         }
     ) {
         self.discoveryRemovalDelay = discoveryRemovalDelay
@@ -3876,9 +4471,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         self.focusedBonjourReachabilityRecheckInterval =
             focusedBonjourReachabilityRecheckInterval
         self.localConnectionAddressProvider = localConnectionAddressProvider
-        self.thunderboltPeerAddressProvider = thunderboltPeerAddressProvider
+        self.thunderboltPeerRouteProvider = thunderboltPeerRouteProvider
         self.bonjourReachabilityProbe = bonjourReachabilityProbe ?? { service, completion in
-            let check = BonjourTCPReachabilityCheck(
+            let check = BonjourTCPReachabilitySweep(
                 service: service,
                 completion: completion
             )
@@ -3958,33 +4553,50 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             }
         }
 
-        LogManager.shared.log("Sender: App Starting")
+        LogManager.shared.log(
+            "Sender: App Starting — ExtendCast \(UpdateChecker.displayVersion)"
+        )
+        ConnectDiagnostics.log(
+            "app start version=\(UpdateChecker.displayVersion) " +
+            "os=\(ProcessInfo.processInfo.operatingSystemVersionString)"
+        )
 
         // We can't monitor recursively in init easily, but we can start it.
         interfaceMonitor.pathUpdateHandler = { [weak self] path in
-            self?.cachedNetworkInterfacesByName = Dictionary(
-                path.availableInterfaces.map {
-                    ($0.name.lowercased(), $0)
-                },
-                uniquingKeysWith: { first, _ in first }
-            )
-            for interface in path.availableInterfaces {
-                // Cache AWDL
-                if interface.name.contains("awdl") || interface.name.contains("llw") {
-                    let isNew = (self?.cachedAWDLInterface == nil)
-                    self?.cachedAWDLInterface = interface
+            let interfaces = path.availableInterfaces
+            DispatchQueue.main.async { [weak self] in
+                self?.cachedNetworkInterfacesByName = Dictionary(
+                    interfaces.map {
+                        ($0.name.lowercased(), $0)
+                    },
+                    uniquingKeysWith: { first, _ in first }
+                )
+                for interface in interfaces {
+                    // Cache AWDL
+                    if interface.name.contains("awdl") || interface.name.contains("llw") {
+                        let isNew = (self?.cachedAWDLInterface == nil)
+                        self?.cachedAWDLInterface = interface
 
-                    if isNew {
-                         LogManager.shared.log("Network: Found P2P Interface: \(interface.name) (\(interface.type))")
+                        if isNew {
+                            LogManager.shared.log(
+                                "Network: Found P2P Interface: \(interface.name) " +
+                                "(\(interface.type))"
+                            )
+                        }
                     }
-                }
-                // Cache Infra WiFi (en0 typically) — only log on first discovery
-                if interface.type == .wifi && !interface.name.contains("awdl") && !interface.name.contains("llw") {
-                     let isNew = self?.cachedInfraInterface == nil
-                     self?.cachedInfraInterface = interface
-                     if isNew {
-                         LogManager.shared.log("Network: Found Infra Interface: \(interface.name) (\(interface.type))")
-                     }
+                    // Cache Infra WiFi (en0 typically) — only log on first discovery
+                    if interface.type == .wifi
+                        && !interface.name.contains("awdl")
+                        && !interface.name.contains("llw") {
+                        let isNew = self?.cachedInfraInterface == nil
+                        self?.cachedInfraInterface = interface
+                        if isNew {
+                            LogManager.shared.log(
+                                "Network: Found Infra Interface: \(interface.name) " +
+                                "(\(interface.type))"
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -4016,6 +4628,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         bonjourReachabilityRecheckWorkItems.removeAll()
         browsedTCPServicesByName.removeAll()
         reachableTCPServiceNames.removeAll()
+        resolvedBonjourRoutesByName.removeAll()
     }
 
     private func startSessionLifecycleMonitoring() {
@@ -4284,16 +4897,37 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             && (hasP2PCompanion || service.supportsApplePeerToPeerConnection) {
             modes.append(.p2pOnly)
         }
-        if service.supportsWiFiConnection {
+        let localAddresses = localConnectionAddressProvider()
+        let isWindowsReceiver = lowercasedName.contains("windows")
+        let hasActiveLocalWiFi = localAddresses.contains {
+            $0.title == NetworkInterfacePreference.routerOnly.connectTitle
+        }
+        if service.supportsWiFiConnection
+            || (isWindowsReceiver && hasActiveLocalWiFi) {
             modes.append(.routerOnly)
         }
         if service.supportsEthernetConnection {
             modes.append(.ethernet)
         }
-        let hasActiveLocalThunderboltBridge = localConnectionAddressProvider()
-            .contains { $0.title == NetworkInterfacePreference.thunderboltBridge.connectTitle }
-        if service.supportsThunderboltConnection
-            || (lowercasedName.contains("windows") && hasActiveLocalThunderboltBridge) {
+        let activeLocalThunderboltInterfaces = Set(
+            localAddresses.compactMap {
+                $0.title
+                        == NetworkInterfacePreference.thunderboltBridge.connectTitle
+                    ? $0.interfaceName.lowercased()
+                    : nil
+            }
+        )
+        let discoveredThunderboltInterfaces = Set(
+            service.discoveryInterfaces.compactMap {
+                $0.isThunderboltBridge ? $0.name.lowercased() : nil
+            }
+        )
+        let deviceIsOnActiveLocalThunderbolt =
+            !activeLocalThunderboltInterfaces
+                .isDisjoint(with: discoveredThunderboltInterfaces)
+        if isWindowsReceiver
+            ? deviceIsOnActiveLocalThunderbolt
+            : service.supportsThunderboltConnection {
             modes.append(.thunderboltBridge)
         }
         return modes
@@ -4325,6 +4959,24 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         return uniqueHosts[0]
     }
 
+    static func preferredThunderboltPeerRoute(
+        receiverName: String,
+        availableRoutes: [ThunderboltPeerAddressProvider.PeerRoute],
+        allowedInterfaceNames: Set<String>
+    ) -> ThunderboltPeerAddressProvider.PeerRoute? {
+        guard receiverName.lowercased().contains("windows") else {
+            return nil
+        }
+        let matchingRoutes = availableRoutes.filter {
+            allowedInterfaceNames.contains($0.interfaceName.lowercased())
+        }
+        let uniqueRoutes = Array(Set(matchingRoutes.map {
+            "\($0.host)%\($0.interfaceName)"
+        }))
+        guard uniqueRoutes.count == 1 else { return nil }
+        return matchingRoutes.first
+    }
+
     private func resolvedConnectionPreference(
         _ preference: NetworkInterfacePreference,
         for service: DiscoveredService
@@ -4348,6 +5000,67 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             }
         }
         return .auto
+    }
+
+    func connectionEndpointDescription(
+        for service: DiscoveredService,
+        preference: NetworkInterfacePreference
+    ) -> String? {
+        let selectedPreference = resolvedConnectionPreference(
+            preference,
+            for: service
+        )
+
+        if case .hostPort = service.endpoint {
+            return Self.endpointDescription(service.endpoint)
+        }
+
+        let lowercasedName = service.name.lowercased()
+        let isAppleReceiver = !lowercasedName.contains("android")
+            && !lowercasedName.contains("windows")
+            && !lowercasedName.contains("linux")
+        let allowsAppleP2P = selectedPreference == .auto
+            || selectedPreference == .p2pOnly
+        if isAppleReceiver,
+           allowsAppleP2P,
+           let p2pEndpoint = discoveredServicesByProtocol["TCP"]?[
+               service.name + " P2P"
+           ]?.endpoint {
+            return Self.endpointDescription(p2pEndpoint)
+        }
+
+        let thunderboltInterfaces = Set(
+            service.discoveryInterfaces.compactMap {
+                $0.isThunderboltBridge ? $0.name.lowercased() : nil
+            }
+        )
+        let thunderboltPeerRoute =
+            selectedPreference == .thunderboltBridge
+                ? Self.preferredThunderboltPeerRoute(
+                    receiverName: service.name,
+                    availableRoutes: thunderboltPeerRouteProvider(),
+                    allowedInterfaceNames: thunderboltInterfaces
+                )
+                : nil
+        let thunderboltInterfaceName = thunderboltPeerRoute?.interfaceName
+            ?? localConnectionAddressProvider()
+                .first { $0.title == "Thunderbolt Bridge" }?
+                .interfaceName
+        let resolvedRoute = Self.preferredBonjourRoute(
+            for: selectedPreference,
+            resolvedRoutes:
+                resolvedBonjourRoutesByName[service.name] ?? []
+        )
+        let endpoint = Self.preferredConnectionEndpoint(
+            for: selectedPreference,
+            resolvedRoute: resolvedRoute,
+            discoveredEndpoint: service.connectionEndpoint(
+                for: selectedPreference
+            ),
+            thunderboltPeerHost: thunderboltPeerRoute?.host,
+            thunderboltInterfaceName: thunderboltInterfaceName
+        )
+        return Self.endpointDescription(endpoint)
     }
 
     func availableConnectionModes(
@@ -4993,7 +5706,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 )
             } else {
                 LogManager.shared.log(
-                    "Parameters: Thunderbolt Bridge mode - bridge interface unavailable"
+                    "Parameters: Thunderbolt Bridge mode - using scoped endpoint routing"
                 )
             }
 
@@ -5024,10 +5737,14 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             let tcpOptions = NWProtocolTCP.Options()
             tcpOptions.enableKeepalive = true
             tcpOptions.noDelay = true
-            tcpOptions.connectionTimeout = 10
+            tcpOptions.connectionTimeout = Self.tcpConnectionTimeout
             parameters = NWParameters(tls: nil, tcp: tcpOptions)
         }
         parameters.serviceClass = .interactiveVideo
+        BonjourConnectionPolicy.applyLocalNetworkPolicy(
+            to: parameters,
+            receiverName: serviceName
+        )
         connectWithParameters(
             service: DiscoveredService(name: serviceName, endpoint: endpoint),
             parameters: parameters,
@@ -5042,8 +5759,16 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         restoringSavedSettings: Bool = true,
         autoConnectAttempt: Bool = false
     ) {
+        ConnectDiagnostics.log(
+            "connect requested service=\(service.name) endpoint=\(service.endpoint) " +
+            "override=\(String(describing: interfacePreferenceOverride?.rawValue)) " +
+            "restoreSettings=\(restoringSavedSettings) auto=\(autoConnectAttempt)"
+        )
         // Check the display name first for a fast UI-level duplicate guard.
         if connectedServices.contains(where: { $0.name == service.name }) {
+            ConnectDiagnostics.log(
+                "connect rejected service=\(service.name) reason=already-connected"
+            )
             LogManager.shared.log("Sender: Already connected to \(service.name)")
             return
         }
@@ -5083,6 +5808,44 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         applyReceiverSettings(receiverSettings)
         saveSettings(receiverSettings, for: service)
 
+        let discoveredInterfaces = service.discoveryInterfaces.map {
+            "\($0.name):\($0.type)"
+        }.joined(separator: ",")
+        let cachedRoutes = resolvedBonjourRoutesByName[service.name] ?? []
+        let availableModes = availableConnectionModes(for: service)
+            .map(\.rawValue)
+            .joined(separator: ",")
+        let cachedEndpoint = cachedRoutes.map {
+            String(describing: $0.endpoint)
+        }.joined(separator: ",")
+        let cachedRouteInterfaces = cachedRoutes.map {
+            $0.interfaceNames.joined(separator: ",")
+        }.joined(separator: ";")
+        let localConnectionAddresses = localConnectionAddressProvider()
+        let localAddresses = localConnectionAddresses.map {
+            "\($0.interfaceName):\($0.address):\($0.title)"
+        }.joined(separator: ",")
+        let cachedInterfaces = cachedNetworkInterfacesByName.values
+            .map { "\($0.name):\($0.type)" }
+            .sorted()
+            .joined(separator: ",")
+        ConnectDiagnostics.log(
+            "attempt id=\(connectionId.uuidString) service=\(service.name) " +
+            "requested=\(requestedInterfacePreference.rawValue) " +
+            "selected=\(selectedInterfacePreference.rawValue) protocol=\(selectedConnectionType) " +
+            "availableModes=[\(availableModes)] discoveryInterfaces=[\(discoveredInterfaces)]"
+        )
+        ConnectDiagnostics.log(
+            "attempt route id=\(connectionId.uuidString) cachedEndpoint=\(cachedEndpoint) " +
+            "cachedRouteInterfaces=[\(cachedRouteInterfaces)]"
+        )
+        ConnectDiagnostics.log(
+            "local network id=\(connectionId.uuidString) addresses=[\(localAddresses)] " +
+            "nwInterfaces=[\(cachedInterfaces)] " +
+            "cachedInfra=\(String(describing: cachedInfraInterface?.name)) " +
+            "cachedAWDL=\(String(describing: cachedAWDLInterface?.name))"
+        )
+
         let deviceCount = pipelines.count + 1
         self.status = "Connecting to \(service.name) (Device #\(deviceCount))..."
 
@@ -5100,7 +5863,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             let tcpOptions = NWProtocolTCP.Options()
             tcpOptions.enableKeepalive = true
             tcpOptions.noDelay = true
-            tcpOptions.connectionTimeout = 10
+            tcpOptions.connectionTimeout = Self.tcpConnectionTimeout
             parameters = NWParameters(tls: nil, tcp: tcpOptions)
             parameters.serviceClass = .interactiveVideo
         }
@@ -5109,24 +5872,71 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             preference: selectedInterfacePreference,
             service: service
         )
+        BonjourConnectionPolicy.applyLocalNetworkPolicy(
+            to: parameters,
+            receiverName: service.name
+        )
 
         // For Apple devices, prefer the P2P endpoint if available (AWDL low-latency)
-        let infrastructureEndpoint =
-            discoveredServicesByProtocol[selectedConnectionType]?[service.name]?.endpoint
-            ?? service.endpoint
-        var connectEndpoint = infrastructureEndpoint
-        if selectedInterfacePreference == .thunderboltBridge,
-           let peerHost = Self.preferredThunderboltPeerHost(
-               receiverName: service.name,
-               availablePeerHosts: thunderboltPeerAddressProvider()
-           ),
-           let port = NWEndpoint.Port(rawValue: 51820) {
-            connectEndpoint = .hostPort(
-                host: NWEndpoint.Host(peerHost),
-                port: port
-            )
+        let discoveredService =
+            discoveredServicesByProtocol[selectedConnectionType]?[service.name]
+                ?? service
+        let discoveredEndpoint = discoveredService.connectionEndpoint(
+            for: selectedInterfacePreference
+        )
+        let resolvedBonjourEndpoint = Self.preferredBonjourEndpoint(
+            for: selectedInterfacePreference,
+            resolvedRoutes:
+                resolvedBonjourRoutesByName[service.name] ?? []
+        )
+        let infrastructureEndpoint = Self.infrastructureFallbackEndpoint(
+            shouldFallback: shouldFallbackToInfrastructure,
+            resolvedEndpoint: resolvedBonjourEndpoint,
+            discoveredEndpoint:
+                discoveredService.infrastructureConnectionEndpoint
+        )
+        let thunderboltInterfaces = Set(
+            discoveredService.discoveryInterfaces.compactMap {
+                $0.isThunderboltBridge ? $0.name.lowercased() : nil
+            }
+        )
+        let thunderboltPeerRoute =
+            selectedInterfacePreference == .thunderboltBridge
+                ? Self.preferredThunderboltPeerRoute(
+                    receiverName: service.name,
+                    availableRoutes: thunderboltPeerRouteProvider(),
+                    allowedInterfaceNames: thunderboltInterfaces
+                )
+                : nil
+        let thunderboltInterfaceName = thunderboltPeerRoute?.interfaceName
+            ?? localConnectionAddresses
+                .first { $0.title == "Thunderbolt Bridge" }?
+                .interfaceName
+        let resolvedRoute = Self.preferredBonjourRoute(
+            for: selectedInterfacePreference,
+            resolvedRoutes:
+                resolvedBonjourRoutesByName[service.name] ?? []
+        )
+        var connectEndpoint = Self.preferredConnectionEndpoint(
+            for: selectedInterfacePreference,
+            resolvedRoute: resolvedRoute,
+            discoveredEndpoint: discoveredEndpoint,
+            thunderboltPeerHost: thunderboltPeerRoute?.host,
+            thunderboltInterfaceName: thunderboltInterfaceName,
+            discoveredEndpointMatchesPreference:
+                discoveredService.hasConnectionEndpoint(
+                    for: selectedInterfacePreference
+                )
+        )
+        if let resolvedBonjourEndpoint,
+           connectEndpoint == resolvedBonjourEndpoint {
             LogManager.shared.log(
-                "Sender: Using Thunderbolt Bridge peer \(peerHost):\(port.rawValue) for \(service.name)"
+                "Sender: Using verified Bonjour endpoint \(resolvedBonjourEndpoint) for \(service.name)"
+            )
+        } else if thunderboltPeerRoute != nil {
+            LogManager.shared.log(
+                "Sender: Using current Thunderbolt Bridge peer \(connectEndpoint) " +
+                "for \(service.name)"
             )
         }
         let allowsAppleP2P = selectedInterfacePreference == .auto
@@ -5175,8 +5985,41 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             )
         }
 
+        let requiredInterfaceName: String
+        switch selectedInterfacePreference {
+        case .routerOnly:
+            requiredInterfaceName = cachedInfraInterface?.name ?? "type=wifi"
+        case .ethernet:
+            requiredInterfaceName = cachedInterface(
+                for: .ethernet,
+                service: service
+            )?.name ?? "type=wiredEthernet"
+        case .thunderboltBridge:
+            requiredInterfaceName = cachedInterface(
+                for: .thunderboltBridge,
+                service: service
+            )?.name
+                ?? thunderboltInterfaceName.map { "scope=\($0)" }
+                ?? "bridge-unavailable"
+        case .p2pOnly:
+            requiredInterfaceName = cachedAWDLInterface?.name ?? "awdl-unavailable"
+        case .auto, .wiredCable:
+            requiredInterfaceName = "automatic"
+        }
+        ConnectDiagnostics.log(
+            "connection start id=\(connectionId.uuidString) service=\(service.name) " +
+            "endpoint=\(connectEndpoint) discoveredEndpoint=\(discoveredEndpoint) " +
+            "verifiedEndpoint=\(String(describing: resolvedBonjourEndpoint)) " +
+            "requiredInterface=\(requiredInterfaceName) " +
+            "includeP2P=\(parameters.includePeerToPeer) " +
+            "preferNoProxies=\(parameters.preferNoProxies) " +
+            "preferIPv4=\(BonjourConnectionPolicy.prefersIPv4(receiverName: service.name)) " +
+            "watchdog=\(Self.availableConnectionAttemptTimeout)s"
+        )
+
         let connection = NWConnection(to: connectEndpoint, using: parameters)
         trackPendingConnection(connection, connectionID: connectionId)
+        let connectionStartedAt = Date()
 
         // Automatic mode tries the preferred direct/wired route first, then
         // retries without interface restrictions when that route is unavailable.
@@ -5186,6 +6029,17 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             // Only retry if still not connected (no pipeline created yet)
             if self.pipelines[connectionId] == nil && !connectionTimedOut {
                 connectionTimedOut = true
+                let elapsed = Date().timeIntervalSince(connectionStartedAt)
+                ConnectDiagnostics.log(
+                    String(
+                        format: "connection watchdog id=%@ service=%@ elapsed=%.3fs endpoint=%@ %@",
+                        connectionId.uuidString,
+                        service.name,
+                        elapsed,
+                        String(describing: connectEndpoint),
+                        ConnectDiagnostics.pathSummary(connection.currentPath)
+                    )
+                )
                 self.finishPendingConnection(
                     connectionID: connectionId,
                     receiverKey: pendingKey
@@ -5211,10 +6065,25 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 )
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: timeoutWork)
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.availableConnectionAttemptTimeout,
+            execute: timeoutWork
+        )
 
         connection.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
+                let elapsed = Date().timeIntervalSince(connectionStartedAt)
+                ConnectDiagnostics.log(
+                    String(
+                        format: "connection state id=%@ service=%@ elapsed=%.3fs state=%@ endpoint=%@ %@",
+                        connectionId.uuidString,
+                        service.name,
+                        elapsed,
+                        ConnectDiagnostics.stateSummary(state),
+                        String(describing: connectEndpoint),
+                        ConnectDiagnostics.pathSummary(connection.currentPath)
+                    )
+                )
                 switch state {
                 case .ready:
                     timeoutWork.cancel() // Connection succeeded, cancel timeout
@@ -5269,6 +6138,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         && !nameLower.contains("android") && !nameLower.contains("windows") && !nameLower.contains("linux")
                     pipeline.supportsTypeByte = !isLegacyReceiver
                     self.pipelines[connectionId] = pipeline
+                    self.sendIdentityIfSupported(for: connectionId)
                     self.connectedServices.append(service)
                     self.updateConnectedDisplays()
 
@@ -5808,6 +6678,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         && !nameLower.contains("android") && !nameLower.contains("windows") && !nameLower.contains("linux")
                     pipeline.supportsTypeByte = !isLegacyReceiver
                     self.pipelines[connectionId] = pipeline
+                    self.sendIdentityIfSupported(for: connectionId)
                     self.connectedServices.append(service)
                     self.updateConnectedDisplays()
 
@@ -6601,6 +7472,42 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
     // VideoEncoderDelegate - Send to the specific connection that owns this encoder
     private var encodedFrameCount: Int = 0
+
+    private func sendIdentityIfSupported(for connectionId: UUID) {
+        guard let pipeline = pipelines[connectionId],
+              pipeline.supportsTypeByte else {
+            return
+        }
+        let connectionType = pipeline.settings.connectionType ?? "TCP"
+        guard pipeline.forceTCP || connectionType != "UDP" else {
+            return
+        }
+
+        do {
+            let identity = SenderIdentity.load()
+            let packet = try SenderIdentity.framedPacket(identity)
+            pipeline.connection.send(
+                content: packet,
+                completion: .contentProcessed { error in
+                    if let error {
+                        LogManager.shared.log(
+                            "Sender: Identity handshake failed for " +
+                            "\(pipeline.service.name): \(error)"
+                        )
+                    }
+                }
+            )
+            LogManager.shared.log(
+                "Sender: Sent identity \(identity.deviceName) " +
+                "(\(identity.deviceId)) to \(pipeline.service.name)"
+            )
+        } catch {
+            LogManager.shared.log(
+                "Sender: Failed to encode identity for " +
+                "\(pipeline.service.name): \(error)"
+            )
+        }
+    }
 
     func videoEncoder(_ encoder: VideoEncoder, didEncode data: Data, for connectionId: UUID, isKeyframe: Bool) {
         guard let pipeline = pipelines[connectionId] else { return }

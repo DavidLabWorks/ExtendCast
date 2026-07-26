@@ -11,6 +11,7 @@ list(GET EXTENDCAST_VERSION_PARTS 1 EXTENDCAST_VERSION_MINOR)
 list(GET EXTENDCAST_VERSION_PARTS 2 EXTENDCAST_VERSION_PATCH)
 
 project(ExtendCast VERSION ${EXTENDCAST_VERSION} LANGUAGES CXX)
+include(CTest)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -110,6 +111,7 @@ set(SOURCES
     VideoDecoder.cpp
     VideoRenderer.cpp
     VideoWindow.cpp
+    ReceiverSession.cpp
     InputHandler.cpp
     ServiceDiscovery.cpp
     AudioDecoder.cpp
@@ -123,6 +125,8 @@ set(HEADERS
     VideoDecoder.h
     VideoRenderer.h
     VideoWindow.h
+    ReceiverSession.h
+    ReceiverSessionRegistry.h
     InputHandler.h
     InputEvent.h
     ServiceDiscovery.h
@@ -178,6 +182,18 @@ if(WIN32)
 endif()
 
 add_executable(BetterCastReceiver ${SOURCES} ${HEADERS} ${RESOURCES})
+
+if(BUILD_TESTING)
+    add_executable(
+        ReceiverSessionRegistryTests
+        tests/ReceiverSessionRegistryTests.cpp
+        ReceiverSessionRegistry.h
+    )
+    add_test(
+        NAME ReceiverSessionRegistryTests
+        COMMAND ReceiverSessionRegistryTests
+    )
+endif()
 
 target_include_directories(BetterCastReceiver PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/generated"

@@ -15,12 +15,16 @@ import java.io.IOException
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.ByteBuffer
+import org.json.JSONObject
 
 /**
  * TCP server that sends H.264 video frames and receives input events.
  * Mirrors TcpClient pattern but with reversed data flow.
  */
-class TcpSender {
+class TcpSender(
+    private val deviceId: String,
+    private val deviceName: String
+) {
 
     companion object {
         private const val TAG = "TcpSender"
@@ -98,6 +102,7 @@ class TcpSender {
                     clientSocket = socket
                     outputStream = DataOutputStream(socket.getOutputStream())
                     inputStream = DataInputStream(socket.getInputStream())
+                    sendIdentity()
 
                     val receiverAddress = socket.remoteSocketAddress.toString()
                     Log.d(TAG, "Receiver connected from $receiverAddress")
@@ -117,15 +122,32 @@ class TcpSender {
     /**
      * Enqueue an encoded video frame for sending.
      * Frame data is already in megapacket format (PTS + AVCC NALUs).
-     * This wraps it with 4-byte big-endian length prefix.
+     * This wraps it as a typed video message.
      */
     fun sendFrame(frameData: ByteArray) {
         if (_connectionState.value != ConnectionState.CONNECTED) return
 
-        val packet = ByteBuffer.allocate(4 + frameData.size)
-        packet.putInt(frameData.size) // big-endian by default
-        packet.put(frameData)
-        sendQueue.trySend(packet.array())
+        sendQueue.trySend(framedPacket(0x01, frameData))
+    }
+
+    private fun sendIdentity() {
+        val identity = JSONObject()
+            .put("protocolVersion", 1)
+            .put("deviceId", deviceId)
+            .put("deviceName", deviceName)
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+        outputStream?.write(framedPacket(0x03, identity))
+        outputStream?.flush()
+        Log.i(TAG, "Sent identity $deviceName ($deviceId)")
+    }
+
+    private fun framedPacket(type: Int, payload: ByteArray): ByteArray {
+        val packet = ByteBuffer.allocate(5 + payload.size)
+        packet.putInt(1 + payload.size) // big-endian by default
+        packet.put(type.toByte())
+        packet.put(payload)
+        return packet.array()
     }
 
     /**

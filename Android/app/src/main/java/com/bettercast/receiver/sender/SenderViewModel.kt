@@ -3,6 +3,7 @@ package com.bettercast.receiver.sender
 import android.app.Application
 import android.content.Intent
 import android.os.Build
+import android.provider.Settings
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
@@ -40,7 +41,16 @@ class SenderViewModel(application: Application) : AndroidViewModel(application) 
     private val _requestProjection = MutableStateFlow(false)
     val requestProjection: StateFlow<Boolean> = _requestProjection.asStateFlow()
 
-    val tcpSender = TcpSender()
+    val tcpSender = TcpSender(
+        deviceId = Settings.Secure.getString(
+            application.contentResolver,
+            Settings.Secure.ANDROID_ID
+        ) ?: "android-${Build.FINGERPRINT.hashCode()}",
+        deviceName = listOf(Build.MANUFACTURER, Build.MODEL)
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+            .ifBlank { "Android device" }
+    )
     private var videoEncoder: VideoEncoder? = null
     private var orientationPollJob: Job? = null
 

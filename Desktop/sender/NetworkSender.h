@@ -7,7 +7,7 @@
 #include <cstdint>
 
 // TCP client that sends video/audio data using BetterCast wire protocol.
-// Format: [4B BE length][1B type (0x01=video, 0x02=audio)][payload]
+// Format: [4B BE length][1B type (0x01=video, 0x02=audio, 0x03=identity)][payload]
 class NetworkSender : public QObject {
     Q_OBJECT
 public:
@@ -27,6 +27,7 @@ signals:
     void error(const QString& message);
 
 private:
+    void sendIdentity();
     void sendPacket(uint8_t type, const QByteArray& payload);
     void attemptConnect();
 

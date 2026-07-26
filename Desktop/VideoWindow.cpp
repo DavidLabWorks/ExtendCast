@@ -122,18 +122,6 @@ VideoWindow::~VideoWindow() {
 }
 
 void VideoWindow::showForVideo() {
-    if (isFullScreen()) {
-        showNormal();
-    }
-    if (m_titleBar) {
-        m_titleBar->show();
-    }
-    if (m_fullscreenButton) {
-        m_fullscreenButton->show();
-    }
-    updateWindowControlStates();
-    updateFullscreenButton();
-
     if (isVisible()) {
         if (m_renderer) {
             m_renderer->show();
@@ -142,6 +130,15 @@ void VideoWindow::showForVideo() {
         activateWindow();
         return;
     }
+
+    if (m_titleBar) {
+        m_titleBar->show();
+    }
+    if (m_fullscreenButton) {
+        m_fullscreenButton->show();
+    }
+    updateWindowControlStates();
+    updateFullscreenButton();
 
     // Position to the right of the main window if possible
     QWidget* mainWin = m_ownerWindow;
@@ -173,12 +170,31 @@ void VideoWindow::showForVideo() {
     LogManager::instance().log("Video window opened");
 }
 
+void VideoWindow::bindToDevice(
+    const QString& deviceId,
+    const QString& deviceName
+) {
+    m_deviceId = deviceId;
+    setObjectName("receiving-" + deviceId);
+    setProperty("receiverDeviceId", deviceId);
+    setWindowTitle(QString("ExtendCast — %1").arg(deviceName));
+    if (m_titleLabel) {
+        m_titleLabel->setText(
+            QString("%1 · %2")
+                .arg(deviceName, deviceId.left(8))
+        );
+    }
+}
+
 void VideoWindow::resizeToFitVideo(int videoWidth, int videoHeight) {
     if (videoWidth <= 0 || videoHeight <= 0) return;
 
     QSize newSize(videoWidth, videoHeight);
     if (newSize == m_lastVideoSize) return;
     m_lastVideoSize = newSize;
+    if (isFullScreen() || isMaximized()) {
+        return;
+    }
 
     QScreen* screen = QApplication::primaryScreen();
     if (!screen) return;

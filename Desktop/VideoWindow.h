@@ -10,6 +10,7 @@
 #include <QScreen>
 #include <QApplication>
 #include <QSize>
+#include <QString>
 
 class QEvent;
 class QFrame;
@@ -26,6 +27,8 @@ public:
 
     void showForVideo();
     void resizeToFitVideo(int videoWidth, int videoHeight);
+    void bindToDevice(const QString& deviceId, const QString& deviceName);
+    QString deviceId() const { return m_deviceId; }
 
 signals:
     void windowClosed();
@@ -53,4 +56,5 @@ private:
     QPushButton* m_maximizeButton = nullptr;
     QPushButton* m_fullscreenButton = nullptr;
     QSize m_lastVideoSize;
+    QString m_deviceId;
 };

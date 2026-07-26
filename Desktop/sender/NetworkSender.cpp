@@ -1,6 +1,11 @@
 #include "NetworkSender.h"
 #include "../MainWindow.h"  // for LogManager
 #include <QDebug>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSettings>
+#include <QSysInfo>
+#include <QUuid>
 #include <QtEndian>
 
 NetworkSender::NetworkSender(QObject* parent)
@@ -13,6 +18,7 @@ NetworkSender::NetworkSender(QObject* parent)
     connect(m_socket, &QTcpSocket::connected, this, [this]() {
         m_retryCount = 0;
         LogManager::instance().log("Sender: TCP connected to receiver");
+        sendIdentity();
         emit connected();
     });
 
@@ -74,6 +80,34 @@ void NetworkSender::disconnect() {
 
 bool NetworkSender::isConnected() const {
     return m_socket->state() == QAbstractSocket::ConnectedState;
+}
+
+void NetworkSender::sendIdentity() {
+    QSettings settings;
+    QString deviceId = settings.value("senderStableDeviceId").toString();
+    if (QUuid(deviceId).isNull()) {
+        deviceId = QUuid::createUuid().toString(QUuid::WithoutBraces).toLower();
+        settings.setValue("senderStableDeviceId", deviceId);
+        settings.sync();
+    }
+
+    QString deviceName = QSysInfo::machineHostName();
+    if (deviceName.isEmpty()) {
+        deviceName = "ExtendCast Desktop";
+    }
+
+    QJsonObject identity{
+        {"protocolVersion", 1},
+        {"deviceId", deviceId},
+        {"deviceName", deviceName},
+    };
+    sendPacket(
+        0x03,
+        QJsonDocument(identity).toJson(QJsonDocument::Compact)
+    );
+    LogManager::instance().log(
+        QString("Sender: Sent identity %1 (%2)").arg(deviceName, deviceId)
+    );
 }
 
 void NetworkSender::sendPacket(uint8_t type, const QByteArray& payload) {

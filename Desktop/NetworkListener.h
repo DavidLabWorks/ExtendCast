@@ -9,12 +9,10 @@
 #include <QHash>
 #include <QByteArray>
 #include <QDateTime>
+#include <QString>
 
 #include "InputEvent.h"
-
-class VideoDecoder;
-class VideoRenderer;
-class AudioDecoder;
+#include "ReceiverSessionRegistry.h"
 
 class NetworkListener : public QObject {
     Q_OBJECT
@@ -23,7 +21,6 @@ public:
     explicit NetworkListener(QObject* parent = nullptr);
     ~NetworkListener();
 
-    void setup(VideoDecoder* decoder, VideoRenderer* renderer, AudioDecoder* audioDecoder = nullptr);
     void start();
     void stop();
     bool isListening() const;
@@ -33,12 +30,26 @@ public:
     uint16_t actualTcpPort() const;
 
 signals:
-    void connectionEstablished();
-    void connectionLost();
+    void connectionEstablished(
+        const QString& deviceId,
+        const QString& deviceName,
+        const QString& connectionId,
+        const QString& peerAddress
+    );
+    void connectionLost(const QString& deviceId);
+    void videoDataReceived(
+        const QString& deviceId,
+        const QByteArray& data,
+        bool hasPtsPrefix
+    );
+    void audioDataReceived(
+        const QString& deviceId,
+        const QByteArray& data
+    );
     void statusChanged(const QString& status);
 
 public slots:
-    void sendInputEvent(const InputEvent& event);
+    void sendInputEvent(const QString& deviceId, const InputEvent& event);
 
 private slots:
     void onNewTcpConnection();
@@ -49,17 +60,29 @@ private slots:
 
 private:
     void processTcpBuffer(QTcpSocket* socket);
-    void handleVideoData(const QByteArray& data, bool hasPtsPrefix = true);
-    void handleAudioData(const QByteArray& data);
+    bool handleIdentity(QTcpSocket* socket, const QByteArray& payload);
+    void handleVideoData(
+        QTcpSocket* socket,
+        const QByteArray& data,
+        bool hasPtsPrefix = true
+    );
+    void handleAudioData(QTcpSocket* socket, const QByteArray& data);
     void handleUdpPacket(const QByteArray& data);
+    QString connectionIdFor(QTcpSocket* socket) const;
+    void registerSocket(QTcpSocket* socket);
+    void rejectUnidentifiedConnection(QTcpSocket* socket, const QString& reason);
+    void writeInputEvent(QTcpSocket* socket, const InputEvent& event);
 
     // TCP
     QTcpServer* m_tcpServer = nullptr;
     QList<QTcpSocket*> m_clients;
     QHash<QTcpSocket*, QByteArray> m_tcpBuffers;
+    QHash<QTcpSocket*, QString> m_connectionIds;
+    QHash<QString, QTcpSocket*> m_socketsByConnectionId;
+    ReceiverSessionRegistry m_sessionRegistry;
 
-    // Per-connection format detection: true = type-byte framing, false = legacy
-    // -1 = not yet detected
+    // Per-connection admission state: -1 = waiting for identity,
+    // 1 = typed framing with an admitted sender identity.
     QHash<QTcpSocket*, int> m_connectionFormat;
 
     // UDP
@@ -82,11 +105,6 @@ private:
 
     // Heartbeat
     QTimer* m_heartbeatTimer = nullptr;
-
-    // Dependencies
-    VideoDecoder* m_decoder = nullptr;
-    VideoRenderer* m_renderer = nullptr;
-    AudioDecoder* m_audioDecoder = nullptr;
 
     // Stats
     int m_udpPacketsReceived = 0;

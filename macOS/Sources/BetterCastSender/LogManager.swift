@@ -35,7 +35,11 @@ class UpdateChecker: ObservableObject {
     static var displayVersion: String {
         let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
-        return "\(short) (\(build))"
+        return displayVersion(shortVersion: short, build: build)
+    }
+
+    static func displayVersion(shortVersion: String, build: String) -> String {
+        "\(shortVersion) (Build \(build))"
     }
 
     private static let repoOwner = "Ruobin521"

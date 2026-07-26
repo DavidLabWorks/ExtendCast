@@ -16,6 +16,7 @@
 #include <QMouseEvent>
 #include <QStringList>
 #include <QTime>
+#include <QHash>
 
 // Simple log manager (mirrors macOS LogManager)
 class LogManager : public QObject {
@@ -47,15 +48,11 @@ private:
 };
 
 struct DiscoveredService;
-class VideoRenderer;
-class VideoDecoder;
 class NetworkListener;
-class InputHandler;
 class ServiceDiscovery;
-class AudioDecoder;
-class AudioPlayer;
 class AdbHelper;
-class VideoWindow;
+class ReceiverSession;
+class QByteArray;
 class QVBoxLayout;
 class QFrame;
 class QEvent;
@@ -82,12 +79,25 @@ private slots:
     void onSidebarSelectionChanged(int row);
     void onConnectClicked();
     void onAdbConnectClicked();
-    void onConnectionEstablished();
-    void onConnectionLost();
+    void onConnectionEstablished(
+        const QString& deviceId,
+        const QString& deviceName,
+        const QString& connectionId,
+        const QString& peerAddress
+    );
+    void onConnectionLost(const QString& deviceId);
+    void onVideoDataReceived(
+        const QString& deviceId,
+        const QByteArray& data,
+        bool hasPtsPrefix
+    );
+    void onAudioDataReceived(
+        const QString& deviceId,
+        const QByteArray& data
+    );
     void onStatusChanged(const QString& status);
     void onReceiverListeningToggled(bool checked);
     void onReceiverAutoStartToggled(bool checked);
-    void onVideoSizeChanged(QSize size);
     void attemptAdbReconnect();
     void onLogAdded(const QString& entry);
     void onCopyLogs();
@@ -125,13 +135,8 @@ private:
     void handleUpdateReply(QNetworkReply* reply);
 
     // Core components
-    VideoDecoder* m_decoder = nullptr;
-    VideoRenderer* m_renderer = nullptr;
     NetworkListener* m_network = nullptr;
-    InputHandler* m_inputHandler = nullptr;
     ServiceDiscovery* m_discovery = nullptr;
-    AudioDecoder* m_audioDecoder = nullptr;
-    AudioPlayer* m_audioPlayer = nullptr;
     AdbHelper* m_adbHelper = nullptr;
     QTimer* m_reconnectTimer = nullptr;
     int m_reconnectAttempts = 0;
@@ -192,8 +197,8 @@ private:
     // Logs page
     QTextEdit* m_logViewer = nullptr;
 
-    // Video window (separate from main window, like Mac app)
-    VideoWindow* m_videoWindow = nullptr;
+    // One isolated decode/render/window pipeline per sender device ID.
+    QHash<QString, ReceiverSession*> m_receiverSessions;
 
 #ifdef ENABLE_SENDER
     // Send page

@@ -374,26 +374,54 @@ enum ReceiverConnectionAddressProvider {
 }
 
 enum ThunderboltPeerAddressProvider {
-    static func availableIPv4Addresses() -> [String] {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/arp")
-        process.arguments = ["-an", "-i", "bridge0"]
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
+    struct PeerRoute: Equatable {
+        let host: String
+        let interfaceName: String
+    }
 
-        do {
-            try process.run()
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0,
-                  let text = String(data: data, encoding: .utf8) else {
-                return []
+    static func availablePeerRoutes(
+        interfaceNames: [String]? = nil
+    ) -> [PeerRoute] {
+        let resolvedInterfaceNames = interfaceNames
+            ?? bridgeInterfaceNames(
+                from: ReceiverConnectionAddressProvider.availableAddresses(
+                    port: 51820
+                )
+            )
+        var routes: [PeerRoute] = []
+        for interfaceName in resolvedInterfaceNames {
+            for host in arpIPv4Addresses(interfaceName: interfaceName) {
+                let route = PeerRoute(
+                    host: host,
+                    interfaceName: interfaceName
+                )
+                if !routes.contains(route) {
+                    routes.append(route)
+                }
             }
-            return parseARPOutput(text)
-        } catch {
-            return []
         }
+        return routes.sorted {
+            if $0.interfaceName != $1.interfaceName {
+                return $0.interfaceName < $1.interfaceName
+            }
+            return $0.host < $1.host
+        }
+    }
+
+    static func availableIPv4Addresses(
+        interfaceNames: [String]? = nil
+    ) -> [String] {
+        Array(Set(
+            availablePeerRoutes(interfaceNames: interfaceNames).map(\.host)
+        )).sorted()
+    }
+
+    static func bridgeInterfaceNames(
+        from addresses: [ReceiverConnectionAddress]
+    ) -> [String] {
+        Array(Set(addresses.compactMap {
+            $0.title == "Thunderbolt Bridge" ? $0.interfaceName : nil
+        })).sorted()
     }
 
     static func parseARPOutput(_ output: String) -> [String] {
@@ -414,6 +442,30 @@ enum ThunderboltPeerAddressProvider {
             addresses.append(String(address))
         }
         return Array(Set(addresses)).sorted()
+    }
+
+    private static func arpIPv4Addresses(
+        interfaceName: String
+    ) -> [String] {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/arp")
+        process.arguments = ["-an", "-i", interfaceName]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0,
+                  let text = String(data: data, encoding: .utf8) else {
+                return []
+            }
+            return parseARPOutput(text)
+        } catch {
+            return []
+        }
     }
 }
 

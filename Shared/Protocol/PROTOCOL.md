@@ -27,3 +27,26 @@ one-byte payload type and the payload:
 
 - `0x01`: H.264 video
 - `0x02`: AAC-LC audio
+- `0x03`: UTF-8 JSON sender identity
+
+## Sender identity
+
+Every TCP media connection must begin with one identity message before any
+video or audio:
+
+```json
+{
+  "protocolVersion": 1,
+  "deviceId": "stable-device-uuid",
+  "deviceName": "Studio Mac mini"
+}
+```
+
+`deviceId` remains stable across reconnects. A receiver binds one media session
+and one Receiving window to that ID. If the same device reconnects over another
+network interface, the new connection replaces the old connection without
+creating another window or changing its fullscreen state.
+
+A TCP client that disconnects without sending a valid identity message is a
+reachability probe and must not create, close, resize, or focus a Receiving
+window.

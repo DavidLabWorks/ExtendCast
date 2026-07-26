@@ -476,11 +476,11 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
         if let known = connectionFormat[connId] {
             hasTypeByte = known
         } else {
-            // Auto-detect on first frame: type-byte format starts with 0x01 (video)
-            // or 0x02 (audio). Legacy format starts with 8-byte PTS (little-endian),
+            // Auto-detect typed framing: 0x01=video, 0x02=audio,
+            // 0x03=sender identity. Legacy format starts with 8-byte PTS (little-endian),
             // where the first frame always has PTS=0 so byte[0]=0x00.
             let firstByte = body[body.startIndex]
-            if firstByte == 0x01 || firstByte == 0x02 {
+            if firstByte == 0x01 || firstByte == 0x02 || firstByte == 0x03 {
                 hasTypeByte = true
                 LogManager.shared.log("Receiver: Detected type-byte framing (desktop sender)")
             } else {
@@ -497,6 +497,8 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
                 videoDecoder?.decode(data: payload)
             } else if typeByte == 0x02 {
                 // TODO: route to audio decoder
+            } else if typeByte == 0x03 {
+                LogManager.shared.log("Receiver: Sender identity received")
             }
         } else {
             videoDecoder?.decode(data: body)
