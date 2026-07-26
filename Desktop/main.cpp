@@ -5,7 +5,10 @@
 #include <QStandardPaths>
 #include <QFile>
 #include <QLockFile>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <QDebug>
+#include <thread>
 #include "MainWindow.h"
 #include "Version.h"
 
@@ -66,6 +69,18 @@ static void ensureFirewallRule() {
 }
 #endif
 
+static const char* kSingleInstanceServerName = "ExtendCastReceiver";
+
+static void notifyExistingInstance() {
+    QLocalSocket socket;
+    socket.connectToServer(kSingleInstanceServerName, QIODevice::WriteOnly);
+    if (socket.waitForConnected(300)) {
+        socket.write("show");
+        socket.flush();
+        socket.waitForBytesWritten(300);
+    }
+}
+
 int main(int argc, char* argv[]) {
     // Use Compatibility Profile for GL_LUMINANCE/GL_LUMINANCE_ALPHA support
     // Core Profile removes these, breaking NV12 texture uploads on Windows
@@ -80,6 +95,7 @@ int main(int argc, char* argv[]) {
     QLockFile singleInstanceLock(QStandardPaths::writableLocation(QStandardPaths::TempLocation) + "/ExtendCast.lock");
     singleInstanceLock.setStaleLockTime(0);
     if (!singleInstanceLock.tryLock(100)) {
+        notifyExistingInstance();
         qDebug() << "ExtendCast is already running";
         return 0;
     }
@@ -89,12 +105,34 @@ int main(int argc, char* argv[]) {
     app.setApplicationVersion(EXTENDCAST_VERSION);
     app.setWindowIcon(QIcon(":/appicon.png"));
 
-#ifdef _WIN32
-    ensureFirewallRule();
-#endif
-
     MainWindow window;
+
+    QLocalServer::removeServer(kSingleInstanceServerName);
+    QLocalServer singleInstanceServer;
+    if (singleInstanceServer.listen(kSingleInstanceServerName)) {
+        QObject::connect(&singleInstanceServer, &QLocalServer::newConnection,
+                         &window, [&singleInstanceServer, &window]() {
+            while (auto* socket = singleInstanceServer.nextPendingConnection()) {
+                socket->deleteLater();
+            }
+            window.show();
+            if (window.isMinimized()) {
+                window.showNormal();
+            }
+            window.raise();
+            window.activateWindow();
+        });
+    } else {
+        qDebug() << "Single-instance server failed:" << singleInstanceServer.errorString();
+    }
+
     window.show();
+
+#ifdef _WIN32
+    std::thread([]() {
+        ensureFirewallRule();
+    }).detach();
+#endif
 
     return app.exec();
 }

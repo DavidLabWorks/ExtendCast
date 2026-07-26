@@ -6,10 +6,46 @@ import ScreenCaptureKit
 import IOKit.graphics
 
 
+final class SenderAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(mainWindowWillClose(_:)),
+            name: NSWindow.willCloseNotification,
+            object: nil
+        )
+    }
+
+    @objc private func mainWindowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              !(window is NSPanel),
+              window.canBecomeMain else {
+            return
+        }
+
+        // Wait until AppKit has removed the closing window before checking whether
+        // another app window is still visible. MenuBarExtra panels are ignored.
+        DispatchQueue.main.async {
+            let hasVisibleAppWindow = NSApplication.shared.windows.contains {
+                !($0 is NSPanel) && $0.canBecomeMain && $0.isVisible
+            }
+            if !hasVisibleAppWindow {
+                NSApplication.shared.setActivationPolicy(.accessory)
+            }
+        }
+    }
+}
+
 @main
 struct BetterCastSenderApp: App {
     static let mainWindowID = "main"
+    static let menuIconSystemName = "display.2"
 
+    @NSApplicationDelegateAdaptor(SenderAppDelegate.self) private var appDelegate
     @StateObject private var networkClient = NetworkClient()
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @AppStorage("hasCompletedTour") private var hasCompletedTour = false
@@ -32,16 +68,12 @@ struct BetterCastSenderApp: App {
         MenuBarExtra {
             StatusBarMenuView(client: networkClient)
         } label: {
-            Image(
-                systemName: networkClient.connectedDisplays.isEmpty
-                    ? "display"
-                    : "display.2"
-            )
-            .accessibilityLabel(
-                networkClient.connectedDisplays.isEmpty
-                    ? "ExtendCast — No connected displays"
-                    : "ExtendCast — \(networkClient.connectedDisplays.count) connected"
-            )
+            Image(systemName: Self.menuIconSystemName)
+                .accessibilityLabel(
+                    networkClient.connectedDisplays.isEmpty
+                        ? "ExtendCast — No connected displays"
+                        : "ExtendCast — \(networkClient.connectedDisplays.count) connected"
+                )
         }
         .menuBarExtraStyle(.window)
     }
@@ -153,7 +185,7 @@ struct StatusBarMenuView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: "display.2")
+                Image(systemName: BetterCastSenderApp.menuIconSystemName)
                     .foregroundStyle(.tint)
                 Text("ExtendCast")
                     .font(.headline)
@@ -274,6 +306,7 @@ struct StatusBarMenuView: View {
     }
 
     private func showMainWindow() {
+        NSApplication.shared.setActivationPolicy(.regular)
         if let window = NSApplication.shared.windows.first(where: {
             $0.canBecomeMain && !($0 is NSPanel)
         }) {

@@ -14,6 +14,9 @@
 #include <QTimer>
 #include <QSize>
 #include <QMouseEvent>
+#include <QSystemTrayIcon>
+#include <QMenu>
+#include <QAction>
 #include <QStringList>
 #include <QTime>
 #include <QHash>
@@ -50,7 +53,9 @@ private:
 struct DiscoveredService;
 class NetworkListener;
 class ServiceDiscovery;
+#ifdef ENABLE_ANDROID_ADB
 class AdbHelper;
+#endif
 class ReceiverSession;
 class QByteArray;
 class QVBoxLayout;
@@ -74,11 +79,14 @@ protected:
     bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
     void changeEvent(QEvent* event) override;
+    void closeEvent(QCloseEvent* event) override;
 
 private slots:
     void onSidebarSelectionChanged(int row);
     void onConnectClicked();
+#ifdef ENABLE_ANDROID_ADB
     void onAdbConnectClicked();
+#endif
     void onConnectionEstablished(
         const QString& deviceId,
         const QString& deviceName,
@@ -98,7 +106,9 @@ private slots:
     void onStatusChanged(const QString& status);
     void onReceiverListeningToggled(bool checked);
     void onReceiverAutoStartToggled(bool checked);
+#ifdef ENABLE_ANDROID_ADB
     void attemptAdbReconnect();
+#endif
     void onLogAdded(const QString& entry);
     void onCopyLogs();
     void onClearLogs();
@@ -106,6 +116,12 @@ private slots:
     void onLaunchAtLoginToggled(bool checked);
     void onCheckUpdatesClicked();
     void onDownloadUpdateClicked();
+    void onTrayActivated(QSystemTrayIcon::ActivationReason reason);
+    void onShowFromTray();
+    void onQuitFromTray();
+    void onCopyReceiverAddressFromTray();
+    void onOpenAppDataFolder();
+    void onShowAbout();
 #ifdef ENABLE_SENDER
     void onSendScreenClicked();
     void onStopSendingClicked();
@@ -129,6 +145,8 @@ private:
 #ifdef ENABLE_SENDER
     void setupSendPage();
 #endif
+    void setupTrayIcon();
+    void updateTrayActions();
     void updateLocalIpDisplay();
     void selectSidebarItem(int pageIndex);
     void updateLaunchAtLoginToggleStyle();
@@ -137,10 +155,14 @@ private:
     // Core components
     NetworkListener* m_network = nullptr;
     ServiceDiscovery* m_discovery = nullptr;
+#ifdef ENABLE_ANDROID_ADB
     AdbHelper* m_adbHelper = nullptr;
+#endif
     QTimer* m_reconnectTimer = nullptr;
     int m_reconnectAttempts = 0;
+#ifdef ENABLE_ANDROID_ADB
     bool m_wirelessAdbEnabled = false;
+#endif
 #ifdef ENABLE_SENDER
     SenderController* m_sender = nullptr;
 #endif
@@ -151,6 +173,12 @@ private:
     QSplitter* m_splitter = nullptr;
     QListWidget* m_sidebarList = nullptr;
     QStackedWidget* m_stack = nullptr;
+    QSystemTrayIcon* m_trayIcon = nullptr;
+    QMenu* m_trayMenu = nullptr;
+    QAction* m_trayShowAction = nullptr;
+    QAction* m_trayListeningAction = nullptr;
+    QAction* m_trayCopyAddressAction = nullptr;
+    bool m_quitRequested = false;
 
     // Page indices (set during setupUi based on ENABLE_SENDER)
     int m_pageOverview = -1;
@@ -182,8 +210,10 @@ private:
     QLineEdit* m_hostEdit = nullptr;
     QLineEdit* m_portEdit = nullptr;
     QPushButton* m_connectBtn = nullptr;
+#ifdef ENABLE_ANDROID_ADB
     QPushButton* m_adbBtn = nullptr;
     QLabel* m_adbHelpLabel = nullptr;
+#endif
 
     // Settings page
     QLabel* m_versionLabel = nullptr;

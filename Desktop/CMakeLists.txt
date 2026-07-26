@@ -21,6 +21,7 @@ set(CMAKE_AUTOUIC ON)
 
 # Sender mode (screen capture + encode + stream)
 option(ENABLE_SENDER "Enable sender mode (screen capture + H.264 encode)" OFF)
+option(ENABLE_ANDROID_ADB "Enable Android ADB connection helper" OFF)
 
 # Qt6 components
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network OpenGLWidgets Multimedia Svg)
@@ -116,7 +117,6 @@ set(SOURCES
     ServiceDiscovery.cpp
     AudioDecoder.cpp
     AudioPlayer.cpp
-    AdbHelper.cpp
 )
 
 set(HEADERS
@@ -132,8 +132,12 @@ set(HEADERS
     ServiceDiscovery.h
     AudioDecoder.h
     AudioPlayer.h
-    AdbHelper.h
 )
+
+if(ENABLE_ANDROID_ADB)
+    list(APPEND SOURCES AdbHelper.cpp)
+    list(APPEND HEADERS AdbHelper.h)
+endif()
 
 # Sender mode sources
 if(ENABLE_SENDER)
@@ -159,6 +163,10 @@ if(ENABLE_SENDER)
         )
     endif()
     # TODO: Linux PipeWire capture
+endif()
+
+if(ENABLE_ANDROID_ADB)
+    target_compile_definitions(BetterCastReceiver PRIVATE ENABLE_ANDROID_ADB=1)
 endif()
 
 # Qt resource file (embeds app icon PNG)

@@ -94,6 +94,12 @@ Section "ExtendCast (required)" SecCore
     ; Create uninstaller
     WriteUninstaller "$INSTDIR\uninstall.exe"
 
+    ; Install Microsoft Visual C++ runtime when bundled by windeployqt.
+    IfFileExists "$INSTDIR\vc_redist.x64.exe" 0 skip_vc_redist
+    DetailPrint "Installing Microsoft Visual C++ Runtime..."
+    nsExec::ExecToLog '"$INSTDIR\vc_redist.x64.exe" /install /quiet /norestart'
+    skip_vc_redist:
+
     ; Add firewall rules
     DetailPrint "Adding firewall rules..."
     nsExec::ExecToLog 'netsh advfirewall firewall add rule name="ExtendCast mDNS In" dir=in action=allow protocol=UDP localport=5353'

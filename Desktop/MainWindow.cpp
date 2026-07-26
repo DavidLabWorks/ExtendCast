@@ -3,7 +3,9 @@
 #include "InputEvent.h"
 #include "ReceiverSession.h"
 #include "ServiceDiscovery.h"
+#ifdef ENABLE_ANDROID_ADB
 #include "AdbHelper.h"
+#endif
 #ifdef ENABLE_SENDER
 #include "sender/SenderController.h"
 #include "sender/VirtualDisplayVDD.h"
@@ -39,6 +41,7 @@
 #include <QMouseEvent>
 #include <QToolButton>
 #include <QEvent>
+#include <QCloseEvent>
 #include <QWindow>
 #include <QStyledItemDelegate>
 #include <QStyleOptionViewItem>
@@ -50,7 +53,6 @@
 #include <windows.h>
 #include <windowsx.h>
 #endif
-
 // ─── Dark theme stylesheet ─────────────────────────────────────────────────────
 
 static const char* kDarkStylesheet = R"(
@@ -598,6 +600,12 @@ static QString formatPrimaryHint(const QVector<LocalAddressInfo>& infos) {
                          .arg(primary.ip, primary.connectionLabel);
 }
 
+static QString bestReceiverAddress(uint16_t port) {
+    const auto infos = receiverAddressInfos();
+    if (infos.isEmpty()) return QString();
+    return QString("%1:%2").arg(infos.first().ip).arg(port);
+}
+
 static bool receiverAutoStartEnabledPreference() {
     QSettings settings;
     if (settings.contains("receiverAutoStartEnabled")) {
@@ -682,6 +690,7 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
     setWindowTitle("ExtendCast");
+    setWindowIcon(QIcon(":/appicon.png"));
     setMinimumSize(800, 500);
 
     // Crash detection: clear stale marker from previous sessions. Avoid showing a
@@ -699,11 +708,13 @@ MainWindow::MainWindow(QWidget* parent)
     // Create core components
     m_network = new NetworkListener(this);
     m_discovery = new ServiceDiscovery(this);
-    m_adbHelper = new AdbHelper(this);
     m_updateManager = new QNetworkAccessManager(this);
     m_reconnectTimer = new QTimer(this);
     m_reconnectTimer->setInterval(3000);
+#ifdef ENABLE_ANDROID_ADB
+    m_adbHelper = new AdbHelper(this);
     connect(m_reconnectTimer, &QTimer::timeout, this, &MainWindow::attemptAdbReconnect);
+#endif
 
 #ifdef ENABLE_SENDER
     m_sender = new SenderController(this);
@@ -737,8 +748,10 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::onReceiverDiscovered);
 #endif
 
+#ifdef ENABLE_ANDROID_ADB
     connect(m_adbHelper, &AdbHelper::statusChanged,
             this, &MainWindow::onStatusChanged);
+#endif
 
     connect(m_network, &NetworkListener::connectionEstablished,
             this, &MainWindow::onConnectionEstablished);
@@ -757,25 +770,19 @@ MainWindow::MainWindow(QWidget* parent)
 
     setupUi();
 
-    // Match macOS: only start the receiver automatically when the persisted
-    // receiverAutoStartEnabled preference is enabled.
-    onReceiverListeningToggled(receiverAutoStartEnabledPreference());
-#ifdef ENABLE_SENDER
-    m_discovery->startBrowsing();
-#endif
-    LogManager::instance().log(QString("ExtendCast started — receiver listening %1")
-                                   .arg(m_receiverListening ? "enabled" : "disabled"));
-#ifdef _WIN32
-    QByteArray fwStatus = qgetenv("EXTENDCAST_FW_STATUS");
-    if (fwStatus == "ok") {
-        LogManager::instance().log("Firewall: Rules added (mDNS + TCP)");
-    } else if (fwStatus == "failed") {
-        LogManager::instance().log("Firewall: Rules NOT added — run as Administrator once for auto-discovery");
-    } else {
-        LogManager::instance().log("Firewall: Rules already exist");
-    }
-#endif
+    QTimer::singleShot(0, this, [this]() {
+        setupTrayIcon();
+        updateLocalIpDisplay();
 
+        // Match macOS: only start the receiver automatically when the persisted
+        // receiverAutoStartEnabled preference is enabled.
+        onReceiverListeningToggled(receiverAutoStartEnabledPreference());
+#ifdef ENABLE_SENDER
+        m_discovery->startBrowsing();
+#endif
+        LogManager::instance().log(QString("ExtendCast started - receiver listening %1")
+                                       .arg(m_receiverListening ? "enabled" : "disabled"));
+    });
     // Default window size (landscape 16:9, 70% screen)
     QScreen* screen = QApplication::primaryScreen();
     if (screen) {
@@ -789,12 +796,158 @@ MainWindow::MainWindow(QWidget* parent)
 }
 
 MainWindow::~MainWindow() {
+    m_quitRequested = true;
+    if (m_trayIcon) {
+        m_trayIcon->hide();
+    }
     m_discovery->stopAdvertising();
     qDeleteAll(m_receiverSessions);
     m_receiverSessions.clear();
     // Clean exit — remove crash marker
     QString crashMarker = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/running.lock";
     QFile::remove(crashMarker);
+}
+
+void MainWindow::closeEvent(QCloseEvent* event) {
+    if (!m_quitRequested && m_trayIcon && m_trayIcon->isVisible()) {
+        hide();
+        event->ignore();
+        LogManager::instance().log("Main window hidden to tray");
+        m_trayIcon->showMessage(
+            "ExtendCast is still running",
+            "Use the tray icon to reopen or quit.",
+            QSystemTrayIcon::Information,
+            2500);
+        return;
+    }
+
+    QMainWindow::closeEvent(event);
+}
+
+void MainWindow::setupTrayIcon() {
+    if (!QSystemTrayIcon::isSystemTrayAvailable()) {
+        LogManager::instance().log("System tray is not available");
+        return;
+    }
+
+    m_trayMenu = new QMenu(this);
+    m_trayMenu->setStyleSheet(
+        "QMenu {"
+        "  background-color: #202020;"
+        "  color: #f3f3f3;"
+        "  border: 1px solid #3a3a3a;"
+        "  border-radius: 8px;"
+        "  padding: 6px;"
+        "  font-family: 'Segoe UI', 'Microsoft YaHei UI';"
+        "  font-size: 13px;"
+        "}"
+        "QMenu::item {"
+        "  min-width: 180px;"
+        "  padding: 8px 26px 8px 16px;"
+        "  margin: 1px 0;"
+        "  border-radius: 5px;"
+        "}"
+        "QMenu::item:selected {"
+        "  background-color: #3a3a3a;"
+        "  color: #ffffff;"
+        "}"
+        "QMenu::item:disabled {"
+        "  color: #777777;"
+        "}"
+        "QMenu::separator {"
+        "  height: 1px;"
+        "  background-color: #343434;"
+        "  margin: 6px 8px;"
+        "}");
+    m_trayShowAction = m_trayMenu->addAction("Open ExtendCast", this, &MainWindow::onShowFromTray);
+    m_trayMenu->addSeparator();
+
+    m_trayListeningAction = m_trayMenu->addAction("Start Listening", this, [this]() {
+        onReceiverListeningToggled(!m_receiverListening);
+    });
+    m_trayCopyAddressAction = m_trayMenu->addAction("Copy Receiver Address", this,
+                                                    &MainWindow::onCopyReceiverAddressFromTray);
+    m_trayMenu->addSeparator();
+    m_trayMenu->addAction("Quit ExtendCast", this, &MainWindow::onQuitFromTray);
+
+    m_trayIcon = new QSystemTrayIcon(QIcon(":/appicon.png"), this);
+    m_trayIcon->setToolTip("ExtendCast Receiver");
+    m_trayIcon->setContextMenu(m_trayMenu);
+    connect(m_trayIcon, &QSystemTrayIcon::activated,
+            this, &MainWindow::onTrayActivated);
+    m_trayIcon->show();
+
+    updateTrayActions();
+}
+
+void MainWindow::updateTrayActions() {
+    if (m_trayListeningAction) {
+        m_trayListeningAction->setText(m_receiverListening ? "Stop Listening" : "Start Listening");
+    }
+
+    if (m_trayCopyAddressAction) {
+        m_trayCopyAddressAction->setEnabled(m_receiverListening && !bestReceiverAddress(m_receiverPort).isEmpty());
+    }
+
+    if (m_trayIcon) {
+        const QString address = bestReceiverAddress(m_receiverPort);
+        QString tooltip = "ExtendCast Receiver";
+        if (m_receiverListening) {
+            tooltip = address.isEmpty()
+                ? "ExtendCast Receiver - Listening"
+                : QString("ExtendCast Receiver - %1").arg(address);
+        } else {
+            tooltip = "ExtendCast Receiver - Not listening";
+        }
+        m_trayIcon->setToolTip(tooltip);
+    }
+}
+
+void MainWindow::onTrayActivated(QSystemTrayIcon::ActivationReason reason) {
+    if (reason == QSystemTrayIcon::Trigger ||
+        reason == QSystemTrayIcon::DoubleClick) {
+        onShowFromTray();
+    }
+}
+
+void MainWindow::onShowFromTray() {
+    show();
+    if (isMinimized()) {
+        showNormal();
+    }
+    raise();
+    activateWindow();
+}
+
+void MainWindow::onQuitFromTray() {
+    m_quitRequested = true;
+    if (m_trayIcon) {
+        m_trayIcon->hide();
+    }
+    close();
+    qApp->quit();
+}
+
+void MainWindow::onCopyReceiverAddressFromTray() {
+    const QString address = bestReceiverAddress(m_receiverPort);
+    if (address.isEmpty()) return;
+
+    QApplication::clipboard()->setText(address);
+    LogManager::instance().log(QString("Copied receiver address from tray: %1").arg(address));
+}
+
+void MainWindow::onOpenAppDataFolder() {
+    const QString dataPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QDir().mkpath(dataPath);
+    QDesktopServices::openUrl(QUrl::fromLocalFile(dataPath));
+}
+
+void MainWindow::onShowAbout() {
+    QMessageBox::about(
+        this,
+        "About ExtendCast",
+        QString("ExtendCast Receiver\nVersion %1\n\nClose hides the window to the tray. Use Quit ExtendCast to exit.")
+            .arg(QApplication::applicationVersion()));
 }
 
 // ─── UI Setup ───────────────────────────────────────────────────────────────────
@@ -1090,7 +1243,7 @@ void MainWindow::setupOverviewPage() {
     layout->addStretch();
 
     m_pageOverview = m_stack->addWidget(scroll);
-    updateLocalIpDisplay();
+    updateTrayActions();
 }
 
 // ─── Send Screen Page (ENABLE_SENDER) ───────────────────────────────────────────
@@ -1395,14 +1548,14 @@ void MainWindow::setupReceivePage() {
 
     m_recvStatusDot = new QLabel();
     m_recvStatusDot->setFixedSize(10, 10);
-    m_recvStatusDot->setStyleSheet("background-color: #34c759; border-radius: 5px;");
+    m_recvStatusDot->setStyleSheet("background-color: #6b6b6b; border-radius: 5px;");
     statusRow->addWidget(m_recvStatusDot);
 
     auto* statusTextLayout = new QVBoxLayout();
     statusTextLayout->setSpacing(3);
 
-    m_recvStatusLabel = new QLabel("Listening on port 51820");
-    m_recvStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #d8d8d8;");
+    m_recvStatusLabel = new QLabel("Receiver is not listening");
+    m_recvStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #9a9a9a;");
     statusTextLayout->addWidget(m_recvStatusLabel);
 
     m_recvStatusDetailLabel = new QLabel();
@@ -1414,9 +1567,9 @@ void MainWindow::setupReceivePage() {
     statusRow->addLayout(statusTextLayout, 1);
     statusRow->addStretch();
 
-    m_receiverListenToggle = new QPushButton("On");
+    m_receiverListenToggle = new QPushButton("Off");
     m_receiverListenToggle->setCheckable(true);
-    m_receiverListenToggle->setChecked(true);
+    m_receiverListenToggle->setChecked(false);
     m_receiverListenToggle->setCursor(Qt::PointingHandCursor);
     m_receiverListenToggle->setFixedSize(74, 32);
     m_receiverListenToggle->setStyleSheet(
@@ -1496,7 +1649,7 @@ void MainWindow::setupReceivePage() {
     layout->addStretch();
 
     m_pageReceive = m_stack->addWidget(scroll);
-    updateLocalIpDisplay();
+    updateTrayActions();
 }
 
 // ─── Settings Page ──────────────────────────────────────────────────────────────
@@ -1782,6 +1935,7 @@ void MainWindow::onConnectClicked() {
     LogManager::instance().log("Connecting to " + m_hostEdit->text() + ":" + QString::number(port));
 }
 
+#ifdef ENABLE_ANDROID_ADB
 void MainWindow::onAdbConnectClicked() {
     m_adbBtn->setEnabled(false);
     m_adbBtn->setText("Setting up ADB...");
@@ -1804,6 +1958,7 @@ void MainWindow::onAdbConnectClicked() {
         });
     }).detach();
 }
+#endif
 
 void MainWindow::onConnectionEstablished(
     const QString& deviceId,
@@ -1912,6 +2067,7 @@ void MainWindow::onConnectionEstablished(
         }
     });
 
+#ifdef ENABLE_ANDROID_ADB
     if (m_adbHelper->wasAdbConnection() && !m_wirelessAdbEnabled) {
         // Delay wireless ADB by 5 seconds — adb tcpip 5555 temporarily kills
         // the USB connection (and our forward tunnel). Give the stream time to
@@ -1925,6 +2081,7 @@ void MainWindow::onConnectionEstablished(
             }).detach();
         });
     }
+#endif
 }
 
 void MainWindow::onConnectionLost(const QString& deviceId) {
@@ -1940,6 +2097,7 @@ void MainWindow::onConnectionLost(const QString& deviceId) {
         delete session;
     }
 
+#ifdef ENABLE_ANDROID_ADB
     if (m_adbHelper->wasAdbConnection() && m_receiverSessions.isEmpty()) {
         // Don't reset m_reconnectAttempts here — if the reconnect itself
         // succeeds briefly then disconnects, we'd loop forever.
@@ -1952,7 +2110,9 @@ void MainWindow::onConnectionLost(const QString& deviceId) {
             attemptAdbReconnect();
             m_reconnectTimer->start();
         });
-    } else if (m_receiverSessions.isEmpty()) {
+    } else
+#endif
+    if (m_receiverSessions.isEmpty()) {
         m_recvStatusLabel->setText("Connection lost — still listening on port 51820");
         m_recvStatusLabel->setStyleSheet("font-size: 15px; font-weight: bold; color: orange;");
         LogManager::instance().log("Connection lost [" + deviceId.left(8) + "]");
@@ -2055,6 +2215,7 @@ void MainWindow::onReceiverListeningToggled(bool checked) {
     }
 
     updateLocalIpDisplay();
+    updateTrayActions();
 }
 
 void MainWindow::onReceiverAutoStartToggled(bool checked) {
@@ -2067,6 +2228,7 @@ void MainWindow::onReceiverAutoStartToggled(bool checked) {
     LogManager::instance().log(QString("Receiver start-on-launch %1").arg(checked ? "enabled" : "disabled"));
 }
 
+#ifdef ENABLE_ANDROID_ADB
 void MainWindow::attemptAdbReconnect() {
     m_reconnectAttempts++;
 
@@ -2094,6 +2256,7 @@ void MainWindow::attemptAdbReconnect() {
         });
     }).detach();
 }
+#endif
 
 // ─── Sender Slots ───────────────────────────────────────────────────────────────
 

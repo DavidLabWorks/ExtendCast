@@ -10,7 +10,6 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   QT_VERSION: '6.7.0'
-  VDD_VERSION: '25.7.23'  # Virtual Display Driver release tag
   WINDOWS_BUILD_DIR: 'D:/Temp/ExtendCast/windows-build'
 
 jobs:
@@ -73,67 +72,12 @@ jobs:
           cmake -S "${{ github.workspace }}/Desktop" -B "$env:WINDOWS_BUILD_DIR" `
             -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg/scripts/buildsystems/vcpkg.cmake" `
-            -DCMAKE_PREFIX_PATH="$env:Qt6_DIR" `
-            -DENABLE_SENDER=ON
+            -DCMAKE_PREFIX_PATH="$env:Qt6_DIR"
 
       - name: Build
         shell: pwsh
         run: |
           cmake --build "$env:WINDOWS_BUILD_DIR" --config Release
-
-      - name: Download ADB platform-tools
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri "https://dl.google.com/android/repository/platform-tools-latest-windows.zip" `
-            -OutFile "platform-tools.zip"
-          Expand-Archive -Path "platform-tools.zip" -DestinationPath "."
-          if (Test-Path "platform-tools/adb.exe") {
-            Write-Host "ADB downloaded successfully"
-          } else {
-            Write-Host "WARNING: adb.exe not found in download"
-          }
-
-      - name: Download Virtual Display Driver (VDD)
-        shell: pwsh
-        run: |
-          $vddTag = "${{ env.VDD_VERSION }}"
-          $baseUrl = "https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/${vddTag}"
-
-          mkdir "vdd" -Force
-          try {
-            # Download the actual driver package (contains .inf + .dll for pnputil)
-            $driverUrl = "${baseUrl}/VirtualDisplayDriver-x86.Driver.Only.zip"
-            Write-Host "Downloading VDD driver from: $driverUrl"
-            Invoke-WebRequest -Uri $driverUrl -OutFile "vdd-driver.zip" -MaximumRedirection 5
-            Expand-Archive -Path "vdd-driver.zip" -DestinationPath "vdd-driver-extract"
-            Get-ChildItem "vdd-driver-extract" -Recurse -File | ForEach-Object {
-              Copy-Item $_.FullName "vdd/" -Force
-            }
-
-            # Also download VDD Control app (UI for managing virtual displays)
-            $controlUrl = "${baseUrl}/VDD.Control.${vddTag}.zip"
-            Write-Host "Downloading VDD Control from: $controlUrl"
-            Invoke-WebRequest -Uri $controlUrl -OutFile "vdd-control.zip" -MaximumRedirection 5
-            Expand-Archive -Path "vdd-control.zip" -DestinationPath "vdd-control-extract"
-            Get-ChildItem "vdd-control-extract" -Recurse -File | ForEach-Object {
-              Copy-Item $_.FullName "vdd/" -Force
-            }
-
-            $fileCount = (Get-ChildItem "vdd" -File).Count
-            Write-Host "VDD: $fileCount files extracted"
-            Get-ChildItem "vdd" | ForEach-Object { Write-Host "  $_" }
-
-            # Verify we have the .inf file needed for driver installation
-            $infFiles = Get-ChildItem "vdd" -Filter "*.inf"
-            if ($infFiles.Count -eq 0) {
-              Write-Host "WARNING: No .inf file found in VDD package"
-            } else {
-              Write-Host "VDD driver .inf found: $($infFiles.Name)"
-            }
-          } catch {
-            Write-Host "WARNING: Failed to download VDD: $_"
-            Write-Host "Installer will be built without VDD bundled"
-          }
 
       - name: Package artifact
         shell: pwsh
@@ -147,31 +91,27 @@ jobs:
           windeployqt --release --no-translations --no-system-d3d-compiler `
             --no-opengl-sw "artifact/ExtendCast.exe"
 
-          # Copy FFmpeg DLLs
-          $vcpkgBin = "C:/vcpkg/installed/x64-windows/bin"
-          if (Test-Path $vcpkgBin) {
-            Get-ChildItem "$vcpkgBin/*.dll" | ForEach-Object {
-              Copy-Item $_.FullName "artifact/"
-            }
+          # Copy FFmpeg DLLs used by the receiver.
+          Get-ChildItem "$env:WINDOWS_BUILD_DIR/Release/*.dll" | ForEach-Object {
+            Copy-Item $_.FullName "artifact/"
           }
 
-          # Bundle ADB (adb.exe + required DLLs)
-          if (Test-Path "platform-tools/adb.exe") {
-            Copy-Item "platform-tools/adb.exe" "artifact/"
-            Copy-Item "platform-tools/AdbWinApi.dll" "artifact/" -ErrorAction SilentlyContinue
-            Copy-Item "platform-tools/AdbWinUsbApi.dll" "artifact/" -ErrorAction SilentlyContinue
-            Write-Host "ADB bundled into artifact"
+          # Qt's media plugin brings an unrelated FFmpeg runtime. Receiver audio
+          # uses QAudioSink directly, so keep the smaller receiver-only payload.
+          $unused = @(
+            "artifact/multimedia/ffmpegmediaplugin.dll",
+            "artifact/avcodec-60.dll",
+            "artifact/avformat-60.dll",
+            "artifact/avutil-58.dll",
+            "artifact/swresample-4.dll",
+            "artifact/swscale-7.dll"
+          )
+          foreach ($path in $unused) {
+            Remove-Item $path -Force -ErrorAction SilentlyContinue
           }
 
           # Copy app icon for runtime (embedded via Qt resource, but also keep as fallback)
           Copy-Item "Desktop/appicon.ico" "artifact/" -ErrorAction SilentlyContinue
-
-          # Bundle VDD files into portable artifact too
-          if ((Test-Path "vdd") -and (Get-ChildItem "vdd" -File).Count -gt 0) {
-            mkdir "artifact/VirtualDisplayDriver" -Force
-            Copy-Item "vdd/*" "artifact/VirtualDisplayDriver/" -Force
-            Write-Host "VDD files bundled into portable artifact"
-          }
 
       - name: Install NSIS
         shell: pwsh
@@ -206,13 +146,12 @@ jobs:
         run: |
           cd Desktop
 
-          # Copy artifact and vdd directories next to installer.nsi
+          # Copy artifact next to installer.nsi
           # (NSIS references files relative to the .nsi script)
           Copy-Item -Recurse "${{ github.workspace }}/artifact" "artifact"
-          Copy-Item -Recurse "${{ github.workspace }}/vdd" "vdd"
 
           # Build the installer
-          makensis /DPRODUCT_VERSION="${{ steps.version.outputs.version }}" installer.nsi
+          makensis /INPUTCHARSET UTF8 /DPRODUCT_VERSION="${{ steps.version.outputs.version }}" installer.nsi
 
           # Move installer to workspace root
           Move-Item "ExtendCast-Setup-*.exe" "${{ github.workspace }}/"
