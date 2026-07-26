@@ -2,6 +2,8 @@
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
+#include <QMap>
 #include <QList>
 #include <QUdpSocket>
 #include <QTimer>
@@ -11,6 +13,8 @@ struct DiscoveredRemoteReceiver {
     QString name;
     QString host;
     uint16_t port = 0;
+    QStringList advertisedRoutes;
+    QMap<QString, QStringList> advertisedRouteEndpoints;
 
     bool operator==(const DiscoveredRemoteReceiver& o) const {
         return name == o.name && host == o.host && port == o.port;
@@ -64,6 +68,9 @@ private:
     QString decodeDnsName(const QByteArray& packet, int& offset);
     QString getHostname();
     QList<QHostAddress> getLocalAddresses();
+    QStringList getAdvertisedRoutes() const;
+    QMap<QString, QStringList> getAdvertisedRouteEndpoints() const;
+    QByteArray buildAdvertisementTxtRecord() const;
     bool isOwnAddress(const QHostAddress& addr);
     void ensureMdnsSocket();
 

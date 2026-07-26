@@ -1,5 +1,7 @@
 #include "ServiceDiscovery.h"
 #include "MainWindow.h"  // for LogManager
+#include "NetworkInterfaceDescription.h"
+#include "ReceiverRouteClassifier.h"
 #include <QDebug>
 #include <QNetworkInterface>
 #include <QHostInfo>
@@ -68,11 +70,99 @@ QList<QHostAddress> ServiceDiscovery::getLocalAddresses() {
     return result;
 }
 
+QStringList ServiceDiscovery::getAdvertisedRoutes() const {
+    return getAdvertisedRouteEndpoints().keys();
+}
+
+QMap<QString, QStringList>
+ServiceDiscovery::getAdvertisedRouteEndpoints() const {
+    QMap<QString, QStringList> routeEndpoints;
+    for (const auto& iface : QNetworkInterface::allInterfaces()) {
+        if (!iface.flags().testFlag(QNetworkInterface::IsUp)
+            || !iface.flags().testFlag(QNetworkInterface::IsRunning)
+            || iface.flags().testFlag(QNetworkInterface::IsLoopBack)) {
+            continue;
+        }
+        const QString description =
+            detailedNetworkInterfaceDescription(iface).toLower();
+        std::vector<std::string> ipv4Addresses;
+        for (const auto& entry : iface.addressEntries()) {
+            if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol) {
+                ipv4Addresses.push_back(entry.ip().toString().toStdString());
+            }
+        }
+        if (ipv4Addresses.empty()) {
+            continue;
+        }
+        QString route;
+        switch (classifyReceiverAdvertisedRoute(
+            description.toStdString(),
+            ipv4Addresses,
+#ifdef _WIN32
+            true
+#else
+            false
+#endif
+        )) {
+        case ReceiverAdvertisedRoute::thunderbolt:
+            route = "thunderbolt";
+            break;
+        case ReceiverAdvertisedRoute::wifi:
+            route = "wifi";
+            break;
+        case ReceiverAdvertisedRoute::ethernet:
+            route = "ethernet";
+            break;
+        case ReceiverAdvertisedRoute::excluded:
+            break;
+        }
+        if (route.isEmpty()) continue;
+        for (const std::string& address : ipv4Addresses) {
+            routeEndpoints[route].append(
+                QString::fromStdString(address)
+                    + ":" + QString::number(m_advertisedPort)
+            );
+        }
+    }
+    for (auto endpoints = routeEndpoints.begin();
+         endpoints != routeEndpoints.end();
+         ++endpoints) {
+        endpoints.value().removeDuplicates();
+        endpoints.value().sort();
+    }
+    return routeEndpoints;
+}
+
+QByteArray ServiceDiscovery::buildAdvertisementTxtRecord() const {
+    QByteArray record;
+    const auto routeEndpoints = getAdvertisedRouteEndpoints();
+    QList<QByteArray> entries = {
+        QByteArray("rv=1"),
+        QByteArray("routes=")
+            + QStringList(routeEndpoints.keys()).join(",").toUtf8(),
+    };
+    for (auto endpoints = routeEndpoints.cbegin();
+         endpoints != routeEndpoints.cend();
+         ++endpoints) {
+        entries.append(
+            QByteArray("ep_") + endpoints.key().toUtf8() + "="
+                + endpoints.value().join(",").toUtf8()
+        );
+    }
+    for (const QByteArray& entry : entries) {
+        if (entry.size() > 255) continue;
+        record.append(static_cast<char>(entry.size()));
+        record.append(entry);
+    }
+    return record;
+}
+
 void ServiceDiscovery::startAdvertising(uint16_t tcpPort) {
     if (m_role != ServiceDiscoveryRole::receiverAdvertiser) {
         qWarning() << "Ignoring receiver advertisement on outbound route browser";
         return;
     }
+    m_advertisedPort = tcpPort;
 #ifdef HAS_MDNS
     // Use system Bonjour/Avahi if available
     DNSServiceRef ref = nullptr;
@@ -83,9 +173,12 @@ void ServiceDiscovery::startAdvertising(uint16_t tcpPort) {
     QString svcStr = (hostname.isEmpty() || hostname == "localhost") ? "Linux PC" : hostname + " (Linux)";
 #endif
     QByteArray svcName = svcStr.toUtf8();
+    const QByteArray txtRecord = buildAdvertisementTxtRecord();
     DNSServiceErrorType err = DNSServiceRegister(
         &ref, 0, 0, svcName.constData(), "_bettercast._tcp",
-        nullptr, nullptr, htons(tcpPort), 0, nullptr, nullptr, nullptr);
+        nullptr, nullptr, htons(tcpPort),
+        static_cast<uint16_t>(txtRecord.size()), txtRecord.constData(),
+        nullptr, nullptr);
     if (err == kDNSServiceErr_NoError) {
         m_registerRef = ref;
         qDebug() << "mDNS: Advertising via system Bonjour on port" << tcpPort;
@@ -95,7 +188,6 @@ void ServiceDiscovery::startAdvertising(uint16_t tcpPort) {
 
     // Embedded mDNS responder — use system hostname + platform for device identification
     // Platform keyword is needed so the Mac sender can detect non-Apple receivers
-    m_advertisedPort = tcpPort;
     const QString hostName = QSysInfo::machineHostName();
 #ifdef _WIN32
     const QString platform = "Windows";
@@ -334,6 +426,8 @@ void ServiceDiscovery::handleMdnsResponse(const QByteArray& packet) {
     QString srvHost;
     uint16_t srvPort = 0;
     QHostAddress aAddr;
+    QStringList advertisedRoutes;
+    QMap<QString, QStringList> advertisedRouteEndpoints;
 
     int totalRecords = anCount +
         qFromBigEndian<uint16_t>(d + 8) +  // authority
@@ -369,6 +463,34 @@ void ServiceDiscovery::handleMdnsResponse(const QByteArray& packet) {
         } else if (rrType == kTypeA && rdLen == 4) {
             quint32 ip = qFromBigEndian<quint32>(d + offset);
             aAddr = QHostAddress(ip);
+        } else if (rrType == kTypeTXT) {
+            int txtOffset = offset;
+            while (txtOffset < rdEnd) {
+                const int length = static_cast<uint8_t>(d[txtOffset++]);
+                if (txtOffset + length > rdEnd) break;
+                const QString entry = QString::fromUtf8(
+                    reinterpret_cast<const char*>(d + txtOffset),
+                    length
+                );
+                if (entry.startsWith("routes=")) {
+                    advertisedRoutes = entry.mid(7).split(
+                        ",",
+                        Qt::SkipEmptyParts
+                    );
+                } else if (entry.startsWith("ep_")) {
+                    const int separator = entry.indexOf('=');
+                    if (separator > 3) {
+                        advertisedRouteEndpoints[entry.mid(
+                            3,
+                            separator - 3
+                        )] = entry.mid(separator + 1).split(
+                            ",",
+                            Qt::SkipEmptyParts
+                        );
+                    }
+                }
+                txtOffset += length;
+            }
         }
 
         offset = rdEnd;
@@ -400,6 +522,8 @@ void ServiceDiscovery::handleMdnsResponse(const QByteArray& packet) {
         svc.name = instanceName;
         svc.host = host;
         svc.port = srvPort;
+        svc.advertisedRoutes = advertisedRoutes;
+        svc.advertisedRouteEndpoints = advertisedRouteEndpoints;
 
         // One Receiver can advertise the same service over multiple physical
         // routes. Keep every address as an independent candidate so the Sender
@@ -616,13 +740,14 @@ QByteArray ServiceDiscovery::buildMdnsResponse(uint16_t transactionId,
     appendU16(m_advertisedPort); // port
     pkt.append(srvTarget);
 
-    // 3. TXT record: empty (required by mDNS spec)
+    // 3. TXT record: explicit Receiver route capabilities
     pkt.append(encodeDnsName(fullName));
     appendU16(kTypeTXT);
     appendU16(kClassFlush);
     appendU32(ttl);
-    appendU16(1);   // rdlength = 1 (single empty string)
-    pkt.append('\0');
+    const QByteArray txtRecord = buildAdvertisementTxtRecord();
+    appendU16(static_cast<uint16_t>(txtRecord.size()));
+    pkt.append(txtRecord);
 
     // 4. A record: hostname.local → IP address
     pkt.append(encodeDnsName(hostTarget));

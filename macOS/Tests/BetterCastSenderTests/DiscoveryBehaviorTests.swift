@@ -4,6 +4,77 @@ import XCTest
 
 @MainActor
 final class DiscoveryBehaviorTests: XCTestCase {
+    func testReceiverAdvertisementDeclaresRoutesExplicitly() {
+        let metadata = NWBrowser.Result.Metadata.bonjour(
+            NWTXTRecord([
+                "rv": "1",
+                "routes": "wifi,thunderbolt",
+                "ep_wifi": "192.168.1.50:51820",
+                "ep_thunderbolt": "169.254.204.111:51820",
+            ])
+        )
+
+        XCTAssertEqual(
+            ReceiverAdvertisement.parse(metadata)?.routes,
+            [.wifi, .thunderbolt]
+        )
+        XCTAssertEqual(
+            ReceiverAdvertisement.parse(metadata)?
+                .routeEndpoints[.thunderbolt],
+            ["169.254.204.111:51820"]
+        )
+        XCTAssertNil(
+            ReceiverAdvertisement.parse(
+                .bonjour(NWTXTRecord(["routes": "thunderbolt"]))
+            )
+        )
+    }
+
+    func testAdvertisedThunderboltEndpointDoesNotDependOnARPCache() {
+        let receiver = DiscoveredService(
+            name: "Dang-Surface (Windows)",
+            endpoint: .service(
+                name: "Dang-Surface (Windows)",
+                type: "_bettercast._tcp",
+                domain: "local.",
+                interface: nil
+            ),
+            advertisedRoutes: [.wifi, .thunderbolt],
+            advertisedRouteEndpoints: [
+                .thunderbolt: ["169.254.204.111:51820"],
+            ]
+        )
+        let catalog = OutboundRouteCatalog(
+            remoteReceiver: receiver,
+            discoveredReceivers: [receiver],
+            localAddresses: [
+                ReceiverConnectionAddress(
+                    interfaceName: "bridge0",
+                    title: "Thunderbolt Bridge",
+                    address: "169.254.155.125:51820",
+                    usageHint: "Connect directly over Thunderbolt.",
+                    priority: 20
+                ),
+            ]
+        )
+
+        XCTAssertEqual(
+            catalog.advertisedThunderboltRoute(),
+            AdvertisedThunderboltRoute(
+                host: "169.254.204.111",
+                interfaceName: "bridge0"
+            )
+        )
+        XCTAssertEqual(
+            catalog.connectionEndpoint(
+                for: .thunderboltBridge,
+                resolvedRoute: nil,
+                discoveredEndpoint: receiver.endpoint
+            ),
+            .hostPort(host: "169.254.204.111%bridge0", port: 51820)
+        )
+    }
+
     func testInboundSessionConnectorOnlyDialsExplicitCompatibilityEndpoint() {
         var createdEndpoint: NWEndpoint?
         var adoptedConnection: NWConnection?
@@ -99,63 +170,6 @@ final class DiscoveryBehaviorTests: XCTestCase {
                 address: "192.168.128.1",
                 port: 51820
             )
-        )
-    }
-
-    func testThunderboltPeerAddressesKeepOnlyUsableBridgeNeighbors() {
-        let output = """
-        ? (169.254.83.107) at (incomplete) on bridge0 [bridge]
-        ? (169.254.155.125) at 36:d1:62:9b:5c:c0 on bridge0 permanent [bridge]
-        ? (169.254.204.111) at e4:9c:49:7a:85:68 on bridge0 [ethernet]
-        ? (169.254.255.255) at ff:ff:ff:ff:ff:ff on bridge0 [bridge]
-        ? (224.0.0.251) at 1:0:5e:0:0:fb on bridge0 ifscope permanent [ethernet]
-        """
-
-        XCTAssertEqual(
-            ThunderboltPeerAddressProvider.parseARPOutput(output),
-            ["169.254.204.111"]
-        )
-    }
-
-    func testThunderboltPeerLookupUsesCurrentBridgeInterfaceNames() {
-        let addresses = [
-            ReceiverConnectionAddress(
-                interfaceName: "en1",
-                title: "Wi-Fi",
-                address: "192.168.31.194:51820",
-                usageHint: "Connect through the Wi-Fi network.",
-                priority: 10
-            ),
-            ReceiverConnectionAddress(
-                interfaceName: "bridge1",
-                title: "Thunderbolt Bridge",
-                address: "169.254.205.130:51820",
-                usageHint: "Connect directly over Thunderbolt.",
-                priority: 20
-            ),
-        ]
-
-        XCTAssertEqual(
-            ThunderboltPeerAddressProvider.bridgeInterfaceNames(
-                from: addresses
-            ),
-            ["bridge1"]
-        )
-    }
-
-    func testThunderboltPeerRouteKeepsHostPairedWithItsBridge() {
-        let route = ThunderboltPeerAddressProvider.PeerRoute(
-            host: "169.254.204.111",
-            interfaceName: "bridge1"
-        )
-
-        XCTAssertEqual(
-            NetworkClient.preferredThunderboltPeerRoute(
-                receiverName: "Dang-Surface (Windows)",
-                availableRoutes: [route],
-                allowedInterfaceNames: ["bridge1"]
-            ),
-            route
         )
     }
 
@@ -561,6 +575,13 @@ final class DiscoveryBehaviorTests: XCTestCase {
                         priority: 10
                     ),
                     ReceiverConnectionAddress(
+                        interfaceName: "en0",
+                        title: "Wi-Fi",
+                        address: "192.168.31.194:51820",
+                        usageHint: "Connect through the Wi-Fi network.",
+                        priority: 10
+                    ),
+                    ReceiverConnectionAddress(
                         interfaceName: "bridge0",
                         title: "Thunderbolt Bridge",
                         address: "169.254.205.130:51820",
@@ -624,7 +645,8 @@ final class DiscoveryBehaviorTests: XCTestCase {
                     name: "bridge0",
                     type: .wiredEthernet
                 ),
-            ]
+            ],
+            advertisedRoutes: [.wifi, .thunderbolt]
         )
 
         XCTAssertEqual(
@@ -659,7 +681,8 @@ final class DiscoveryBehaviorTests: XCTestCase {
                     name: "bridge0",
                     type: .wiredEthernet
                 ),
-            ]
+            ],
+            advertisedRoutes: [.wifi, .thunderbolt]
         )
 
         let merged = wifiService.mergingDiscoveryInterfaces(
@@ -703,7 +726,8 @@ final class DiscoveryBehaviorTests: XCTestCase {
                     name: "bridge0",
                     type: .wiredEthernet
                 ),
-            ]
+            ],
+            advertisedRoutes: [.wifi, .thunderbolt]
         )
 
         XCTAssertEqual(
@@ -745,6 +769,10 @@ final class DiscoveryBehaviorTests: XCTestCase {
             ),
             discoveryInterfaces: [
                 DiscoveredNetworkInterface(name: "en0", type: .wifi),
+            ],
+            advertisedRoutes: [.wifi, .thunderbolt],
+            advertisedRouteEndpoints: [
+                .thunderbolt: ["169.254.204.111:51820"],
             ]
         )
 
@@ -778,6 +806,10 @@ final class DiscoveryBehaviorTests: XCTestCase {
             ),
             discoveryInterfaces: [
                 DiscoveredNetworkInterface(name: "en0", type: .wifi),
+            ],
+            advertisedRoutes: [.wifi, .thunderbolt],
+            advertisedRouteEndpoints: [
+                .thunderbolt: ["169.254.204.111:51820"],
             ]
         )
 
@@ -798,6 +830,10 @@ final class DiscoveryBehaviorTests: XCTestCase {
             ),
             discoveryInterfaces: [
                 DiscoveredNetworkInterface(name: "en0", type: .wifi),
+            ],
+            advertisedRoutes: [.wifi, .thunderbolt],
+            advertisedRouteEndpoints: [
+                .thunderbolt: ["169.254.204.111:51820"],
             ]
         )
         let catalog = OutboundRouteCatalog(
@@ -810,12 +846,6 @@ final class DiscoveryBehaviorTests: XCTestCase {
                     address: "169.254.205.130:51820",
                     usageHint: "Connect directly over Thunderbolt.",
                     priority: 20
-                ),
-            ],
-            thunderboltPeerRoutes: [
-                ThunderboltPeerAddressProvider.PeerRoute(
-                    host: "169.254.204.111",
-                    interfaceName: "bridge0"
                 ),
             ]
         )
@@ -830,15 +860,15 @@ final class DiscoveryBehaviorTests: XCTestCase {
             Set(["bridge0"])
         )
         XCTAssertEqual(
-            catalog.thunderboltPeerRoute(),
-            ThunderboltPeerAddressProvider.PeerRoute(
+            catalog.advertisedThunderboltRoute(),
+            AdvertisedThunderboltRoute(
                 host: "169.254.204.111",
                 interfaceName: "bridge0"
             )
         )
     }
 
-    func testOutboundRouteCatalogDoesNotGuessThunderboltTarget() {
+    func testOutboundRouteCatalogRequiresAdvertisedThunderbolt() {
         let target = DiscoveredService(
             name: "Office PC (Windows)",
             endpoint: .service(
@@ -849,16 +879,8 @@ final class DiscoveryBehaviorTests: XCTestCase {
             ),
             discoveryInterfaces: [
                 DiscoveredNetworkInterface(name: "en0", type: .wifi),
-            ]
-        )
-        let otherReceiver = DiscoveredService(
-            name: "Lab PC (Windows)",
-            endpoint: .service(
-                name: "Lab PC (Windows)",
-                type: "_bettercast._tcp",
-                domain: "local.",
-                interface: nil
-            )
+            ],
+            advertisedRoutes: [.wifi]
         )
         let localAddresses = [
             ReceiverConnectionAddress(
@@ -876,44 +898,11 @@ final class DiscoveryBehaviorTests: XCTestCase {
                 discoveredReceivers: [target],
                 localAddresses: localAddresses
             ).availableModes,
-            [.auto, .routerOnly, .thunderboltBridge]
-        )
-        XCTAssertEqual(
-            OutboundRouteCatalog(
-                remoteReceiver: target,
-                discoveredReceivers: [target, otherReceiver],
-                localAddresses: localAddresses,
-                thunderboltPeerRoutes: [
-                    ThunderboltPeerAddressProvider.PeerRoute(
-                        host: "169.254.204.111",
-                        interfaceName: "bridge0"
-                    ),
-                ]
-            ).availableModes,
-            [.auto, .routerOnly]
-        )
-        XCTAssertEqual(
-            OutboundRouteCatalog(
-                remoteReceiver: target,
-                discoveredReceivers: [target],
-                localAddresses: localAddresses,
-                thunderboltPeerRoutes: [
-                    ThunderboltPeerAddressProvider.PeerRoute(
-                        host: "169.254.204.111",
-                        interfaceName: "bridge0"
-                    ),
-                    ThunderboltPeerAddressProvider.PeerRoute(
-                        host: "169.254.204.112",
-                        interfaceName: "bridge0"
-                    ),
-                ]
-            ).availableModes,
             [.auto, .routerOnly]
         )
     }
 
-    func testAvailableModesReuseRecentThunderboltTopologySnapshot() {
-        var peerLookupCount = 0
+    func testAvailableModesUseAdvertisedThunderboltCapability() {
         let client = NetworkClient(
             localConnectionAddressProvider: {
                 [
@@ -923,15 +912,6 @@ final class DiscoveryBehaviorTests: XCTestCase {
                         address: "169.254.205.130:51820",
                         usageHint: "Connect directly over Thunderbolt.",
                         priority: 20
-                    ),
-                ]
-            },
-            thunderboltPeerRouteProvider: {
-                peerLookupCount += 1
-                return [
-                    ThunderboltPeerAddressProvider.PeerRoute(
-                        host: "169.254.204.111",
-                        interfaceName: "bridge0"
                     ),
                 ]
             }
@@ -946,7 +926,8 @@ final class DiscoveryBehaviorTests: XCTestCase {
             ),
             discoveryInterfaces: [
                 DiscoveredNetworkInterface(name: "en0", type: .wifi),
-            ]
+            ],
+            advertisedRoutes: [.wifi, .thunderbolt]
         )
 
         XCTAssertTrue(
@@ -957,10 +938,9 @@ final class DiscoveryBehaviorTests: XCTestCase {
             client.availableConnectionModes(for: receiver)
                 .contains(.thunderboltBridge)
         )
-        XCTAssertEqual(peerLookupCount, 1)
     }
 
-    func testConnectCardUsesUniqueThunderboltPeerWhenBonjourFoundOnlyOverWiFi() {
+    func testConnectCardUsesAdvertisedThunderboltEndpointWhenBonjourFoundOnlyOverWiFi() {
         let client = NetworkClient(
             localConnectionAddressProvider: {
                 [
@@ -979,14 +959,6 @@ final class DiscoveryBehaviorTests: XCTestCase {
                         priority: 20
                     ),
                 ]
-            },
-            thunderboltPeerRouteProvider: {
-                [
-                    ThunderboltPeerAddressProvider.PeerRoute(
-                        host: "169.254.204.111",
-                        interfaceName: "bridge0"
-                    ),
-                ]
             }
         )
         let service = DiscoveredService(
@@ -999,6 +971,10 @@ final class DiscoveryBehaviorTests: XCTestCase {
             ),
             discoveryInterfaces: [
                 DiscoveredNetworkInterface(name: "en0", type: .wifi),
+            ],
+            advertisedRoutes: [.wifi, .thunderbolt],
+            advertisedRouteEndpoints: [
+                .thunderbolt: ["169.254.204.111:51820"],
             ]
         )
 
@@ -1021,14 +997,6 @@ final class DiscoveryBehaviorTests: XCTestCase {
                         address: "169.254.205.130:51820",
                         usageHint: "Connect directly over Thunderbolt.",
                         priority: 20
-                    ),
-                ]
-            },
-            thunderboltPeerRouteProvider: {
-                [
-                    ThunderboltPeerAddressProvider.PeerRoute(
-                        host: "169.254.204.111",
-                        interfaceName: "bridge1"
                     ),
                 ]
             }
@@ -1079,28 +1047,6 @@ final class DiscoveryBehaviorTests: XCTestCase {
         )
     }
 
-    func testWindowsUsesOnlyUnambiguousThunderboltPeer() {
-        XCTAssertEqual(
-            NetworkClient.preferredThunderboltPeerHost(
-                receiverName: "Dang-Surface (Windows)",
-                availablePeerHosts: ["169.254.204.111"]
-            ),
-            "169.254.204.111"
-        )
-        XCTAssertNil(
-            NetworkClient.preferredThunderboltPeerHost(
-                receiverName: "Dang-Surface (Windows)",
-                availablePeerHosts: ["169.254.204.111", "169.254.204.112"]
-            )
-        )
-        XCTAssertNil(
-            NetworkClient.preferredThunderboltPeerHost(
-                receiverName: "Test iPad",
-                availablePeerHosts: ["169.254.204.111"]
-            )
-        )
-    }
-
     func testConnectCardShowsSelectedThunderboltEndpoint() {
         let client = NetworkClient(
             localConnectionAddressProvider: {
@@ -1111,14 +1057,6 @@ final class DiscoveryBehaviorTests: XCTestCase {
                         address: "169.254.204.112:51820",
                         usageHint: "Connect directly over Thunderbolt.",
                         priority: 20
-                    ),
-                ]
-            },
-            thunderboltPeerRouteProvider: {
-                [
-                    ThunderboltPeerAddressProvider.PeerRoute(
-                        host: "169.254.204.111",
-                        interfaceName: "bridge0"
                     ),
                 ]
             }
@@ -1137,6 +1075,10 @@ final class DiscoveryBehaviorTests: XCTestCase {
                     name: "bridge0",
                     type: .wiredEthernet
                 ),
+            ],
+            advertisedRoutes: [.wifi, .thunderbolt],
+            advertisedRouteEndpoints: [
+                .thunderbolt: ["169.254.204.111:51820"],
             ]
         )
 
@@ -1178,14 +1120,6 @@ final class DiscoveryBehaviorTests: XCTestCase {
                         address: "169.254.204.112:51820",
                         usageHint: "Connect directly over Thunderbolt.",
                         priority: 20
-                    ),
-                ]
-            },
-            thunderboltPeerRouteProvider: {
-                [
-                    ThunderboltPeerAddressProvider.PeerRoute(
-                        host: "169.254.204.111",
-                        interfaceName: "bridge0"
                     ),
                 ]
             }
@@ -1384,7 +1318,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
         )
     }
 
-    func testVerifiedThunderboltRouteWinsOverUnscopedARPPeer() {
+    func testVerifiedThunderboltRouteWinsOverAdvertisedCandidate() {
         let verifiedEndpoint = NWEndpoint.hostPort(
             host: "169.254.204.111%bridge0",
             port: 51820
@@ -1406,7 +1340,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
                     domain: "local.",
                     interface: nil
                 ),
-                thunderboltPeerHost: "169.254.204.111"
+                advertisedThunderboltHost: "169.254.204.111"
             ),
             verifiedEndpoint
         )
@@ -1433,7 +1367,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
                     domain: "local.",
                     interface: nil
                 ),
-                thunderboltPeerHost: "169.254.204.222",
+                advertisedThunderboltHost: "169.254.204.222",
                 thunderboltInterfaceName: "bridge0"
             ),
             .hostPort(
@@ -1464,7 +1398,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
                     domain: "local.",
                     interface: nil
                 ),
-                thunderboltPeerHost: "169.254.204.111",
+                advertisedThunderboltHost: "169.254.204.111",
                 thunderboltInterfaceName: "bridge1"
             ),
             .hostPort(
@@ -1494,7 +1428,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
                 for: .auto,
                 resolvedRoute: oldRoute,
                 discoveredEndpoint: currentWiFiEndpoint,
-                thunderboltPeerHost: nil,
+                advertisedThunderboltHost: nil,
                 thunderboltInterfaceName: nil
             ),
             currentWiFiEndpoint
@@ -1600,14 +1534,14 @@ final class DiscoveryBehaviorTests: XCTestCase {
                 for: .thunderboltBridge,
                 resolvedRoute: oldRoute,
                 discoveredEndpoint: currentEndpoint,
-                thunderboltPeerHost: nil,
+                advertisedThunderboltHost: nil,
                 thunderboltInterfaceName: "bridge0"
             ),
             currentEndpoint
         )
     }
 
-    func testCurrentScopedThunderboltCandidateBeatsStaleARPPeer() {
+    func testCurrentScopedThunderboltCandidateBeatsOlderAdvertisedCandidate() {
         let currentEndpoint = NWEndpoint.hostPort(
             host: "169.254.204.222%bridge0",
             port: 51820
@@ -1618,7 +1552,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
                 for: .thunderboltBridge,
                 resolvedRoute: nil,
                 discoveredEndpoint: currentEndpoint,
-                thunderboltPeerHost: "169.254.204.111",
+                advertisedThunderboltHost: "169.254.204.111",
                 thunderboltInterfaceName: "bridge0",
                 discoveredEndpointMatchesPreference: true
             ),
@@ -1659,23 +1593,6 @@ final class DiscoveryBehaviorTests: XCTestCase {
 
         XCTAssertTrue(ethernetRoute.supports(.ethernet))
         XCTAssertFalse(ethernetRoute.supports(.thunderboltBridge))
-    }
-
-    func testThunderboltARPPeerRemainsFallbackWithoutVerifiedRoute() {
-        XCTAssertEqual(
-            NetworkClient.preferredConnectionEndpoint(
-                for: .thunderboltBridge,
-                resolvedRoute: nil,
-                discoveredEndpoint: .service(
-                    name: "Dang-Surface (Windows)",
-                    type: "_bettercast._tcp",
-                    domain: "local.",
-                    interface: nil
-                ),
-                thunderboltPeerHost: "169.254.204.111"
-            ),
-            .hostPort(host: "169.254.204.111", port: 51820)
-        )
     }
 
     func testAvailableConnectDoesNotReuseRouteFromWrongInterface() {
@@ -1756,7 +1673,8 @@ final class DiscoveryBehaviorTests: XCTestCase {
             ),
             discoveryInterfaces: [
                 DiscoveredNetworkInterface(name: "en0", type: .wifi),
-            ]
+            ],
+            advertisedRoutes: [.wifi, .peerToPeer]
         )
         let p2pService = DiscoveredService(
             name: "Test iPad P2P",

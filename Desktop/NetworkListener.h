@@ -34,7 +34,9 @@ signals:
         const QString& deviceId,
         const QString& deviceName,
         const QString& connectionId,
-        const QString& peerAddress
+        const QString& peerAddress,
+        quint16 peerPort,
+        const QString& connectionMode
     );
     void connectionLost(const QString& deviceId);
     void videoDataReceived(
@@ -73,6 +75,7 @@ private:
     void handleAudioData(QTcpSocket* socket, const QByteArray& data);
     void handleUdpPacket(const QByteArray& data);
     QString connectionIdFor(QTcpSocket* socket) const;
+    QString connectionModeFor(QTcpSocket* socket) const;
     void registerSocket(QTcpSocket* socket);
     void rejectUnidentifiedConnection(QTcpSocket* socket, const QString& reason);
     void writeInputEvent(QTcpSocket* socket, const InputEvent& event);

@@ -373,99 +373,19 @@ enum ReceiverConnectionAddressProvider {
     }
 }
 
-enum ThunderboltPeerAddressProvider {
-    struct PeerRoute: Equatable {
-        let host: String
-        let interfaceName: String
-    }
+struct AdvertisedThunderboltRoute: Equatable {
+    let host: String
+    let interfaceName: String
+    let port: UInt16
 
-    static func availablePeerRoutes(
-        interfaceNames: [String]? = nil
-    ) -> [PeerRoute] {
-        let resolvedInterfaceNames = interfaceNames
-            ?? bridgeInterfaceNames(
-                from: ReceiverConnectionAddressProvider.availableAddresses(
-                    port: 51820
-                )
-            )
-        var routes: [PeerRoute] = []
-        for interfaceName in resolvedInterfaceNames {
-            for host in arpIPv4Addresses(interfaceName: interfaceName) {
-                let route = PeerRoute(
-                    host: host,
-                    interfaceName: interfaceName
-                )
-                if !routes.contains(route) {
-                    routes.append(route)
-                }
-            }
-        }
-        return routes.sorted {
-            if $0.interfaceName != $1.interfaceName {
-                return $0.interfaceName < $1.interfaceName
-            }
-            return $0.host < $1.host
-        }
-    }
-
-    static func availableIPv4Addresses(
-        interfaceNames: [String]? = nil
-    ) -> [String] {
-        Array(Set(
-            availablePeerRoutes(interfaceNames: interfaceNames).map(\.host)
-        )).sorted()
-    }
-
-    static func bridgeInterfaceNames(
-        from addresses: [ReceiverConnectionAddress]
-    ) -> [String] {
-        Array(Set(addresses.compactMap {
-            $0.title == "Thunderbolt Bridge" ? $0.interfaceName : nil
-        })).sorted()
-    }
-
-    static func parseARPOutput(_ output: String) -> [String] {
-        var addresses: [String] = []
-        for line in output.split(whereSeparator: \.isNewline) {
-            let fields = line.split(separator: " ")
-            guard fields.count >= 4,
-                  fields[1].first == "(",
-                  fields[1].last == ")",
-                  fields[2] == "at",
-                  fields[3].contains(":"),
-                  !fields[3].hasPrefix("ff:"),
-                  !line.contains(" permanent ") else {
-                continue
-            }
-            let address = fields[1].dropFirst().dropLast()
-            guard address.hasPrefix("169.254.") else { continue }
-            addresses.append(String(address))
-        }
-        return Array(Set(addresses)).sorted()
-    }
-
-    private static func arpIPv4Addresses(
-        interfaceName: String
-    ) -> [String] {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/arp")
-        process.arguments = ["-an", "-i", interfaceName]
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0,
-                  let text = String(data: data, encoding: .utf8) else {
-                return []
-            }
-            return parseARPOutput(text)
-        } catch {
-            return []
-        }
+    init(
+        host: String,
+        interfaceName: String,
+        port: UInt16 = BCConstants.tcpPort
+    ) {
+        self.host = host
+        self.interfaceName = interfaceName
+        self.port = port
     }
 }
 
@@ -523,6 +443,50 @@ struct ReceiverModeView: View {
                     }
                 }
 
+                sectionTitle("Connected Senders")
+
+                DashboardCard {
+                    if listener.connectedSenders.isEmpty {
+                        HStack(spacing: 10) {
+                            Image(systemName: "display.2")
+                                .foregroundStyle(.secondary)
+                            Text("No senders connected.")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                    } else {
+                        VStack(spacing: 0) {
+                            ForEach(
+                                Array(listener.connectedSenders.enumerated()),
+                                id: \.element.id
+                            ) { index, sender in
+                                connectedSenderRow(sender)
+                                if index < listener.connectedSenders.count - 1 {
+                                    Divider()
+                                        .padding(.vertical, 14)
+                                }
+                            }
+
+                            Divider()
+                                .padding(.vertical, 14)
+
+                            Button {
+                                manager.showWindow()
+                            } label: {
+                                Label(
+                                    "Show Video Window",
+                                    systemImage: "macwindow"
+                                )
+                                .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+                        }
+                    }
+                }
+
                 if manager.isRunning {
                     sectionTitle("Advertised Receiver Routes")
 
@@ -547,32 +511,6 @@ struct ReceiverModeView: View {
                                     }
                                 }
                             }
-                        }
-                    }
-                }
-
-                if manager.isRunning && !manager.networkListener.connectedClients.isEmpty {
-                    sectionTitle("Connected Senders")
-
-                    DashboardCard {
-                        VStack(spacing: 12) {
-                            HStack {
-                                Circle()
-                                    .fill(Color.green)
-                                    .frame(width: 10, height: 10)
-                                Text("\(manager.networkListener.connectedClients.count) sender\(manager.networkListener.connectedClients.count == 1 ? "" : "s") connected")
-                                    .font(.system(size: 14, weight: .semibold))
-                                Spacer()
-                            }
-
-                            Button {
-                                manager.showWindow()
-                            } label: {
-                                Label("Show Video Window", systemImage: "macwindow")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.large)
                         }
                     }
                 }
@@ -699,6 +637,43 @@ struct ReceiverModeView: View {
             Button("Copy") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(connection.address, forType: .string)
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func connectedSenderRow(
+        _ sender: ReceiverConnectedSender
+    ) -> some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(sender.deviceName)
+                    .font(.system(size: 14, weight: .semibold))
+
+                Text(sender.endpoint)
+                    .font(
+                        .system(
+                            size: 16,
+                            weight: .semibold,
+                            design: .monospaced
+                        )
+                    )
+                    .textSelection(.enabled)
+
+                Text("Mode: \(sender.connectionMode) · TCP")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 20)
+
+            Button("Copy") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(
+                    sender.endpoint,
+                    forType: .string
+                )
             }
             .buttonStyle(.bordered)
         }

@@ -3066,12 +3066,20 @@ struct DiscoveredService: Identifiable {
     let endpoint: NWEndpoint
     let discoveryInterfaces: [DiscoveredNetworkInterface]
     let connectionEndpoints: [DiscoveredServiceEndpoint]
+    let advertisedRoutes: Set<ReceiverAdvertisedRoute>
+    let advertisedRouteEndpoints: [
+        ReceiverAdvertisedRoute: Set<String>
+    ]
 
     init(
         name: String,
         endpoint: NWEndpoint,
         discoveryInterfaces: [DiscoveredNetworkInterface] = [],
-        connectionEndpoints: [DiscoveredServiceEndpoint]? = nil
+        connectionEndpoints: [DiscoveredServiceEndpoint]? = nil,
+        advertisedRoutes: Set<ReceiverAdvertisedRoute>? = nil,
+        advertisedRouteEndpoints: [
+            ReceiverAdvertisedRoute: Set<String>
+        ] = [:]
     ) {
         self.name = name
         self.endpoint = endpoint
@@ -3082,25 +3090,35 @@ struct DiscoveredService: Identifiable {
                 discoveryInterfaces: discoveryInterfaces
             ),
         ]
+        self.advertisedRoutes = advertisedRoutes ?? Set(
+            discoveryInterfaces.compactMap { interface in
+                if interface.isThunderboltBridge { return .thunderbolt }
+                if interface.isEthernet { return .ethernet }
+                if interface.type == .wifi { return .wifi }
+                let name = interface.name.lowercased()
+                if name == "awdl0" || name == "llw0" {
+                    return .peerToPeer
+                }
+                return nil
+            }
+        )
+        self.advertisedRouteEndpoints = advertisedRouteEndpoints
     }
 
     var supportsEthernetConnection: Bool {
-        discoveryInterfaces.contains(where: \.isEthernet)
+        advertisedRoutes.contains(.ethernet)
     }
 
     var supportsThunderboltConnection: Bool {
-        discoveryInterfaces.contains(where: \.isThunderboltBridge)
+        advertisedRoutes.contains(.thunderbolt)
     }
 
     var supportsWiFiConnection: Bool {
-        discoveryInterfaces.contains { $0.type == .wifi }
+        advertisedRoutes.contains(.wifi)
     }
 
     var supportsApplePeerToPeerConnection: Bool {
-        discoveryInterfaces.contains { interface in
-            let name = interface.name.lowercased()
-            return name == "awdl0" || name == "llw0"
-        }
+        advertisedRoutes.contains(.peerToPeer)
     }
 
     func mergingDiscoveryInterfaces(from other: DiscoveredService) -> DiscoveredService {
@@ -3113,13 +3131,19 @@ struct DiscoveredService: Identifiable {
             mergedEndpoints.append(candidate)
         }
 
+        var mergedRouteEndpoints = advertisedRouteEndpoints
+        for (route, endpoints) in other.advertisedRouteEndpoints {
+            mergedRouteEndpoints[route, default: []].formUnion(endpoints)
+        }
         return DiscoveredService(
             name: name,
             endpoint: Self.unscopedServiceEndpoint(endpoint),
             discoveryInterfaces: Array(
                 Set(discoveryInterfaces + other.discoveryInterfaces)
             ).sorted { $0.name < $1.name },
-            connectionEndpoints: mergedEndpoints
+            connectionEndpoints: mergedEndpoints,
+            advertisedRoutes: advertisedRoutes.union(other.advertisedRoutes),
+            advertisedRouteEndpoints: mergedRouteEndpoints
         )
     }
 
@@ -3467,20 +3491,60 @@ private final class BonjourTCPReachabilitySweep {
         completion: @escaping (BonjourReachabilityResult) -> Void
     ) {
         self.completion = completion
-        let candidates = service.connectionEndpoints.isEmpty
-            ? [
-                DiscoveredServiceEndpoint(
-                    endpoint: service.endpoint,
-                    discoveryInterfaces: service.discoveryInterfaces
-                ),
-            ]
-            : service.connectionEndpoints
+        let localThunderboltInterfaces = Set(
+            ReceiverConnectionAddressProvider.availableAddresses(
+                port: BCConstants.tcpPort
+            ).compactMap {
+                $0.title == "Thunderbolt Bridge" ? $0.interfaceName : nil
+            }
+        )
+        let advertisedCandidates = service.advertisedRouteEndpoints.flatMap {
+            route, endpointValues -> [(
+                DiscoveredServiceEndpoint,
+                ReceiverAdvertisedRoute
+            )] in
+            endpointValues.compactMap { endpointValue in
+                let interfaceName =
+                    route == .thunderbolt
+                        && localThunderboltInterfaces.count == 1
+                            ? localThunderboltInterfaces.first
+                            : nil
+                guard let endpoint = ReceiverAdvertisement.endpoint(
+                    from: endpointValue,
+                    interfaceName: interfaceName
+                ) else {
+                    return nil
+                }
+                return (
+                    DiscoveredServiceEndpoint(
+                        endpoint: endpoint,
+                        discoveryInterfaces: []
+                    ),
+                    route
+                )
+            }
+        }
+        let candidates = advertisedCandidates.isEmpty
+            ? (service.connectionEndpoints.isEmpty
+                ? [
+                    (
+                        DiscoveredServiceEndpoint(
+                            endpoint: service.endpoint,
+                            discoveryInterfaces: service.discoveryInterfaces
+                        ),
+                        nil
+                    ),
+                ]
+                : service.connectionEndpoints.map { ($0, nil) })
+            : advertisedCandidates.map { ($0.0, Optional($0.1)) }
         remainingChecks = candidates.count
-        checks = candidates.map { candidate in
+        checks = candidates.map { candidate, advertisedRoute in
             let candidateService = DiscoveredService(
                 name: service.name,
                 endpoint: candidate.endpoint,
-                discoveryInterfaces: candidate.discoveryInterfaces
+                discoveryInterfaces: candidate.discoveryInterfaces,
+                advertisedRoutes:
+                    advertisedRoute.map { [$0] } ?? service.advertisedRoutes
             )
             return BonjourTCPReachabilityCheck(
                 service: candidateService
@@ -3788,7 +3852,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         for preference: NetworkInterfacePreference,
         resolvedRoute: BonjourResolvedRoute?,
         discoveredEndpoint: NWEndpoint,
-        thunderboltPeerHost: String?,
+        advertisedThunderboltHost: String?,
         thunderboltInterfaceName: String? = nil,
         discoveredEndpointMatchesPreference: Bool = false
     ) -> NWEndpoint {
@@ -3796,7 +3860,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             for: preference,
             resolvedRoute: resolvedRoute,
             discoveredEndpoint: discoveredEndpoint,
-            thunderboltPeerHost: thunderboltPeerHost,
+            advertisedThunderboltHost: advertisedThunderboltHost,
             thunderboltInterfaceName: thunderboltInterfaceName,
             discoveredEndpointMatchesPreference:
                 discoveredEndpointMatchesPreference
@@ -3884,12 +3948,6 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private let focusedBonjourReachabilityRecheckInterval: TimeInterval
     private let bonjourReachabilityProbe: BonjourReachabilityProbe
     private let localConnectionAddressProvider: () -> [ReceiverConnectionAddress]
-    private let thunderboltPeerRouteProvider:
-        () -> [ThunderboltPeerAddressProvider.PeerRoute]
-    private var cachedThunderboltPeerRoutes:
-        [ThunderboltPeerAddressProvider.PeerRoute] = []
-    private var lastThunderboltPeerRouteRefresh = Date.distantPast
-    private static let thunderboltPeerRouteCacheInterval: TimeInterval = 1
     private var focusedBonjourServiceName: String?
     private var browsedTCPServicesByName: [String: DiscoveredService] = [:]
     private var reachableTCPServiceNames: Set<String> = []
@@ -4062,7 +4120,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         LogManager.shared.log("Sender: Browsing for \(serviceType)...")
 
         let browser = NWBrowser(
-            for: .bonjour(type: serviceType, domain: nil),
+            for: .bonjourWithTXTRecord(type: serviceType, domain: nil),
             using: parameters
         )
         browsers[protocolType] = browser
@@ -4088,6 +4146,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 var servicesByName: [String: DiscoveredService] = [:]
                 for result in results {
                     if case .service(let name, _, _, _) = result.endpoint {
+                        let advertisement = ReceiverAdvertisement.parse(
+                            result.metadata
+                        )
                         let discoveredService = DiscoveredService(
                             name: name,
                             endpoint: result.endpoint,
@@ -4096,7 +4157,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                                     name: $0.name,
                                     type: $0.type
                                 )
-                            }
+                            },
+                            advertisedRoutes: advertisement?.routes ?? [],
+                            advertisedRouteEndpoints:
+                                advertisement?.routeEndpoints ?? [:]
                         )
                         if let existing = servicesByName[name] {
                             servicesByName[name] =
@@ -4430,10 +4494,6 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         bonjourReachabilityProbe: BonjourReachabilityProbe? = nil,
         localConnectionAddressProvider: @escaping () -> [ReceiverConnectionAddress] = {
             ReceiverConnectionAddressProvider.availableAddresses(port: 51820)
-        },
-        thunderboltPeerRouteProvider:
-            @escaping () -> [ThunderboltPeerAddressProvider.PeerRoute] = {
-                ThunderboltPeerAddressProvider.availablePeerRoutes()
         }
     ) {
         self.discoveryRemovalDelay = discoveryRemovalDelay
@@ -4442,7 +4502,6 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         self.focusedBonjourReachabilityRecheckInterval =
             focusedBonjourReachabilityRecheckInterval
         self.localConnectionAddressProvider = localConnectionAddressProvider
-        self.thunderboltPeerRouteProvider = thunderboltPeerRouteProvider
         self.bonjourReachabilityProbe = bonjourReachabilityProbe ?? { service, completion in
             let check = BonjourTCPReachabilitySweep(
                 service: service,
@@ -4851,38 +4910,32 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
     private func outboundRouteCatalog(
         for service: DiscoveredService,
-        localAddresses: [ReceiverConnectionAddress]? = nil,
-        thunderboltPeerRoutes: [
-            ThunderboltPeerAddressProvider.PeerRoute
-        ]? = nil
+        localAddresses: [ReceiverConnectionAddress]? = nil
     ) -> OutboundRouteCatalog {
         OutboundRouteCatalog(
             remoteReceiver: service,
             discoveredReceivers: foundServices,
             localAddresses:
-                localAddresses ?? localConnectionAddressProvider(),
-            thunderboltPeerRoutes:
-                thunderboltPeerRoutes ?? currentThunderboltPeerRoutes()
+                localAddresses ?? localConnectionAddressProvider()
         )
-    }
-
-    private func currentThunderboltPeerRoutes(
-        forceRefresh: Bool = false
-    ) -> [ThunderboltPeerAddressProvider.PeerRoute] {
-        let now = Date()
-        if forceRefresh
-            || now.timeIntervalSince(lastThunderboltPeerRouteRefresh)
-                >= Self.thunderboltPeerRouteCacheInterval {
-            cachedThunderboltPeerRoutes = thunderboltPeerRouteProvider()
-            lastThunderboltPeerRouteRefresh = now
-        }
-        return cachedThunderboltPeerRoutes
     }
 
     func availableConnectionModes(
         for service: DiscoveredService
     ) -> [NetworkInterfacePreference] {
-        outboundRouteCatalog(for: service).availableModes
+        let advertisedModes = outboundRouteCatalog(for: service).availableModes
+        guard let verifiedRoutes = resolvedBonjourRoutesByName[service.name],
+              !verifiedRoutes.isEmpty else {
+            return advertisedModes
+        }
+        return advertisedModes.filter { mode in
+            switch mode {
+            case .auto, .p2pOnly:
+                return true
+            default:
+                return verifiedRoutes.contains { $0.supports(mode) }
+            }
+        }
     }
 
     static func preferredAutomaticConnectionMode(
@@ -4892,28 +4945,6 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         OutboundRouteCatalog.preferredAutomaticMode(
             receiverName: receiverName,
             availableModes: availableModes
-        )
-    }
-
-    static func preferredThunderboltPeerHost(
-        receiverName: String,
-        availablePeerHosts: [String]
-    ) -> String? {
-        guard receiverName.lowercased().contains("windows") else { return nil }
-        let uniqueHosts = Array(Set(availablePeerHosts))
-        guard uniqueHosts.count == 1 else { return nil }
-        return uniqueHosts[0]
-    }
-
-    static func preferredThunderboltPeerRoute(
-        receiverName: String,
-        availableRoutes: [ThunderboltPeerAddressProvider.PeerRoute],
-        allowedInterfaceNames: Set<String>
-    ) -> ThunderboltPeerAddressProvider.PeerRoute? {
-        OutboundRouteCatalog.preferredThunderboltPeerRoute(
-            receiverName: receiverName,
-            availableRoutes: availableRoutes,
-            allowedInterfaceNames: allowedInterfaceNames
         )
     }
 
@@ -5433,7 +5464,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         connection.cancel()
 
         if attempt < 2 {
-            // USB4/link-local routes can briefly report "no route" while ARP settles.
+            // USB4/link-local routes can briefly report "no route" while link-local routing settles.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 self?.startManualAvailabilityProbe(
                     item,
@@ -5693,9 +5724,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         let localConnectionAddresses = localConnectionAddressProvider()
         let routeCatalog = outboundRouteCatalog(
             for: service,
-            localAddresses: localConnectionAddresses,
-            thunderboltPeerRoutes:
-                currentThunderboltPeerRoutes(forceRefresh: true)
+            localAddresses: localConnectionAddresses
         )
         var receiverSettings = restoringSavedSettings ? settings(for: service) : currentReceiverSettings()
         let requestedInterfacePreference = interfacePreferenceOverride
@@ -5803,8 +5832,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             discoveredEndpoint:
                 discoveredService.infrastructureConnectionEndpoint
         )
-        let thunderboltPeerRoute = routeCatalog.thunderboltPeerRoute()
-        let thunderboltInterfaceName = thunderboltPeerRoute?.interfaceName
+        let advertisedThunderboltRoute = routeCatalog.advertisedThunderboltRoute()
+        let thunderboltInterfaceName = advertisedThunderboltRoute?.interfaceName
             ?? localConnectionAddresses
                 .first { $0.title == "Thunderbolt Bridge" }?
                 .interfaceName
@@ -5834,7 +5863,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             LogManager.shared.log(
                 "Sender: Using verified Bonjour endpoint \(resolvedBonjourEndpoint) for \(service.name)"
             )
-        } else if thunderboltPeerRoute != nil {
+        } else if advertisedThunderboltRoute != nil {
             LogManager.shared.log(
                 "Sender: Using current Thunderbolt Bridge peer \(connectEndpoint) " +
                 "for \(service.name)"

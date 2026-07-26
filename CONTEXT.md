@@ -41,10 +41,23 @@ An active media and input session accepted by the local Receiver Role from one R
 _Avoid_: Sender connection, outbound stream
 
 **Receiver Advertisement**:
-The single discovery announcement published by the local Receiver Role. It says
-which transport routes currently reach the Receiver listener; it does not
-describe Remote Senders or existing Inbound Sessions.
+The authoritative discovery announcement published by the local Receiver Role,
+including the transport routes it currently offers and the concrete endpoint
+for each route. Sender-local interfaces cannot add capabilities or invent
+remote endpoints that are absent from this announcement.
 _Avoid_: Sender broadcast, connection list
+
+**Advertised Route Capability**:
+A transport kind explicitly included in a Receiver Advertisement, such as
+Wi-Fi, Ethernet, Thunderbolt Bridge, or Apple peer-to-peer.
+_Avoid_: Inferred route, local interface guess
+
+**Advertised Route Endpoint**:
+An address and port explicitly paired with one Advertised Route Capability by
+the Receiver, for example `ep_thunderbolt=169.254.204.111:51820`. It is a Route
+Candidate until the Sender completes a transport handshake. ARP neighbors,
+receiver names, and the number of discovered devices are not substitutes.
+_Avoid_: Guessed peer, inferred endpoint
 
 **Compatibility Inbound Connector**:
 An explicit manual-address or ADB fallback that lets the local Receiver Role
@@ -52,22 +65,3 @@ dial a Remote Sender. It never participates in discovery, is never advertised,
 and is never started automatically. Even though the Receiver opens the
 transport, the resulting media flow is still an Inbound Session.
 _Avoid_: Receiver discovery, active receiver route
-
-## Connection Rules
-
-Normal operation always follows one direction:
-
-1. The Receiver Role listens and publishes one Receiver Advertisement.
-2. The Sender Role discovers the advertisement and creates Route Candidates
-   for the advertised transports.
-3. The Sender Role performs a transport handshake with each candidate. A
-   successful connection promotes it to an Available Route; a failed candidate
-   is discarded. The normal stream handshake then validates protocol identity
-   before media is accepted.
-4. The Sender Role opens an Outbound Stream over the selected Available Route.
-5. The Receiver Role accepts that transport as an Inbound Session.
-
-Receiver-initiated dialing is compatibility behavior only. Manual-address and
-ADB actions may use the Compatibility Inbound Connector, but they must not
-create discovery entries, Receiver Advertisements, Outbound Routes, or Sender
-state.

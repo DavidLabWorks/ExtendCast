@@ -1,12 +1,16 @@
 #include "NetworkListener.h"
 #include "MainWindow.h"  // for LogManager
+#include "NetworkInterfaceDescription.h"
+#include "ReceiverRouteClassifier.h"
 
 #include <QHostAddress>
 #include <QDebug>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QNetworkInterface>
 #include <QUuid>
 #include <QtEndian>
+#include <vector>
 
 NetworkListener::NetworkListener(QObject* parent)
     : QObject(parent)
@@ -149,6 +153,51 @@ void NetworkListener::onNewTcpConnection() {
 
 QString NetworkListener::connectionIdFor(QTcpSocket* socket) const {
     return m_connectionIds.value(socket);
+}
+
+QString NetworkListener::connectionModeFor(QTcpSocket* socket) const {
+    if (!socket) return "Local Network";
+
+    bool hasLocalIpv4 = false;
+    const quint32 localIpv4 = socket->localAddress().toIPv4Address(
+        &hasLocalIpv4
+    );
+    if (!hasLocalIpv4) return "Local Network";
+
+    for (const auto& iface : QNetworkInterface::allInterfaces()) {
+        std::vector<std::string> ipv4Addresses;
+        bool ownsLocalAddress = false;
+        for (const auto& entry : iface.addressEntries()) {
+            bool hasInterfaceIpv4 = false;
+            const quint32 interfaceIpv4 =
+                entry.ip().toIPv4Address(&hasInterfaceIpv4);
+            if (!hasInterfaceIpv4) continue;
+            ipv4Addresses.push_back(entry.ip().toString().toStdString());
+            ownsLocalAddress = ownsLocalAddress
+                || interfaceIpv4 == localIpv4;
+        }
+        if (!ownsLocalAddress) continue;
+
+        switch (classifyReceiverAdvertisedRoute(
+            detailedNetworkInterfaceDescription(iface).toStdString(),
+            ipv4Addresses,
+#ifdef _WIN32
+            true
+#else
+            false
+#endif
+        )) {
+        case ReceiverAdvertisedRoute::wifi:
+            return "Wi-Fi";
+        case ReceiverAdvertisedRoute::ethernet:
+            return "Ethernet";
+        case ReceiverAdvertisedRoute::thunderbolt:
+            return "Thunderbolt Bridge";
+        case ReceiverAdvertisedRoute::excluded:
+            return "Local Network";
+        }
+    }
+    return "Local Network";
 }
 
 void NetworkListener::registerSocket(QTcpSocket* socket) {
@@ -312,18 +361,25 @@ bool NetworkListener::handleIdentity(
     }
 
     const QString peerAddress = socket->peerAddress().toString();
+    const quint16 peerPort = socket->peerPort();
+    const QString connectionMode = connectionModeFor(socket);
     LogManager::instance().log(
-        QString("Receiver: Identified %1 (%2) from %3 [connection %4]")
+        QString("Receiver: Identified %1 (%2) from %3:%4 via %5 "
+                "[connection %6]")
             .arg(deviceName)
             .arg(deviceId)
             .arg(peerAddress)
+            .arg(peerPort)
+            .arg(connectionMode)
             .arg(connectionId)
     );
     emit connectionEstablished(
         deviceId,
         deviceName,
         connectionId,
-        peerAddress
+        peerAddress,
+        peerPort,
+        connectionMode
     );
     emit statusChanged(
         QString("Connected to %1 sender(s)")

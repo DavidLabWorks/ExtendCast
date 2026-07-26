@@ -109,6 +109,7 @@ set(SOURCES
     main.cpp
     MainWindow.cpp
     InboundSessionConnector.cpp
+    NetworkInterfaceDescription.cpp
     NetworkListener.cpp
     VideoDecoder.cpp
     VideoRenderer.cpp
@@ -124,6 +125,7 @@ set(HEADERS
     MainWindow.h
     InboundCompatibilityEndpoint.h
     InboundSessionConnector.h
+    NetworkInterfaceDescription.h
     NetworkListener.h
     VideoDecoder.h
     VideoRenderer.h
@@ -132,6 +134,7 @@ set(HEADERS
     InboundSessionRegistry.h
     InputHandler.h
     InputEvent.h
+    ReceiverRouteClassifier.h
     ServiceDiscovery.h
     AudioDecoder.h
     AudioPlayer.h
@@ -205,6 +208,11 @@ if(BUILD_TESTING)
         tests/InboundCompatibilityEndpointTests.cpp
         InboundCompatibilityEndpoint.h
     )
+    add_executable(
+        ReceiverRouteClassifierTests
+        tests/ReceiverRouteClassifierTests.cpp
+        ReceiverRouteClassifier.h
+    )
     add_test(
         NAME InboundSessionRegistryTests
         COMMAND InboundSessionRegistryTests
@@ -212,6 +220,10 @@ if(BUILD_TESTING)
     add_test(
         NAME InboundCompatibilityEndpointTests
         COMMAND InboundCompatibilityEndpointTests
+    )
+    add_test(
+        NAME ReceiverRouteClassifierTests
+        COMMAND ReceiverRouteClassifierTests
     )
 endif()
 
@@ -255,7 +267,13 @@ endif()
 
 # Windows-specific settings
 if(WIN32)
-    target_link_libraries(BetterCastReceiver PRIVATE ws2_32 shell32)
+    target_link_libraries(
+        BetterCastReceiver
+        PRIVATE
+        ws2_32
+        shell32
+        iphlpapi
+    )
     set_target_properties(BetterCastReceiver PROPERTIES
         OUTPUT_NAME ExtendCast
         WIN32_EXECUTABLE TRUE

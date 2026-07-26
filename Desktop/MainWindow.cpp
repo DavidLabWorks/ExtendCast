@@ -1,4 +1,6 @@
 #include "MainWindow.h"
+#include "NetworkInterfaceDescription.h"
+#include "ReceiverRouteClassifier.h"
 #include "InboundSessionConnector.h"
 #include "NetworkListener.h"
 #include "InputEvent.h"
@@ -419,10 +421,8 @@ static QString classifyAddress(const QNetworkInterface& iface,
                                const QHostAddress& address,
                                QString* usageHint,
                                int* priority) {
-    const QString name = iface.humanReadableName().isEmpty()
-        ? iface.name()
-        : iface.humanReadableName();
-    const QString lowerName = name.toLower();
+    const QString lowerName =
+        detailedNetworkInterfaceDescription(iface).toLower();
     const QString ip = address.toString();
 
     if (ip.startsWith("198.18.") ||
@@ -510,7 +510,6 @@ static QVector<LocalAddressInfo> receiverAddressInfos() {
     QVector<LocalAddressInfo> result;
     for (auto info : localAddressInfos()) {
         const QString lowerInterface = info.interfaceName.toLower();
-        const bool isLinkLocal = info.ip.startsWith("169.254.");
         const bool isExcluded =
             info.connectionLabel == "Virtual" ||
             info.connectionLabel == "Proxy" ||
@@ -527,9 +526,11 @@ static QVector<LocalAddressInfo> receiverAddressInfos() {
             continue;
         }
 
-        // Windows may expose USB4/Thunderbolt peer networking as a generic Ethernet alias
-        // with a link-local address, especially on localized systems.
-        if (isLinkLocal && containsAny(lowerInterface, {"ethernet", "以太网"})) {
+        if (classifyReceiverAdvertisedRoute(
+                info.interfaceName.toStdString(),
+                {info.ip.toStdString()},
+                true
+            ) == ReceiverAdvertisedRoute::thunderbolt) {
             info.connectionLabel = "Thunderbolt Bridge";
             info.usageHint = "Connect directly over Thunderbolt.";
             info.priority = 20;
@@ -1610,6 +1611,33 @@ void MainWindow::setupReceivePage() {
 
     layout->addWidget(statusCard);
 
+    auto* connectedSendersTitle = new QLabel("Connected Senders");
+    connectedSendersTitle->setMaximumWidth(680);
+    connectedSendersTitle->setStyleSheet(
+        "font-size: 14px; font-weight: 700; color: #a7a7a7; "
+        "padding-top: 8px;"
+    );
+    layout->addWidget(connectedSendersTitle);
+
+    auto* connectedSendersCard = makePanel();
+    connectedSendersCard->setMaximumWidth(680);
+    auto* connectedSendersLayout = new QVBoxLayout(connectedSendersCard);
+    connectedSendersLayout->setContentsMargins(24, 24, 24, 24);
+    connectedSendersLayout->setSpacing(0);
+
+    m_connectedSendersEmptyLabel = new QLabel("No senders connected.");
+    m_connectedSendersEmptyLabel->setStyleSheet(
+        "font-size: 13px; color: #8f8f8f; padding: 18px 0;"
+    );
+    connectedSendersLayout->addWidget(m_connectedSendersEmptyLabel);
+
+    m_connectedSenderListLayout = new QVBoxLayout();
+    m_connectedSenderListLayout->setContentsMargins(0, 0, 0, 0);
+    m_connectedSenderListLayout->setSpacing(10);
+    connectedSendersLayout->addLayout(m_connectedSenderListLayout);
+
+    layout->addWidget(connectedSendersCard);
+
     m_receiverConnectionsTitle = new QLabel("Advertised Receiver Routes");
     m_receiverConnectionsTitle->setMaximumWidth(680);
     m_receiverConnectionsTitle->setStyleSheet("font-size: 14px; font-weight: 700; color: #a7a7a7; padding-top: 8px;");
@@ -1676,6 +1704,87 @@ void MainWindow::setupReceivePage() {
 
     m_pageReceive = m_stack->addWidget(scroll);
     updateTrayActions();
+}
+
+void MainWindow::refreshConnectedSendersCard() {
+    if (!m_connectedSenderListLayout || !m_connectedSendersEmptyLabel) return;
+
+    clearLayout(m_connectedSenderListLayout);
+    m_connectedSendersEmptyLabel->setVisible(m_connectedSenders.isEmpty());
+    if (m_connectedSenders.isEmpty()) return;
+
+    QStringList deviceIds = m_connectedSenders.keys();
+    std::sort(
+        deviceIds.begin(),
+        deviceIds.end(),
+        [this](const QString& left, const QString& right) {
+            return QString::compare(
+                       m_connectedSenders.value(left).deviceName,
+                       m_connectedSenders.value(right).deviceName,
+                       Qt::CaseInsensitive
+                   ) < 0;
+        }
+    );
+
+    for (const QString& deviceId : deviceIds) {
+        const ConnectedSenderInfo info = m_connectedSenders.value(deviceId);
+        const QString endpoint = info.peerAddress.contains(':')
+            ? QString("[%1]:%2").arg(info.peerAddress).arg(info.peerPort)
+            : QString("%1:%2").arg(info.peerAddress).arg(info.peerPort);
+
+        auto* panel = makeMethodPanel();
+        panel->setToolTip(QString("Sender ID: %1").arg(deviceId));
+        auto* row = new QHBoxLayout(panel);
+        row->setContentsMargins(18, 16, 18, 16);
+        row->setSpacing(16);
+
+        auto* textCol = new QVBoxLayout();
+        textCol->setSpacing(6);
+
+        auto* deviceNameLabel = new QLabel(info.deviceName);
+        deviceNameLabel->setStyleSheet(
+            "font-size: 13px; font-weight: 700; color: #f2f2f2;"
+        );
+        textCol->addWidget(deviceNameLabel);
+
+        auto* endpointLabel = new QLabel(endpoint);
+        endpointLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        endpointLabel->setWordWrap(true);
+        endpointLabel->setStyleSheet(
+            "font-family: Consolas, 'SF Mono', monospace; font-size: 20px; "
+            "font-weight: 700; color: #ffffff; letter-spacing: 0;"
+        );
+        textCol->addWidget(endpointLabel);
+
+        auto* modeLabel = new QLabel(
+            QString("Mode: %1 · TCP").arg(info.connectionMode)
+        );
+        modeLabel->setStyleSheet("font-size: 12px; color: #a6a6a6;");
+        textCol->addWidget(modeLabel);
+
+        row->addLayout(textCol, 1);
+
+        auto* copyBtn = new QPushButton("Copy");
+        copyBtn->setCursor(Qt::PointingHandCursor);
+        copyBtn->setFixedWidth(68);
+        copyBtn->setStyleSheet(
+            "QPushButton { background-color: #2b2b2b; "
+            "border: 1px solid #3a3a3a; border-radius: 8px; "
+            "color: #d8d8d8; font-size: 12px; font-weight: 600; "
+            "padding: 6px 10px; }"
+            "QPushButton:hover { background-color: #333333; "
+            "border-color: #4d4d4d; }"
+        );
+        connect(copyBtn, &QPushButton::clicked, this, [endpoint]() {
+            QApplication::clipboard()->setText(endpoint);
+            LogManager::instance().log(
+                QString("Copied sender endpoint: %1").arg(endpoint)
+            );
+        });
+        row->addWidget(copyBtn, 0, Qt::AlignTop);
+
+        m_connectedSenderListLayout->addWidget(panel);
+    }
 }
 
 // ─── Settings Page ──────────────────────────────────────────────────────────────
@@ -1980,16 +2089,28 @@ void MainWindow::onConnectionEstablished(
     const QString& deviceId,
     const QString& deviceName,
     const QString& connectionId,
-    const QString& peerAddress
+    const QString& peerAddress,
+    quint16 peerPort,
+    const QString& connectionMode
 ) {
     m_reconnectTimer->stop();
     LogManager::instance().log(
-        QString("Connection established — %1 (%2) via %3 [connection %4]")
+        QString("Connection established — %1 (%2) via %3 at %4:%5 "
+                "[connection %6]")
             .arg(deviceName)
             .arg(deviceId)
+            .arg(connectionMode)
             .arg(peerAddress)
+            .arg(peerPort)
             .arg(connectionId)
     );
+    m_connectedSenders[deviceId] = {
+        deviceName,
+        connectionMode,
+        peerAddress,
+        peerPort,
+    };
+    refreshConnectedSendersCard();
 
     ReceiverSession* session = m_receiverSessions.value(deviceId);
     if (session) {
@@ -2098,6 +2219,8 @@ void MainWindow::onConnectionEstablished(
 }
 
 void MainWindow::onConnectionLost(const QString& deviceId) {
+    m_connectedSenders.remove(deviceId);
+    refreshConnectedSendersCard();
 
     if (auto* session = m_receiverSessions.take(deviceId)) {
         LogManager::instance().log(
@@ -2211,6 +2334,8 @@ void MainWindow::onReceiverListeningToggled(bool checked) {
         m_network->stop();
         qDeleteAll(m_receiverSessions);
         m_receiverSessions.clear();
+        m_connectedSenders.clear();
+        refreshConnectedSendersCard();
         m_receiverListening = false;
         if (m_recvStatusLabel) {
             m_recvStatusLabel->setText("Receiver is not listening");
@@ -2435,51 +2560,102 @@ void MainWindow::onReceiverDiscovered(
     const DiscoveredRemoteReceiver& receiver
 ) {
     if (!m_receiverCombo) return;
-
-    for (int i = 0; i < m_receiverCombo->count(); i++) {
-        QVariantMap existing = m_receiverCombo->itemData(i).toMap();
-        if (existing.value("host").toString() == receiver.host
-            && existing.value("port").toUInt() == receiver.port) {
-            return;
-        }
+    if (receiver.advertisedRoutes.isEmpty()) {
+        LogManager::instance().log(
+            QString("Discarded receiver %1 at %2:%3: no route capabilities")
+                .arg(receiver.name, receiver.host)
+                .arg(receiver.port)
+        );
+        return;
     }
 
-    const QString candidateKey =
-        receiver.host + ":" + QString::number(receiver.port);
-    if (m_pendingReceiverProbes.contains(candidateKey)) return;
-    m_pendingReceiverProbes.insert(candidateKey);
+    QList<DiscoveredRemoteReceiver> candidates;
+    for (auto route = receiver.advertisedRouteEndpoints.cbegin();
+         route != receiver.advertisedRouteEndpoints.cend();
+         ++route) {
+        for (const QString& endpoint : route.value()) {
+            const int separator = endpoint.lastIndexOf(':');
+            bool hasValidPort = false;
+            const uint16_t port = endpoint.mid(separator + 1).toUShort(
+                &hasValidPort
+            );
+            if (separator <= 0 || !hasValidPort) continue;
 
-    auto* probe = new QTcpSocket(this);
-    auto* timeout = new QTimer(probe);
-    timeout->setSingleShot(true);
-    timeout->setInterval(1500);
-    connect(timeout, &QTimer::timeout, probe, [this, probe, candidateKey]() {
-        if (!m_pendingReceiverProbes.remove(candidateKey)) return;
-        LogManager::instance().log(
-            "Discarded unreachable receiver route " + candidateKey
+            DiscoveredRemoteReceiver candidate = receiver;
+            candidate.host = endpoint.left(separator);
+            candidate.port = port;
+            candidate.advertisedRoutes = {route.key()};
+            if (!candidates.contains(candidate)) {
+                candidates.append(candidate);
+            }
+        }
+    }
+    if (candidates.isEmpty()) {
+        candidates.append(receiver);
+    }
+
+    for (const DiscoveredRemoteReceiver& candidate : candidates) {
+        bool alreadyListed = false;
+        for (int i = 0; i < m_receiverCombo->count(); i++) {
+            const QVariantMap existing = m_receiverCombo->itemData(i).toMap();
+            if (existing.value("host").toString() == candidate.host
+                && existing.value("port").toUInt() == candidate.port) {
+                alreadyListed = true;
+                break;
+            }
+        }
+        if (alreadyListed) continue;
+
+        const QString candidateKey =
+            candidate.host + ":" + QString::number(candidate.port);
+        if (m_pendingReceiverProbes.contains(candidateKey)) continue;
+        m_pendingReceiverProbes.insert(candidateKey);
+
+        auto* probe = new QTcpSocket(this);
+        auto* timeout = new QTimer(probe);
+        timeout->setSingleShot(true);
+        timeout->setInterval(1500);
+        connect(
+            timeout,
+            &QTimer::timeout,
+            probe,
+            [this, probe, candidateKey]() {
+                if (!m_pendingReceiverProbes.remove(candidateKey)) return;
+                LogManager::instance().log(
+                    "Discarded unreachable receiver route " + candidateKey
+                );
+                probe->abort();
+                probe->deleteLater();
+            }
         );
-        probe->abort();
-        probe->deleteLater();
-    });
-    connect(probe, &QTcpSocket::connected, probe,
-            [this, probe, timeout, receiver, candidateKey]() {
-        if (!m_pendingReceiverProbes.remove(candidateKey)) return;
-        timeout->stop();
-        probe->disconnectFromHost();
-        probe->deleteLater();
-        admitVerifiedReceiver(receiver);
-    });
-    connect(probe, &QTcpSocket::errorOccurred, probe,
+        connect(
+            probe,
+            &QTcpSocket::connected,
+            probe,
+            [this, probe, timeout, candidate, candidateKey]() {
+                if (!m_pendingReceiverProbes.remove(candidateKey)) return;
+                timeout->stop();
+                probe->disconnectFromHost();
+                probe->deleteLater();
+                admitVerifiedReceiver(candidate);
+            }
+        );
+        connect(
+            probe,
+            &QTcpSocket::errorOccurred,
+            probe,
             [this, probe, candidateKey](QAbstractSocket::SocketError) {
-        if (!m_pendingReceiverProbes.remove(candidateKey)) return;
-        LogManager::instance().log(
-            "Discarded receiver route " + candidateKey
-                + ": " + probe->errorString()
+                if (!m_pendingReceiverProbes.remove(candidateKey)) return;
+                LogManager::instance().log(
+                    "Discarded receiver route " + candidateKey
+                        + ": " + probe->errorString()
+                );
+                probe->deleteLater();
+            }
         );
-        probe->deleteLater();
-    });
-    timeout->start();
-    probe->connectToHost(receiver.host, receiver.port);
+        timeout->start();
+        probe->connectToHost(candidate.host, candidate.port);
+    }
 }
 
 void MainWindow::admitVerifiedReceiver(

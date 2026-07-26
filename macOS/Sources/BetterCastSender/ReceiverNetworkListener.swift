@@ -2,13 +2,37 @@ import Foundation
 import Network
 import CoreMedia
 
+struct ReceiverConnectedSender: Identifiable, Equatable {
+    let connectionID: ObjectIdentifier
+    var deviceID: String?
+    var deviceName: String
+    let connectionMode: String
+    let host: String
+    let port: UInt16
+
+    var id: ObjectIdentifier { connectionID }
+
+    var endpoint: String {
+        host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
+    }
+}
+
 /// Network listener for receiver mode — accepts incoming TCP/UDP connections from senders.
 class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
     private(set) var tcpListener: NWListener?
     private var udpListener: NWListener?
+    private var advertisementRefreshTimer: DispatchSourceTimer?
+    private var lastAdvertisedRoutes: Set<ReceiverAdvertisedRoute> = []
+    private var lastAdvertisedRouteEndpoints: [
+        ReceiverAdvertisedRoute: Set<String>
+    ] = [:]
 
     @Published var status: String? = "Initializing..."
     @Published var connectedClients: [NWConnection] = []
+    @Published private(set) var connectedSenders: [ReceiverConnectedSender] = []
+    private var connectedSendersByConnection: [
+        ObjectIdentifier: ReceiverConnectedSender
+    ] = [:]
 
     private let networkQueue = DispatchQueue(label: "com.bettercast.receiver-network", qos: .userInteractive)
     private lazy var inboundCompatibilityConnector =
@@ -72,6 +96,10 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
         staleFrameTimer = nil
         tcpListener?.cancel()
         tcpListener = nil
+        advertisementRefreshTimer?.cancel()
+        advertisementRefreshTimer = nil
+        lastAdvertisedRoutes = []
+        lastAdvertisedRouteEndpoints = [:]
         udpListener?.cancel()
         udpListener = nil
         reconnectTimer?.invalidate()
@@ -83,6 +111,8 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
             connection.cancel()
         }
         connectedClients.removeAll()
+        connectedSendersByConnection.removeAll()
+        connectedSenders.removeAll()
     }
 
     // MARK: - ADB
@@ -322,7 +352,7 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
         }
 
         let macName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
-        listener.service = NWListener.Service(name: macName, type: "_bettercast._tcp")
+        updateAdvertisement(listener: listener, name: macName)
 
         listener.stateUpdateHandler = { [weak self] state in
             self?.handleListenerState(state, type: "TCP", listener: listener)
@@ -335,6 +365,66 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
 
         listener.start(queue: networkQueue)
         self.tcpListener = listener
+        let refreshTimer = DispatchSource.makeTimerSource(queue: networkQueue)
+        refreshTimer.schedule(deadline: .now() + 2, repeating: 2)
+        refreshTimer.setEventHandler { [weak self, weak listener] in
+            guard let self, let listener else { return }
+            self.updateAdvertisement(listener: listener, name: macName)
+        }
+        refreshTimer.resume()
+        advertisementRefreshTimer = refreshTimer
+    }
+
+    private func updateAdvertisement(listener: NWListener, name: String) {
+        let advertisedPort =
+            listener.port?.rawValue ?? BCConstants.tcpPort
+        let localRoutes = ReceiverConnectionAddressProvider
+            .availableAddresses(port: advertisedPort)
+        var routes = Set(
+            localRoutes.compactMap { address -> ReceiverAdvertisedRoute? in
+                switch address.title {
+                case "Wi-Fi": return .wifi
+                case "Ethernet": return .ethernet
+                case "Thunderbolt Bridge": return .thunderbolt
+                default: return nil
+                }
+            }
+        )
+        if routes.contains(.wifi) {
+            routes.insert(.peerToPeer)
+        }
+        let routeEndpoints = Dictionary(
+            grouping: localRoutes.compactMap {
+                address -> (ReceiverAdvertisedRoute, String)? in
+                switch address.title {
+                case "Wi-Fi": return (.wifi, address.address)
+                case "Ethernet": return (.ethernet, address.address)
+                case "Thunderbolt Bridge":
+                    return (.thunderbolt, address.address)
+                default: return nil
+                }
+            },
+            by: \.0
+        ).mapValues { Set($0.map(\.1)) }
+        let advertisement = ReceiverAdvertisement(
+            routes: routes,
+            routeEndpoints: routeEndpoints
+        )
+        guard routes != lastAdvertisedRoutes
+                || routeEndpoints != lastAdvertisedRouteEndpoints else {
+            return
+        }
+        lastAdvertisedRoutes = routes
+        lastAdvertisedRouteEndpoints = routeEndpoints
+        listener.service = NWListener.Service(
+            name: name,
+            type: "_bettercast._tcp",
+            txtRecord: advertisement.txtRecord
+        )
+        LogManager.shared.log(
+            "Receiver: Advertising routes "
+                + routes.map(\.rawValue).sorted().joined(separator: ",")
+        )
     }
 
     private func startUDP() {
@@ -401,6 +491,9 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
                     if let self = self {
                         if !self.connectedClients.contains(where: { $0 === connection }) {
                             self.connectedClients.append(connection)
+                        }
+                        if type == .tcp {
+                            self.registerConnectedSender(connection)
                         }
                         if self.lastADBPort != nil && !self.wirelessADBEnabled,
                            let adb = self.lastADBPath {
@@ -501,7 +594,7 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
             } else if typeByte == 0x02 {
                 // TODO: route to audio decoder
             } else if typeByte == 0x03 {
-                LogManager.shared.log("Receiver: Sender identity received")
+                registerSenderIdentity(payload, for: connection)
             }
         } else {
             videoDecoder?.decode(data: body)
@@ -591,6 +684,8 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
         let connId = ObjectIdentifier(connection)
         DispatchQueue.main.async {
             self.connectedClients.removeAll(where: { $0 === connection })
+            self.connectedSendersByConnection.removeValue(forKey: connId)
+            self.publishConnectedSenders()
             self.connectionFormat.removeValue(forKey: connId)
             // Do NOT reset wirelessADBEnabled — once enabled, it stays enabled
             // to prevent re-running adb tcpip 5555 on every reconnect
@@ -599,6 +694,108 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
                 self.startReconnectTimer()
             }
         }
+    }
+
+    private func registerConnectedSender(_ connection: NWConnection) {
+        let connectionID = ObjectIdentifier(connection)
+        let endpoint = Self.remoteEndpoint(for: connection)
+        connectedSendersByConnection[connectionID] = ReceiverConnectedSender(
+            connectionID: connectionID,
+            deviceID: nil,
+            deviceName: "Unknown Sender",
+            connectionMode: Self.connectionMode(for: connection),
+            host: endpoint.host,
+            port: endpoint.port
+        )
+        publishConnectedSenders()
+    }
+
+    private func registerSenderIdentity(
+        _ payload: Data,
+        for connection: NWConnection
+    ) {
+        guard let identity = try? JSONDecoder().decode(
+            SenderIdentity.Payload.self,
+            from: payload
+        ),
+        identity.protocolVersion == 1,
+        !identity.deviceId.isEmpty,
+        !identity.deviceName.isEmpty else {
+            LogManager.shared.log("Receiver: Invalid sender identity")
+            return
+        }
+
+        DispatchQueue.main.async {
+            let connectionID = ObjectIdentifier(connection)
+            let endpoint = Self.remoteEndpoint(for: connection)
+            let existing = self.connectedSendersByConnection[connectionID]
+            let sender = ReceiverConnectedSender(
+                connectionID: connectionID,
+                deviceID: identity.deviceId,
+                deviceName: identity.deviceName,
+                connectionMode: existing?.connectionMode
+                    ?? Self.connectionMode(for: connection),
+                host: existing?.host ?? endpoint.host,
+                port: existing?.port ?? endpoint.port
+            )
+            self.connectedSendersByConnection[connectionID] = sender
+            self.publishConnectedSenders()
+            LogManager.shared.log(
+                "Receiver: Identified \(identity.deviceName) "
+                    + "(\(identity.deviceId)) at "
+                    + sender.endpoint
+            )
+        }
+    }
+
+    private func publishConnectedSenders() {
+        connectedSenders = connectedSendersByConnection.values.sorted {
+            let nameOrder = $0.deviceName.localizedCaseInsensitiveCompare(
+                $1.deviceName
+            )
+            if nameOrder != .orderedSame {
+                return nameOrder == .orderedAscending
+            }
+            return $0.endpoint < $1.endpoint
+        }
+    }
+
+    private static func remoteEndpoint(
+        for connection: NWConnection
+    ) -> (host: String, port: UInt16) {
+        guard case .hostPort(let host, let port) = connection.endpoint else {
+            return (String(describing: connection.endpoint), 0)
+        }
+        return (String(describing: host), port.rawValue)
+    }
+
+    private static func connectionMode(for connection: NWConnection) -> String {
+        guard let path = connection.currentPath else {
+            return "Local Network"
+        }
+        let interfaceNames = path.availableInterfaces.map {
+            $0.name.lowercased()
+        }
+        if interfaceNames.contains(where: {
+            $0 == "awdl0" || $0 == "llw0"
+        }) {
+            return "Wi-Fi Direct"
+        }
+        if interfaceNames.contains(where: {
+            $0 == "bridge0" || $0.contains("thunderbolt")
+        }) {
+            return "Thunderbolt Bridge"
+        }
+        if path.usesInterfaceType(.wifi) {
+            return "Wi-Fi"
+        }
+        if path.usesInterfaceType(.wiredEthernet) {
+            return "Ethernet"
+        }
+        if path.usesInterfaceType(.loopback) {
+            return "Compatibility"
+        }
+        return "Local Network"
     }
 
     private func startReconnectTimer() {

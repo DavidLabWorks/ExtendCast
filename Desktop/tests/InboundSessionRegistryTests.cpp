@@ -21,6 +21,8 @@ int main() {
     assert(first.has_value());
     assert(first->newlyAdmitted);
     assert(first->binding.connectionId == "connection-a");
+    assert(first->binding.displayName == "Studio Mac mini");
+    assert(first->binding.peerAddress == "192.168.1.10");
 
     const auto second = registry.identify(
         "connection-b",
@@ -47,6 +49,8 @@ int main() {
     assert(replacement.has_value());
     assert(!replacement->newlyAdmitted);
     assert(replacement->replacedConnectionId == "connection-a");
+    assert(replacement->binding.displayName == "Studio Mac mini");
+    assert(replacement->binding.peerAddress == "169.254.1.10");
     assert(!registry.sessionForConnection("connection-a").has_value());
     assert(registry.sessionForConnection("connection-a-replacement")->deviceId
            == "mac-mini-stable-id");

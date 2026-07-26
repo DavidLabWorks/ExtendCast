@@ -92,7 +92,9 @@ private slots:
         const QString& deviceId,
         const QString& deviceName,
         const QString& connectionId,
-        const QString& peerAddress
+        const QString& peerAddress,
+        quint16 peerPort,
+        const QString& connectionMode
     );
     void onConnectionLost(const QString& deviceId);
     void onVideoDataReceived(
@@ -143,6 +145,7 @@ private:
     void setupReceivePage();
     void setupSettingsPage();
     void setupLogsPage();
+    void refreshConnectedSendersCard();
 #ifdef ENABLE_SENDER
     void setupSendPage();
     void admitVerifiedReceiver(const DiscoveredRemoteReceiver& receiver);
@@ -204,6 +207,8 @@ private:
     QLabel* m_recvPrimaryAddressLabel = nullptr;
     QLabel* m_recvPrimaryHintLabel = nullptr;
     QVBoxLayout* m_recvAddressListLayout = nullptr;
+    QVBoxLayout* m_connectedSenderListLayout = nullptr;
+    QLabel* m_connectedSendersEmptyLabel = nullptr;
     QLabel* m_receiverConnectionsTitle = nullptr;
     QFrame* m_receiverConnectionsCard = nullptr;
     QPushButton* m_receiverListenToggle = nullptr;
@@ -211,6 +216,13 @@ private:
     bool m_receiverListening = false;
     uint16_t m_receiverPort = 51820;
     QString m_receiverAddressSignature;
+    struct ConnectedSenderInfo {
+        QString deviceName;
+        QString connectionMode;
+        QString peerAddress;
+        quint16 peerPort = 0;
+    };
+    QHash<QString, ConnectedSenderInfo> m_connectedSenders;
 #ifdef ENABLE_ANDROID_ADB
     QPushButton* m_adbBtn = nullptr;
     QLabel* m_adbHelpLabel = nullptr;
