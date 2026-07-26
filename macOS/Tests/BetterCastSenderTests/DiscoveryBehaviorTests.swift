@@ -766,14 +766,6 @@ final class DiscoveryBehaviorTests: XCTestCase {
                         priority: 20
                     ),
                 ]
-            },
-            thunderboltPeerRouteProvider: {
-                [
-                    ThunderboltPeerAddressProvider.PeerRoute(
-                        host: "169.254.204.111",
-                        interfaceName: "bridge0"
-                    ),
-                ]
             }
         )
         let service = DiscoveredService(
@@ -884,7 +876,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
                 discoveredReceivers: [target],
                 localAddresses: localAddresses
             ).availableModes,
-            [.auto, .routerOnly]
+            [.auto, .routerOnly, .thunderboltBridge]
         )
         XCTAssertEqual(
             OutboundRouteCatalog(

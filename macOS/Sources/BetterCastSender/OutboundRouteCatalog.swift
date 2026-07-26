@@ -261,8 +261,12 @@ struct OutboundRouteCatalog {
         ) {
             return true
         }
+        // A live bridge is enough to expose a candidate when there is only one
+        // Windows Receiver identity. Bonjour/ARP can resolve the peer lazily
+        // during the connection attempt; requiring it here hides the mode
+        // before the transport probe has a chance to run.
         return hasSingleWindowsReceiverIdentity
-            && thunderboltPeerRoute() != nil
+            && matchingThunderboltPeerRouteCount <= 1
     }
 
     private var hasSingleWindowsReceiverIdentity: Bool {
@@ -288,6 +292,19 @@ struct OutboundRouteCatalog {
             }
         )
         return identities.count == 1
+    }
+
+    private var matchingThunderboltPeerRouteCount: Int {
+        Set(
+            thunderboltPeerRoutes.compactMap { route -> String? in
+                guard candidateThunderboltInterfaceNames.contains(
+                    route.interfaceName.lowercased()
+                ) else {
+                    return nil
+                }
+                return "\(route.host)%\(route.interfaceName.lowercased())"
+            }
+        ).count
     }
 
     private var activeLocalThunderboltInterfaceNames: Set<String> {
