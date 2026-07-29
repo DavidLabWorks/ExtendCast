@@ -22,7 +22,7 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName", "ExtendCast"
-            VALUE "FileDescription", "ExtendCast — wireless display for Windows"
+            VALUE "FileDescription", "ExtendCast - wireless display for Windows"
             VALUE "FileVersion", "@EXTENDCAST_VERSION@"
             VALUE "InternalName", "ExtendCast"
             VALUE "LegalCopyright", "Copyright (C) ExtendCast contributors"

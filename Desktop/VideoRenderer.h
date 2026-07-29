@@ -57,4 +57,5 @@ private:
     int m_frameWidth = 0;
     int m_frameHeight = 0;
     bool m_hasNewFrame = false;
+    bool m_updatePending = false;
 };

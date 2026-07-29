@@ -69,17 +69,17 @@ Section "ExtendCast (required)" SecCore
 
     ; Create Start Menu shortcuts
     CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
-    CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\ExtendCast.lnk" "$INSTDIR\${PRODUCT_EXE}"
-    CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk" "$INSTDIR\uninstall.exe"
+    CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\ExtendCast.lnk" "$INSTDIR\${PRODUCT_EXE}" "" "$INSTDIR\appicon.ico" 0
+    CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk" "$INSTDIR\uninstall.exe" "" "$INSTDIR\appicon.ico" 0
 
     ; Desktop shortcut
-    CreateShortCut "$DESKTOP\ExtendCast.lnk" "$INSTDIR\${PRODUCT_EXE}"
+    CreateShortCut "$DESKTOP\ExtendCast.lnk" "$INSTDIR\${PRODUCT_EXE}" "" "$INSTDIR\appicon.ico" 0
 
     ; Write registry keys
     WriteRegStr HKLM "${PRODUCT_DIR_REGKEY}" "" "$INSTDIR\${PRODUCT_EXE}"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "DisplayName" "${PRODUCT_NAME}"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "UninstallString" "$INSTDIR\uninstall.exe"
-    WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\${PRODUCT_EXE}"
+    WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\appicon.ico"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "DisplayVersion" "${PRODUCT_VERSION}"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "Publisher" "${PRODUCT_PUBLISHER}"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "URLInfoAbout" "${PRODUCT_WEB_SITE}"

@@ -104,6 +104,7 @@ void VideoRenderer::paintGL() {
     glClear(GL_COLOR_BUFFER_BIT);
 
     QMutexLocker lock(&m_frameMutex);
+    m_updatePending = false;
     if (!m_hasNewFrame && m_texWidth == 0) return;
 
     if (m_hasNewFrame && m_frameWidth > 0 && m_frameHeight > 0) {
@@ -245,10 +246,13 @@ void VideoRenderer::onFrameDecoded(AVFrame* frame) {
     }
 
     m_hasNewFrame = true;
+    const bool shouldScheduleUpdate = !m_updatePending;
+    m_updatePending = true;
     lock.unlock();
 
-    // Schedule repaint on GUI thread
-    QMetaObject::invokeMethod(this, QOverload<>::of(&QWidget::update), Qt::QueuedConnection);
+    if (shouldScheduleUpdate) {
+        QMetaObject::invokeMethod(this, QOverload<>::of(&QWidget::update), Qt::QueuedConnection);
+    }
 }
 
 void VideoRenderer::createTextures(int width, int height) {
