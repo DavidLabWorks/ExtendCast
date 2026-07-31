@@ -87,21 +87,21 @@ static QString displayEndpoint(const QString& host, quint16 port) {
 // ─── Dark theme stylesheet ─────────────────────────────────────────────────────
 
 static const char* kDarkStylesheet = R"(
-    QMainWindow { background-color: #1a1a1a; }
-    QWidget#appRoot { background-color: #1a1a1a; border: 1px solid #303030; }
-    QFrame#customTitleBar { background-color: #202020; border: none; }
-    QLabel#titleBarText { color: #8e8e8e; font-size: 13px; font-weight: 500; }
+    QMainWindow { background-color: #202020; }
+    QWidget#appRoot { background-color: #202020; border: 1px solid #323232; }
+    QFrame#customTitleBar { background-color: #202020; border: none; border-bottom: 1px solid #292929; }
+    QLabel#titleBarText { color: #b8b8b8; font-size: 12px; font-weight: 500; }
     QPushButton#windowButton { background: transparent; border: none; color: #c8c8c8; font-family: "Segoe MDL2 Assets"; font-size: 10px; padding: 0; margin: 0; }
     QPushButton#windowButton:hover { background-color: rgba(255, 255, 255, 0.12); color: #ffffff; }
     QPushButton#windowButton:pressed { background-color: rgba(255, 255, 255, 0.08); color: #ffffff; }
     QPushButton#closeWindowButton { background: transparent; border: none; color: #c8c8c8; font-family: "Segoe MDL2 Assets"; font-size: 10px; padding: 0; margin: 0; }
     QPushButton#closeWindowButton:hover { background-color: #c42b1c; color: #ffffff; }
     QPushButton#closeWindowButton:pressed { background-color: #a82419; color: #ffffff; }
-    QSplitter { background-color: #1a1a1a; }
+    QSplitter { background-color: #202020; }
     QSplitter::handle { background: transparent; width: 0px; }
 
     QListWidget {
-        background-color: #202020;
+        background-color: #181818;
         border: none;
         outline: none;
         font-size: 14px;
@@ -117,9 +117,9 @@ static const char* kDarkStylesheet = R"(
         background: transparent;
     }
 
-    QStackedWidget { background-color: #1a1a1a; }
-    QScrollArea { background-color: #1a1a1a; border: none; }
-    QScrollArea > QWidget > QWidget { background-color: #1a1a1a; }
+    QStackedWidget { background-color: #202020; }
+    QScrollArea { background-color: #202020; border: none; }
+    QScrollArea > QWidget > QWidget { background-color: #202020; }
 
     QScrollBar:vertical {
         background: transparent;
@@ -175,13 +175,17 @@ static const char* kDarkStylesheet = R"(
         background: transparent;
     }
 
-    QLabel { color: #e0e0e0; }
+    QLabel { color: #f3f3f3; }
+    QLabel#pageTitle { color: #f7f7f7; font-size: 26px; font-weight: 600; }
+    QLabel#pageSubtitle { color: #9f9f9f; font-size: 12px; }
+    QLabel#sectionTitle { color: #b8b8b8; font-size: 13px; font-weight: 600; }
+    QLabel#secondaryText { color: #9f9f9f; font-size: 12px; }
 
     QLineEdit {
-        background-color: #2a2a2a;
+        background-color: #2b2b2b;
         color: white;
-        border: 1px solid #444;
-        border-radius: 6px;
+        border: 1px solid #414141;
+        border-radius: 4px;
         padding: 7px 10px;
         font-size: 13px;
         selection-background-color: #0078D4;
@@ -189,21 +193,22 @@ static const char* kDarkStylesheet = R"(
     QLineEdit:focus { border-color: #0078D4; }
 
     QPushButton {
-        background-color: #333;
+        background-color: #2d2d2d;
         color: white;
-        border: 1px solid #555;
-        border-radius: 6px;
-        padding: 8px 16px;
+        border: 1px solid #454545;
+        border-radius: 4px;
+        padding: 7px 14px;
         font-size: 13px;
     }
-    QPushButton:hover { background-color: #444; border-color: #666; }
-    QPushButton:pressed { background-color: #555; }
+    QPushButton:hover { background-color: #383838; border-color: #525252; }
+    QPushButton:pressed { background-color: #414141; }
     QPushButton:disabled { background-color: #2a2a2a; color: #666; border-color: #333; }
 
     QGroupBox {
-        color: #888;
-        border: 1px solid #333;
-        border-radius: 10px;
+        color: #b8b8b8;
+        background-color: #292929;
+        border: 1px solid #383838;
+        border-radius: 8px;
         margin-top: 16px;
         padding: 20px 16px 12px 16px;
         font-size: 12px;
@@ -213,7 +218,7 @@ static const char* kDarkStylesheet = R"(
         subcontrol-origin: margin;
         left: 16px;
         padding: 0 6px;
-        color: #888;
+        color: #b8b8b8;
     }
 
     QTextEdit {
@@ -329,7 +334,7 @@ static QListWidgetItem* addSidebarItem(QListWidget* list, const QIcon& icon,
                                         const QString& title, int pageIndex) {
     auto* item = new QListWidgetItem(icon, title);
     item->setData(Qt::UserRole, pageIndex);
-    item->setSizeHint(QSize(0, 40));
+    item->setSizeHint(QSize(0, 36));
     list->addItem(item);
     return item;
 }
@@ -350,11 +355,11 @@ public:
 
         if (isSection) {
             QFont sectionFont = option.font;
-            sectionFont.setPixelSize(15);
+            sectionFont.setPixelSize(11);
             sectionFont.setWeight(QFont::Medium);
             painter->setFont(sectionFont);
             painter->setPen(QColor("#7a8388"));
-            painter->drawText(rowRect.adjusted(30, 8, 0, 0),
+            painter->drawText(rowRect.adjusted(20, 8, 0, 0),
                               Qt::AlignLeft | Qt::AlignVCenter,
                               index.data(Qt::DisplayRole).toString().toUpper());
             painter->restore();
@@ -370,8 +375,8 @@ public:
             painter->drawRoundedRect(bgRect, 7, 7);
         }
 
-        QRectF contentRect = bgRect.adjusted(32, 0, -16, 0);
-        const int iconSize = 22;
+        QRectF contentRect = bgRect.adjusted(20, 0, -12, 0);
+        const int iconSize = 18;
         QRect iconRect(qRound(contentRect.left()),
                        qRound(contentRect.center().y() - iconSize / 2.0),
                        iconSize, iconSize);
@@ -384,7 +389,7 @@ public:
         }
 
         QFont textFont = option.font;
-        textFont.setPixelSize(15);
+        textFont.setPixelSize(13);
         textFont.setWeight(QFont::Medium);
         painter->setFont(textFont);
         painter->setPen(selected ? QColor("#2f7dff") : QColor("#e8edf1"));
@@ -402,7 +407,7 @@ public:
     QSize sizeHint(const QStyleOptionViewItem& option,
                    const QModelIndex& index) const override {
         Q_UNUSED(option);
-        return QSize(0, index.data(Qt::UserRole).toInt() < 0 ? 34 : 40);
+        return QSize(0, index.data(Qt::UserRole).toInt() < 0 ? 30 : 36);
     }
 };
 
@@ -417,7 +422,7 @@ static QFrame* makePanel() {
     auto* panel = new QFrame();
     panel->setObjectName("receiverPanel");
     panel->setStyleSheet(
-        "QFrame#receiverPanel { background-color: #1f1f1f; border: 1px solid #303030; border-radius: 12px; }");
+        "QFrame#receiverPanel { background-color: #292929; border: 1px solid #383838; border-radius: 8px; }");
     return panel;
 }
 
@@ -425,8 +430,27 @@ static QFrame* makeMethodPanel() {
     auto* panel = new QFrame();
     panel->setObjectName("methodPanel");
     panel->setStyleSheet(
-        "QFrame#methodPanel { background-color: #202020; border: 1px solid #313131; border-radius: 10px; }");
+        "QFrame#methodPanel { background-color: #252525; border: 1px solid #363636; border-radius: 6px; }");
     return panel;
+}
+
+static QLabel* makePageTitle(const QString& text) {
+    auto* label = new QLabel(text);
+    label->setObjectName("pageTitle");
+    return label;
+}
+
+static QLabel* makePageSubtitle(const QString& text) {
+    auto* label = new QLabel(text);
+    label->setObjectName("pageSubtitle");
+    label->setWordWrap(true);
+    return label;
+}
+
+static QLabel* makeSectionTitle(const QString& text) {
+    auto* label = new QLabel(text);
+    label->setObjectName("sectionTitle");
+    return label;
 }
 
 struct LocalAddressInfo {
@@ -1034,9 +1058,9 @@ void MainWindow::setupUi() {
 
     auto* sidebarFrame = new QFrame();
     sidebarFrame->setObjectName("sidebarFrame");
-    sidebarFrame->setFixedWidth(248);
+    sidebarFrame->setFixedWidth(220);
     sidebarFrame->setStyleSheet(
-        "QFrame#sidebarFrame { background-color: #202020; border: none; }");
+        "QFrame#sidebarFrame { background-color: #181818; border: none; border-right: 1px solid #292929; }");
 
     auto* sidebarLayout = new QHBoxLayout(sidebarFrame);
     sidebarLayout->setContentsMargins(0, 0, 0, 0);
@@ -1044,8 +1068,8 @@ void MainWindow::setupUi() {
 
     // Sidebar
     m_sidebarList = new QListWidget();
-    m_sidebarList->setFixedWidth(248);
-    m_sidebarList->setIconSize(QSize(24, 24));
+    m_sidebarList->setFixedWidth(220);
+    m_sidebarList->setIconSize(QSize(20, 20));
     m_sidebarList->setSpacing(1);
     m_sidebarList->setFocusPolicy(Qt::NoFocus);
     m_sidebarList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -1210,7 +1234,9 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
 }
 
 void MainWindow::setupSidebar() {
+    addSidebarSection(m_sidebarList, "This PC");
     addSidebarItem(m_sidebarList, makeSidebarIcon("receiver"), "Receiver", m_pageReceive);
+    addSidebarSection(m_sidebarList, "Support");
     addSidebarItem(m_sidebarList, makeSidebarIcon("settings"), "Settings", m_pageSettings);
     addSidebarItem(m_sidebarList, makeSidebarIcon("logs"), "Logs", m_pageLogs);
 }
@@ -1320,22 +1346,25 @@ void MainWindow::setupSendPage() {
     scroll->setWidgetResizable(true);
 
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(48, 34, 48, 34);
-    layout->setSpacing(20);
+    layout->setContentsMargins(32, 28, 32, 32);
+    layout->setSpacing(14);
+    layout->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
 
-    auto* pageTitle = new QLabel("Send Screen");
-    pageTitle->setStyleSheet("font-size: 22px; font-weight: bold; color: white;");
+    auto* pageTitle = makePageTitle("Send Screen");
+    pageTitle->setMaximumWidth(720);
     layout->addWidget(pageTitle);
 
-    auto* pageDesc = new QLabel("Stream your screen to an ExtendCast receiver on another device.");
-    pageDesc->setStyleSheet("font-size: 13px; color: #888;");
-    pageDesc->setWordWrap(true);
+    auto* pageDesc = makePageSubtitle(
+        "Stream a physical or virtual display to an ExtendCast receiver."
+    );
+    pageDesc->setMaximumWidth(720);
     layout->addWidget(pageDesc);
 
     layout->addSpacing(8);
 
     // ─── Virtual Display card ──────────────────────────────────────────
     auto* vddCard = makeCard("Virtual Display (Extend Screen)");
+    vddCard->setMaximumWidth(720);
     auto* vddLayout = new QVBoxLayout(vddCard);
     vddLayout->setSpacing(10);
 
@@ -1430,6 +1459,7 @@ void MainWindow::setupSendPage() {
 
     // ─── Monitor Selection card ────────────────────────────────────────
     auto* monCard = makeCard("Monitor to Stream");
+    monCard->setMaximumWidth(720);
     auto* monLayout = new QVBoxLayout(monCard);
     monLayout->setSpacing(10);
 
@@ -1473,6 +1503,7 @@ void MainWindow::setupSendPage() {
 
     // ─── Connection card ───────────────────────────────────────────────
     auto* connCard = makeCard("Target Receiver");
+    connCard->setMaximumWidth(720);
     auto* connLayout = new QVBoxLayout(connCard);
     connLayout->setSpacing(12);
 
@@ -1510,6 +1541,7 @@ void MainWindow::setupSendPage() {
 
     // ─── Quality card ──────────────────────────────────────────────────
     auto* qualCard = makeCard("Stream Quality");
+    qualCard->setMaximumWidth(720);
     auto* qualLayout = new QVBoxLayout(qualCard);
     qualLayout->setSpacing(10);
 
@@ -1588,24 +1620,28 @@ void MainWindow::setupReceivePage() {
     scroll->setWidgetResizable(true);
 
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(48, 34, 48, 34);
-    layout->setSpacing(18);
+    layout->setContentsMargins(32, 28, 32, 32);
+    layout->setSpacing(14);
     layout->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
 
-    auto* pageTitle = new QLabel("Receiver");
-    pageTitle->setMaximumWidth(680);
-    pageTitle->setStyleSheet("font-size: 26px; font-weight: bold; color: white;");
+    auto* pageTitle = makePageTitle("Receiver");
+    pageTitle->setMaximumWidth(720);
     layout->addWidget(pageTitle);
 
-    auto* statusTitle = new QLabel("Status");
-    statusTitle->setMaximumWidth(680);
-    statusTitle->setStyleSheet("font-size: 14px; font-weight: 700; color: #a7a7a7; padding-top: 14px;");
+    auto* pageSubtitle = makePageSubtitle(
+        "Accept incoming ExtendCast sessions and share this PC as a display."
+    );
+    pageSubtitle->setMaximumWidth(720);
+    layout->addWidget(pageSubtitle);
+
+    auto* statusTitle = makeSectionTitle("Status");
+    statusTitle->setMaximumWidth(720);
     layout->addWidget(statusTitle);
 
     auto* statusCard = makePanel();
-    statusCard->setMaximumWidth(680);
+    statusCard->setMaximumWidth(720);
     auto* statusLayout = new QVBoxLayout(statusCard);
-    statusLayout->setContentsMargins(24, 22, 24, 22);
+    statusLayout->setContentsMargins(20, 18, 20, 18);
 
     auto* statusRow = new QHBoxLayout();
     statusRow->setSpacing(12);
@@ -1648,23 +1684,22 @@ void MainWindow::setupReceivePage() {
 
     layout->addWidget(statusCard);
 
-    auto* connectedSendersTitle = new QLabel("Connected Senders");
-    connectedSendersTitle->setMaximumWidth(680);
-    connectedSendersTitle->setStyleSheet(
-        "font-size: 14px; font-weight: 700; color: #a7a7a7; "
-        "padding-top: 8px;"
-    );
+    auto* connectedSendersTitle = makeSectionTitle("Connected Senders");
+    connectedSendersTitle->setMaximumWidth(720);
     layout->addWidget(connectedSendersTitle);
 
     auto* connectedSendersCard = makePanel();
-    connectedSendersCard->setMaximumWidth(680);
+    connectedSendersCard->setMaximumWidth(720);
     auto* connectedSendersLayout = new QVBoxLayout(connectedSendersCard);
-    connectedSendersLayout->setContentsMargins(24, 24, 24, 24);
+    connectedSendersLayout->setContentsMargins(20, 18, 20, 18);
     connectedSendersLayout->setSpacing(0);
 
-    m_connectedSendersEmptyLabel = new QLabel("No senders connected.");
+    m_connectedSendersEmptyLabel = new QLabel(
+        "No senders connected\nIncoming sessions will appear here."
+    );
+    m_connectedSendersEmptyLabel->setAlignment(Qt::AlignCenter);
     m_connectedSendersEmptyLabel->setStyleSheet(
-        "font-size: 13px; color: #8f8f8f; padding: 18px 0;"
+        "font-size: 12px; color: #8f8f8f; padding: 20px 0;"
     );
     connectedSendersLayout->addWidget(m_connectedSendersEmptyLabel);
 
@@ -1675,15 +1710,14 @@ void MainWindow::setupReceivePage() {
 
     layout->addWidget(connectedSendersCard);
 
-    m_receiverConnectionsTitle = new QLabel("Advertised Receiver Routes");
-    m_receiverConnectionsTitle->setMaximumWidth(680);
-    m_receiverConnectionsTitle->setStyleSheet("font-size: 14px; font-weight: 700; color: #a7a7a7; padding-top: 8px;");
+    m_receiverConnectionsTitle = makeSectionTitle("Available Addresses");
+    m_receiverConnectionsTitle->setMaximumWidth(720);
     layout->addWidget(m_receiverConnectionsTitle);
 
     m_receiverConnectionsCard = makePanel();
-    m_receiverConnectionsCard->setMaximumWidth(680);
+    m_receiverConnectionsCard->setMaximumWidth(720);
     auto* listenLayout = new QVBoxLayout(m_receiverConnectionsCard);
-    listenLayout->setContentsMargins(24, 24, 24, 24);
+    listenLayout->setContentsMargins(20, 18, 20, 18);
     listenLayout->setSpacing(0);
 
     m_recvIpLabel = new QLabel();
@@ -1700,15 +1734,14 @@ void MainWindow::setupReceivePage() {
 
     layout->addWidget(m_receiverConnectionsCard);
 
-    auto* settingsTitle = new QLabel("Settings");
-    settingsTitle->setMaximumWidth(680);
-    settingsTitle->setStyleSheet("font-size: 14px; font-weight: 700; color: #a7a7a7; padding-top: 8px;");
+    auto* settingsTitle = makeSectionTitle("Settings");
+    settingsTitle->setMaximumWidth(720);
     layout->addWidget(settingsTitle);
 
     auto* autoStartCard = makePanel();
-    autoStartCard->setMaximumWidth(680);
+    autoStartCard->setMaximumWidth(720);
     auto* autoStartRow = new QHBoxLayout(autoStartCard);
-    autoStartRow->setContentsMargins(24, 18, 24, 18);
+    autoStartRow->setContentsMargins(20, 16, 20, 16);
     autoStartRow->setSpacing(14);
 
     auto* autoStartText = new QVBoxLayout();
@@ -1813,15 +1846,22 @@ void MainWindow::setupSettingsPage() {
     scroll->setWidgetResizable(true);
 
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(40, 30, 40, 30);
-    layout->setSpacing(18);
+    layout->setContentsMargins(32, 28, 32, 32);
+    layout->setSpacing(14);
+    layout->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
 
-    auto* pageTitle = new QLabel("Settings");
-    pageTitle->setStyleSheet("font-size: 22px; font-weight: bold; color: white;");
+    auto* pageTitle = makePageTitle("Settings");
+    pageTitle->setMaximumWidth(720);
     layout->addWidget(pageTitle);
 
-    auto* generalCard = makeCard("General");
+    auto* generalTitle = makeSectionTitle("General");
+    generalTitle->setMaximumWidth(720);
+    layout->addWidget(generalTitle);
+
+    auto* generalCard = makePanel();
+    generalCard->setMaximumWidth(720);
     auto* generalLayout = new QVBoxLayout(generalCard);
+    generalLayout->setContentsMargins(20, 16, 20, 16);
     generalLayout->setSpacing(12);
 
     auto* launchRow = new QHBoxLayout();
@@ -1852,8 +1892,16 @@ void MainWindow::setupSettingsPage() {
     generalLayout->addLayout(launchRow);
     layout->addWidget(generalCard);
 
-    auto* aboutCard = makeCard("About");
+    layout->addSpacing(4);
+
+    auto* aboutTitle = makeSectionTitle("About");
+    aboutTitle->setMaximumWidth(720);
+    layout->addWidget(aboutTitle);
+
+    auto* aboutCard = makePanel();
+    aboutCard->setMaximumWidth(720);
     auto* aboutLayout = new QVBoxLayout(aboutCard);
+    aboutLayout->setContentsMargins(20, 16, 20, 16);
     aboutLayout->setSpacing(12);
 
     auto* versionRow = new QHBoxLayout();
@@ -1998,39 +2046,27 @@ void MainWindow::onDownloadUpdateClicked() {
 void MainWindow::setupLogsPage() {
     auto* page = new QWidget();
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(20, 16, 20, 16);
-    layout->setSpacing(10);
+    layout->setContentsMargins(24, 20, 24, 24);
+    layout->setSpacing(12);
 
     // Title row with buttons
     auto* titleRow = new QHBoxLayout();
 
-    auto* pageTitle = new QLabel("Logs");
-    pageTitle->setStyleSheet("font-size: 22px; font-weight: bold; color: white;");
+    auto* pageTitle = makePageTitle("Logs");
     titleRow->addWidget(pageTitle);
 
     titleRow->addStretch();
 
     auto* reportBtn = new QPushButton("Report Issue");
-    reportBtn->setStyleSheet(
-        "QPushButton { background-color: #333; color: #ccc; padding: 6px 14px; "
-        "border-radius: 6px; font-size: 12px; border: 1px solid #555; }"
-        "QPushButton:hover { background-color: #444; }");
     connect(reportBtn, &QPushButton::clicked, this, &MainWindow::onReportIssue);
     titleRow->addWidget(reportBtn);
 
     auto* copyBtn = new QPushButton("Copy");
-    copyBtn->setStyleSheet(
-        "QPushButton { background-color: #333; color: #ccc; padding: 6px 14px; "
-        "border-radius: 6px; font-size: 12px; border: 1px solid #555; }"
-        "QPushButton:hover { background-color: #444; }");
     connect(copyBtn, &QPushButton::clicked, this, &MainWindow::onCopyLogs);
     titleRow->addWidget(copyBtn);
 
     auto* clearBtn = new QPushButton("Clear");
-    clearBtn->setStyleSheet(
-        "QPushButton { background-color: #333; color: #ccc; padding: 6px 14px; "
-        "border-radius: 6px; font-size: 12px; border: 1px solid #555; }"
-        "QPushButton:hover { background-color: #444; }");
+    clearBtn->setToolTip("Clear all log entries");
     connect(clearBtn, &QPushButton::clicked, this, &MainWindow::onClearLogs);
     titleRow->addWidget(clearBtn);
 
@@ -2039,7 +2075,9 @@ void MainWindow::setupLogsPage() {
     // Log viewer
     m_logViewer = new QTextEdit();
     m_logViewer->setReadOnly(true);
-    m_logViewer->setPlaceholderText("No log entries yet...");
+    m_logViewer->setPlaceholderText(
+        "No log entries yet. Connection and streaming events will appear here."
+    );
     layout->addWidget(m_logViewer);
 
     m_pageLogs = m_stack->addWidget(page);

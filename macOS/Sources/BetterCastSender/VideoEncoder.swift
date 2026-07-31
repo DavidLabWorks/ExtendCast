@@ -1,6 +1,7 @@
 import Foundation
 import VideoToolbox
 import CoreMedia
+import CoreVideo
 
 protocol VideoEncoderDelegate: AnyObject {
     func videoEncoder(
@@ -82,6 +83,23 @@ class VideoEncoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: keyframeIntervalSeconds as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse) // Crucial for Real-Time
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: expectedFPS as CFNumber)
+        // ScreenCaptureKit provides video-range NV12. Explicit BT.709 VUI
+        // metadata lets non-Apple receivers select the correct YUV matrix.
+        VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_ColorPrimaries,
+            value: SDRColorPipeline.colorPrimaries
+        )
+        VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_TransferFunction,
+            value: SDRColorPipeline.transferFunction
+        )
+        VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_YCbCrMatrix,
+            value: SDRColorPipeline.yCbCrMatrix
+        )
 
         VTCompressionSessionPrepareToEncodeFrames(session)
         LogManager.shared.log("VideoEncoder: Initialized (\(bitrate/1_000_000)Mbps, KF every \(keyframeIntervalSeconds)s)")

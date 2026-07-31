@@ -1,9 +1,47 @@
 import Network
 import XCTest
+import Network
 @testable import BetterCastSender
 
 @MainActor
 final class DiscoveryBehaviorTests: XCTestCase {
+    func testTransientNetworkWaitingDoesNotHideBonjourReceiver() {
+        let state = NWConnection.State.waiting(.posix(.ENETDOWN))
+
+        XCTAssertEqual(
+            BonjourReachabilityStateDecision.decide(state),
+            .wait
+        )
+    }
+
+    func testTransientBonjourFailuresRetryBeforeBackgroundPolling() {
+        XCTAssertEqual(
+            NetworkClient.bonjourReachabilityRetryDelay(
+                consecutiveFailures: 1
+            ),
+            0.5
+        )
+        XCTAssertEqual(
+            NetworkClient.bonjourReachabilityRetryDelay(
+                consecutiveFailures: 2
+            ),
+            1.0
+        )
+        XCTAssertEqual(
+            NetworkClient.bonjourReachabilityRetryDelay(
+                consecutiveFailures: 3
+            ),
+            2.0
+        )
+        XCTAssertEqual(
+            NetworkClient.bonjourReachabilityRetryDelay(
+                consecutiveFailures: 4,
+                backgroundInterval: 20
+            ),
+            20
+        )
+    }
+
     func testConnectedSenderEndpointDisplaysMappedIPv4WithoutIPv6Wrapper() {
         XCTAssertEqual(
             ReceiverConnectedSender.displayEndpoint(

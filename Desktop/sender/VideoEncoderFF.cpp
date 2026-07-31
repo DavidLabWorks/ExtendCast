@@ -36,6 +36,12 @@ bool VideoEncoderFF::tryEncoder(const char* codecName, int width, int height, in
     ctx->time_base = {1, fps};
     ctx->framerate = {fps, 1};
     ctx->pix_fmt = AV_PIX_FMT_NV12;
+    // ScreenCaptureWin produces video-range BT.601 NV12. Signal that in the
+    // H.264 VUI so receivers can select the matching range and matrix.
+    ctx->color_range = AVCOL_RANGE_MPEG;
+    ctx->colorspace = AVCOL_SPC_SMPTE170M;
+    ctx->color_primaries = AVCOL_PRI_BT709;
+    ctx->color_trc = AVCOL_TRC_BT709;
     ctx->bit_rate = bitrate;
     ctx->rc_max_rate = bitrate * 3 / 2;              // allow 1.5x peak for motion
     ctx->rc_buffer_size = bitrate;                     // 1-second VBV buffer
@@ -145,6 +151,10 @@ bool VideoEncoderFF::init(int width, int height, int fps, int bitrateMbps) {
     m_frame->format = AV_PIX_FMT_NV12;
     m_frame->width = width;
     m_frame->height = height;
+    m_frame->color_range = AVCOL_RANGE_MPEG;
+    m_frame->colorspace = AVCOL_SPC_SMPTE170M;
+    m_frame->color_primaries = AVCOL_PRI_BT709;
+    m_frame->color_trc = AVCOL_TRC_BT709;
     if (av_frame_get_buffer(m_frame, 32) < 0) {
         emit error("Failed to allocate encoder frame buffer");
         shutdown();

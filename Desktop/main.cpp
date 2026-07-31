@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QSurfaceFormat>
+#include <QColorSpace>
 #include <QIcon>
 #include <QProcess>
 #include <QStandardPaths>
@@ -88,6 +89,9 @@ int main(int argc, char* argv[]) {
     format.setVersion(2, 1);
     format.setProfile(QSurfaceFormat::CompatibilityProfile);
     format.setSwapInterval(1); // VSync
+    // The renderer outputs standard SDR sRGB. Declaring the surface lets the
+    // Windows compositor map it through the active display color profile.
+    format.setColorSpace(QColorSpace(QColorSpace::SRgb));
     QSurfaceFormat::setDefaultFormat(format);
 
     QApplication app(argc, argv);

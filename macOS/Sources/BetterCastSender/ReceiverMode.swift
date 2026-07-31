@@ -539,6 +539,7 @@ struct ReceiverModeView: View {
             .frame(maxWidth: .infinity)
         }
         .navigationTitle("Receiver")
+        .appPageBackground()
         .onAppear {
             if manager.isRunning {
                 refreshAvailableAddresses()
@@ -612,8 +613,7 @@ struct ReceiverModeView: View {
 
     private func sectionTitle(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(.secondary)
+            .font(.system(size: 13, weight: .semibold))
             .padding(.top, 4)
     }
 

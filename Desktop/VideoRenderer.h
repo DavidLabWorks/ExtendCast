@@ -1,5 +1,7 @@
 #pragma once
 
+#include "VideoColorConversion.h"
+
 #include <QOpenGLWidget>
 #include <QOpenGLFunctions>
 #include <QOpenGLShaderProgram>
@@ -58,4 +60,8 @@ private:
     int m_frameHeight = 0;
     bool m_hasNewFrame = false;
     bool m_updatePending = false;
+    video_color::Parameters m_colorParameters = video_color::parametersFor(
+        video_color::Range::unspecified,
+        video_color::Matrix::bt709
+    );
 };

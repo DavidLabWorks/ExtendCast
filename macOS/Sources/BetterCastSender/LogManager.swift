@@ -188,7 +188,12 @@ struct LogView: View {
             }
 
             // Action buttons
-            HStack {
+            HStack(spacing: 8) {
+                Text("Session Log")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("\(logManager.logs.count) entries")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
                 Spacer()
 
                 Button {
@@ -198,6 +203,7 @@ struct LogView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .keyboardShortcut("c", modifiers: [.command, .shift])
 
                 Button {
                     let text = logManager.logs.joined(separator: "\n")
@@ -223,17 +229,38 @@ struct LogView: View {
             .padding(.bottom, 6)
 
             ScrollView {
-                Text(logManager.logs.joined(separator: "\n"))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
+                Group {
+                    if logManager.logs.isEmpty {
+                        NativeEmptyState(
+                            title: "No log entries yet",
+                            message: "Connection and streaming events will appear here.",
+                            systemImage: "text.alignleft"
+                        )
+                    } else {
+                        Text(logManager.logs.joined(separator: "\n"))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color(nsColor: .textBackgroundColor))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 0.5)
+                        }
+                )
                 .padding(.horizontal, 16)
-                .padding(.bottom, 10)
+                .padding(.bottom, 16)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("Logs")
+        .appPageBackground()
     }
 
     private func openReportIssue() {

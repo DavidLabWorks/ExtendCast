@@ -185,11 +185,12 @@ struct BetterCastSenderApp: App {
             SidebarView(selection: $sidebarSelection) {
                 networkClient.quitApp()
             }
-                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 350)
+                .navigationSplitViewColumnWidth(min: 208, ideal: 232, max: 280)
         } detail: {
             DetailPanelView(client: networkClient, selection: $sidebarSelection, hasCompletedOnboarding: $hasCompletedOnboarding)
         }
-        .frame(minWidth: 750, minHeight: 540)
+        .navigationSplitViewStyle(.balanced)
+        .frame(minWidth: 820, minHeight: 580)
         .overlay {
             if showTour {
                 GuidedTourOverlay(
@@ -691,22 +692,33 @@ struct OnboardingView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Header
-            VStack(spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage)
-                    .resizable()
-                    .frame(width: 80, height: 80)
-                    .clipShape(RoundedRectangle(cornerRadius: 18))
-                    .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
+            HStack(spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(.thinMaterial)
+                        .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .frame(width: 66, height: 66)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+                .frame(width: 82, height: 82)
 
-                Text("Welcome to ExtendCast")
-                    .font(.system(size: 26, weight: .bold))
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Welcome to ExtendCast")
+                        .font(.system(size: 26, weight: .semibold))
+                        .tracking(-0.5)
 
-                Text("A few permissions are needed to get started")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.secondary)
+                    Text("Turn the devices you already own into a seamless extension of your Mac.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
             }
-            .padding(.top, 40)
-            .padding(.bottom, 30)
+            .padding(.horizontal, 40)
+            .padding(.top, 34)
+            .padding(.bottom, 26)
 
             // Step indicators
             HStack(spacing: 24) {
@@ -777,6 +789,17 @@ struct OnboardingView: View {
             }
             .padding(.horizontal, 40)
             .padding(.bottom, 30)
+        }
+        .background {
+            LinearGradient(
+                colors: [
+                    Color.accentColor.opacity(0.055),
+                    Color(nsColor: .windowBackgroundColor),
+                    Color(nsColor: .windowBackgroundColor)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
         }
         .onAppear {
             checkPermissions()
@@ -1006,19 +1029,120 @@ struct PermissionStepCard: View {
     }
 }
 
-// MARK: - Dashboard Card Container (fallback for pre-macOS 26)
+// MARK: - Shared macOS Design System
+
+struct PageSectionHeader<Trailing: View>: View {
+    let title: String
+    let subtitle: String?
+    @ViewBuilder let trailing: Trailing
+
+    init(
+        _ title: String,
+        subtitle: String? = nil,
+        @ViewBuilder trailing: () -> Trailing
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.trailing = trailing()
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            trailing
+        }
+    }
+}
+
+extension PageSectionHeader where Trailing == EmptyView {
+    init(_ title: String, subtitle: String? = nil) {
+        self.init(title, subtitle: subtitle) { EmptyView() }
+    }
+}
+
+struct NativeEmptyState: View {
+    let title: String
+    let message: String
+    let systemImage: String
+    var isWorking = false
+
+    var body: some View {
+        VStack(spacing: 10) {
+            if isWorking {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Image(systemName: systemImage)
+                    .font(.system(size: 28, weight: .light))
+                    .foregroundStyle(.tertiary)
+            }
+            Text(title)
+                .font(.system(size: 14, weight: .semibold))
+            Text(message)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 360)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 32)
+    }
+}
+
+struct StatusPill: View {
+    let title: String
+    let color: Color
+    var systemImage = "circle.fill"
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(color.opacity(0.1), in: Capsule())
+    }
+}
+
+struct AppPageBackground: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+extension View {
+    func appPageBackground() -> some View {
+        modifier(AppPageBackground())
+    }
+}
+
+// MARK: - Dashboard Card Container
 
 struct DashboardCard<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
         content
-            .padding(16)
+            .padding(18)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(Color(nsColor: .controlBackgroundColor))
-                    .shadow(color: .black.opacity(0.05), radius: 4, x: 0, y: 1)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 0.5)
+                    }
+                    .shadow(color: .black.opacity(0.035), radius: 2, x: 0, y: 1)
             )
     }
 }
@@ -1057,29 +1181,19 @@ struct SidebarView: View {
 
     var body: some View {
         List {
-            Section {
-                HStack(spacing: 8) {
-                    SidebarIcon(name: "sidebar-sender", usesSharedIcon: true, size: 13)
-                    Text("Sender")
-                }
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.bottom, 2)
-                .accessibilityAddTraits(.isHeader)
-
+            Section("Cast") {
                 sidebarRow("Devices", icon: "sidebar-devices", tag: .devices, usesSharedIcon: true)
-                    .padding(.leading, 16)
                     .tourAnchor("sidebar_devices_section")
                 sidebarRow("Recent", icon: "sidebar-recent", tag: .recent, usesSharedIcon: true)
-                    .padding(.leading, 16)
                 sidebarRow("Connect", icon: "sidebar-connect", tag: .connect, usesSharedIcon: true)
-                    .padding(.leading, 16)
             }
 
-            Section {
+            Section("This Mac") {
                 sidebarRow("Receiver", icon: "sidebar-receiver", tag: .receive, usesSharedIcon: true)
                     .tourAnchor("sidebar_receive")
+            }
+
+            Section("Support") {
                 sidebarRow("Settings", icon: "sidebar-settings", tag: .settings, usesSharedIcon: true)
                     .tourAnchor("sidebar_settings")
                 sidebarRow("Logs", icon: "sidebar-logs", tag: .logs, usesSharedIcon: true)
@@ -1089,7 +1203,19 @@ struct SidebarView: View {
         .navigationTitle("ExtendCast")
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
-            HStack {
+            HStack(spacing: 10) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .frame(width: 24, height: 24)
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("ExtendCast")
+                        .font(.system(size: 11, weight: .medium))
+                    Text("Version \(UpdateChecker.displayVersion)")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer()
                 Button(role: .destructive) {
                     quitAction()
                 } label: {
@@ -1097,14 +1223,14 @@ struct SidebarView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Quit ExtendCast")
-                Spacer()
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial)
+            .overlay(alignment: .top) { Divider() }
         }
     }
 
-    // Apple Music-style sidebar row: tinted icon+text when selected, subtle matte bg
     @ViewBuilder
     private func sidebarRow(
         _ title: String,
@@ -1135,6 +1261,7 @@ struct SidebarView: View {
                     Text(title)
                 }
             }
+            .font(.system(size: 13))
             .foregroundColor(isSelected ? tint : .primary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
@@ -1687,6 +1814,7 @@ struct DetailPanelView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Settings")
+        .appPageBackground()
         .onAppear {
             launchAtLoginManager.refresh()
         }
@@ -1747,12 +1875,14 @@ struct DevicesView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 20) {
+            VStack(alignment: .leading, spacing: 18) {
                 if !client.connectedDisplays.isEmpty {
                     DashboardCard {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Connected")
-                                .font(.system(size: 14, weight: .semibold))
+                            PageSectionHeader(
+                                "Connected",
+                                subtitle: "\(client.connectedDisplays.count) active session\(client.connectedDisplays.count == 1 ? "" : "s")"
+                            )
 
                             ForEach(client.connectedDisplays) { display in
                                 HStack(spacing: 12) {
@@ -1771,8 +1901,10 @@ struct DevicesView: View {
 
                                     Spacer()
 
-                                    Button("Settings") {
+                                    Button {
                                         selection = .device(display.id)
+                                    } label: {
+                                        Label("Settings", systemImage: "slider.horizontal.3")
                                     }
                                     .buttonStyle(.bordered)
                                     .controlSize(.small)
@@ -1795,8 +1927,12 @@ struct DevicesView: View {
                 if !availableServices.isEmpty {
                     DashboardCard {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Available")
-                                .font(.system(size: 14, weight: .semibold))
+                            PageSectionHeader(
+                                "Available",
+                                subtitle: "Receivers found on your local network"
+                            ) {
+                                StatusPill(title: "\(availableServices.count) found", color: .secondary, systemImage: "dot.radiowaves.left.and.right")
+                            }
 
                             ForEach(availableServices, id: \.name) { service in
                                 HStack(spacing: 12) {
@@ -1810,8 +1946,10 @@ struct DevicesView: View {
 
                                     Spacer()
 
-                                    Button("Settings") {
+                                    Button {
                                         selection = .discovered(service.name)
+                                    } label: {
+                                        Label("Configure", systemImage: "chevron.right")
                                     }
                                     .buttonStyle(.bordered)
                                     .controlSize(.small)
@@ -1828,35 +1966,33 @@ struct DevicesView: View {
 
                 if client.connectedDisplays.isEmpty && availableServices.isEmpty {
                     DashboardCard {
-                        VStack(spacing: 12) {
-                            if client.isDiscoveringDevices {
-                                ProgressView()
-                                Text("Searching for devices on your network...")
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                Image(systemName: "display.badge.questionmark")
-                                    .font(.system(size: 30, weight: .light))
-                                    .foregroundStyle(.secondary)
-                                Text("No Devices Found")
-                                    .font(.headline)
-                                Text("Open ExtendCast on the receiver and make sure both devices are on the same local network.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .multilineTextAlignment(.center)
+                        VStack(spacing: 14) {
+                            NativeEmptyState(
+                                title: client.isDiscoveringDevices ? "Looking for receivers" : "No devices found",
+                                message: client.isDiscoveringDevices
+                                    ? "Searching your local network…"
+                                    : "Open ExtendCast on the receiver and make sure both devices are on the same local network.",
+                                systemImage: "display.badge.questionmark",
+                                isWorking: client.isDiscoveringDevices
+                            )
+                            if !client.isDiscoveringDevices {
                                 Button("Search Again") {
                                     client.startBrowsing()
                                 }
-                                .buttonStyle(.bordered)
+                                .buttonStyle(.borderedProminent)
+                                .keyboardShortcut("r", modifiers: [.command])
                             }
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 28)
                     }
                 }
             }
-            .padding(20)
+            .padding(24)
+            .frame(maxWidth: 820)
+            .frame(maxWidth: .infinity)
         }
         .navigationTitle("Devices")
+        .appPageBackground()
     }
 
     private func deviceIcon(for name: String) -> String {
@@ -1875,32 +2011,30 @@ struct RecentConnectionsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 20) {
+            VStack(alignment: .leading, spacing: 18) {
                 if client.manualConnectionHistory.isEmpty {
                     DashboardCard {
                         VStack(spacing: 12) {
-                            Image(systemName: "clock.arrow.circlepath")
-                                .font(.system(size: 32, weight: .light))
-                                .foregroundStyle(.secondary)
-                            Text("No Recent Connections")
-                                .font(.headline)
-                            Text("Devices appear here after a successful manual connection.")
-                                .foregroundStyle(.secondary)
+                            NativeEmptyState(
+                                title: "No recent connections",
+                                message: "Devices appear here after a successful manual connection.",
+                                systemImage: "clock.arrow.circlepath"
+                            )
                             Button("Connect Manually") {
                                 selection = .connect
                             }
                             .buttonStyle(.borderedProminent)
+                            .keyboardShortcut("n", modifiers: [.command])
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 28)
                     }
                 } else {
                     DashboardCard {
                         VStack(alignment: .leading, spacing: 12) {
-                            HStack {
-                                Text("Recent Connections")
-                                    .font(.system(size: 14, weight: .semibold))
-                                Spacer()
+                            PageSectionHeader(
+                                "Saved Addresses",
+                                subtitle: "Availability is checked on demand"
+                            ) {
                                 Button {
                                     client.refreshManualConnectionAvailability()
                                 } label: {
@@ -1979,9 +2113,12 @@ struct RecentConnectionsView: View {
                     }
                 }
             }
-            .padding(20)
+            .padding(24)
+            .frame(maxWidth: 820)
+            .frame(maxWidth: .infinity)
         }
         .navigationTitle("Recent")
+        .appPageBackground()
         .onAppear { client.refreshManualConnectionAvailabilityIfNeeded() }
     }
 
@@ -2034,30 +2171,57 @@ struct ManualConnectView: View {
     @ObservedObject var client: NetworkClient
 
     var body: some View {
-        Form {
-            Section {
-                TextField("IP address or hostname", text: $client.manualHost)
-                    .textFieldStyle(.roundedBorder)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                DashboardCard {
+                    VStack(alignment: .leading, spacing: 16) {
+                        PageSectionHeader(
+                            "Receiver Address",
+                            subtitle: "Use the IP address and port shown on the receiver"
+                        )
 
-                TextField("Port", text: $client.manualPort)
-                    .textFieldStyle(.roundedBorder)
+                        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
+                            GridRow {
+                                Text("Host")
+                                    .foregroundStyle(.secondary)
+                                TextField("192.168.1.10 or receiver.local", text: $client.manualHost)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                            GridRow {
+                                Text("Port")
+                                    .foregroundStyle(.secondary)
+                                TextField("5000", text: $client.manualPort)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(maxWidth: 160)
+                            }
+                        }
 
-                Button("Connect") {
-                    client.connectManual()
+                        Divider()
+
+                        HStack {
+                            Label("Successful connections are saved in Recent.", systemImage: "clock.arrow.circlepath")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Connect") {
+                                client.connectManual()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .keyboardShortcut(.return, modifiers: [])
+                            .disabled(
+                                client.manualHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                    || UInt16(client.manualPort) == nil
+                            )
+                        }
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(
-                    client.manualHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || UInt16(client.manualPort) == nil
-                )
-            } header: {
-                Text("Manual IP")
-            } footer: {
-                Text("Successful manual connections are saved in Recent.")
             }
+            .padding(24)
+            .frame(maxWidth: 720)
+            .frame(maxWidth: .infinity)
         }
-        .formStyle(.grouped)
         .navigationTitle("Connect")
+        .appPageBackground()
     }
 }
 
@@ -2890,7 +3054,7 @@ struct DiscoveredDeviceView: View {
 
     private var connectForm: some View {
         Form {
-            Section("Connect") {
+                Section("Connect") {
                 if isAndroid {
                     HStack {
                         Image(systemName: "cable.connector")
@@ -2970,29 +3134,32 @@ struct DiscoveredDeviceView: View {
                     )
                     InfoTip(text: client.interfacePreference.connectHelp)
                 }
-            }
-
-            if isAndroid && !client.adbStatus.isEmpty {
-                Section("ADB Status") {
-                    Text(client.adbStatus)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
-            }
 
-            DeviceStreamSettingsSections(
-                client: client,
-                audioStreaming: $client.audioStreamingEnabled,
-                autoConnect: Binding(
-                    get: { client.isAutoConnectEnabled(for: service) },
-                    set: { client.setAutoConnectEnabled($0, for: service) }
-                ),
-                availableConnectionModes: client.availableConnectionModes(for: service),
-                protocolDisabled: isManualConnection
-            )
+                if isAndroid && !client.adbStatus.isEmpty {
+                    Section("ADB Status") {
+                        Text(client.adbStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                DeviceStreamSettingsSections(
+                    client: client,
+                    audioStreaming: $client.audioStreamingEnabled,
+                    autoConnect: Binding(
+                        get: { client.isAutoConnectEnabled(for: service) },
+                        set: { client.setAutoConnectEnabled($0, for: service) }
+                    ),
+                    availableConnectionModes: client.availableConnectionModes(for: service),
+                    protocolDisabled: isManualConnection
+                )
         }
         .formStyle(.grouped)
+        .frame(maxWidth: 860)
+        .frame(maxWidth: .infinity)
         .navigationTitle(service.name)
+        .appPageBackground()
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {
@@ -3394,6 +3561,25 @@ typealias BonjourReachabilityProbe = (
     @escaping (BonjourReachabilityResult) -> Void
 ) -> () -> Void
 
+enum BonjourReachabilityStateDecision: Equatable {
+    case wait
+    case reachable
+    case unreachable
+
+    static func decide(_ state: NWConnection.State) -> Self {
+        switch state {
+        case .ready:
+            return .reachable
+        case .failed, .cancelled:
+            return .unreachable
+        case .setup, .preparing, .waiting:
+            return .wait
+        @unknown default:
+            return .wait
+        }
+    }
+}
+
 private enum ConnectDiagnostics {
     static let tag = "[DEBUG-CONNECT-7F3A]"
 
@@ -3494,8 +3680,8 @@ private final class BonjourTCPReachabilityCheck {
                     ConnectDiagnostics.pathSummary(self.connection.currentPath)
                 )
             )
-            switch state {
-            case .ready:
+            switch BonjourReachabilityStateDecision.decide(state) {
+            case .reachable:
                 let path = self.connection.currentPath
                 let pathInterfaces = path?.availableInterfaces ?? []
                 let resolvedRoute = path?.remoteEndpoint.map {
@@ -3512,9 +3698,9 @@ private final class BonjourTCPReachabilityCheck {
                         resolvedRoute: resolvedRoute
                     )
                 )
-            case .waiting, .failed:
+            case .unreachable:
                 self.finish(result: .unreachable)
-            default:
+            case .wait:
                 break
             }
         }
@@ -4043,6 +4229,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private var bonjourReachabilityProbeIDs: [String: UUID] = [:]
     private var bonjourReachabilityProbeCancellations: [String: () -> Void] = [:]
     private var bonjourReachabilityRecheckWorkItems: [String: DispatchWorkItem] = [:]
+    private var bonjourReachabilityFailureCounts: [String: Int] = [:]
     private var pipelines: [UUID: ConnectionPipeline] = [:]
     private var receiverProfiles: [String: ReceiverSettings] = [:]
     @Published private var autoConnectReceiverKeys: Set<String> = []
@@ -4170,6 +4357,18 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         return isFocused ? focusedInterval : backgroundInterval
     }
 
+    static func bonjourReachabilityRetryDelay(
+        consecutiveFailures: Int,
+        backgroundInterval: TimeInterval = 20
+    ) -> TimeInterval {
+        switch consecutiveFailures {
+        case 1: return 0.5
+        case 2: return 1.0
+        case 3: return 2.0
+        default: return backgroundInterval
+        }
+    }
+
     func setFocusedBonjourServiceName(_ name: String?) {
         guard focusedBonjourServiceName != name else { return }
         let previouslyFocusedName = focusedBonjourServiceName
@@ -4193,6 +4392,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         browserRecoveryWorkItems.values.forEach { $0.cancel() }
         browserRecoveryWorkItems.removeAll()
         browserRecoveryAttempts.removeAll()
+        bonjourReachabilityFailureCounts.removeAll()
         discoverySearchWorkItem?.cancel()
 
         browsers.values.forEach { $0.cancel() }
@@ -4319,6 +4519,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             bonjourReachabilityProbeCancellations.removeValue(forKey: name)?()
             bonjourReachabilityProbeIDs.removeValue(forKey: name)
             bonjourReachabilityRecheckWorkItems.removeValue(forKey: name)?.cancel()
+            bonjourReachabilityFailureCounts.removeValue(forKey: name)
             reachableTCPServiceNames.remove(name)
             resolvedBonjourRoutesByName.removeValue(forKey: name)
         }
@@ -4380,6 +4581,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         bonjourReachabilityProbeCancellations.removeValue(forKey: name)?()
 
         if result.isReachable {
+            bonjourReachabilityFailureCounts.removeValue(forKey: name)
             reachableTCPServiceNames.insert(name)
             if !result.resolvedRoutes.isEmpty {
                 resolvedBonjourRoutesByName[name] = result.resolvedRoutes
@@ -4391,20 +4593,34 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 )
             }
             publishReachableTCPServices()
+            scheduleBonjourReachabilityProbe(for: name)
         } else {
             reachableTCPServiceNames.remove(name)
             resolvedBonjourRoutesByName.removeValue(forKey: name)
             removeDiscoveredServiceImmediately(name, for: "TCP")
+            let failureCount =
+                (bonjourReachabilityFailureCounts[name] ?? 0) + 1
+            bonjourReachabilityFailureCounts[name] = failureCount
+            scheduleBonjourReachabilityProbe(
+                for: name,
+                delayOverride: Self.bonjourReachabilityRetryDelay(
+                    consecutiveFailures: failureCount,
+                    backgroundInterval:
+                        backgroundBonjourReachabilityRecheckInterval
+                )
+            )
         }
-
-        scheduleBonjourReachabilityProbe(for: name)
     }
 
-    private func scheduleBonjourReachabilityProbe(for name: String) {
+    private func scheduleBonjourReachabilityProbe(
+        for name: String,
+        delayOverride: TimeInterval? = nil
+    ) {
         bonjourReachabilityRecheckWorkItems.removeValue(forKey: name)?.cancel()
         guard let service = browsedTCPServicesByName[name],
               bonjourReachabilityProbeIDs[name] == nil,
-              let recheckInterval = recheckInterval(for: name) else {
+              let recheckInterval =
+                delayOverride ?? recheckInterval(for: name) else {
             return
         }
         let recheck = DispatchWorkItem { [weak self] in
@@ -4443,6 +4659,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 bonjourReachabilityProbeCancellations.removeValue(forKey: name)?()
                 bonjourReachabilityProbeIDs.removeValue(forKey: name)
                 bonjourReachabilityRecheckWorkItems.removeValue(forKey: name)?.cancel()
+                bonjourReachabilityFailureCounts.removeValue(forKey: name)
             } else if bonjourReachabilityProbeIDs[name] == nil,
                       bonjourReachabilityRecheckWorkItems[name] == nil {
                 startBonjourReachabilityProbe(for: service)
@@ -4774,6 +4991,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         bonjourReachabilityProbeIDs.removeAll()
         bonjourReachabilityRecheckWorkItems.values.forEach { $0.cancel() }
         bonjourReachabilityRecheckWorkItems.removeAll()
+        bonjourReachabilityFailureCounts.removeAll()
         browsedTCPServicesByName.removeAll()
         reachableTCPServiceNames.removeAll()
         resolvedBonjourRoutesByName.removeAll()

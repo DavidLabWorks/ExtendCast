@@ -1,6 +1,7 @@
 #include "VideoRenderer.h"
 #include "MainWindow.h"  // for LogManager
 #include <QDebug>
+#include <QVector4D>
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -33,6 +34,10 @@ static const char* kFragmentShaderSource = R"(
     varying highp vec2 vTexCoord;
     uniform sampler2D uTextureY;
     uniform sampler2D uTextureUV;
+    // x = Y offset, y = Y scale, z = UV offset, w = UV scale.
+    uniform highp vec4 uRangeParameters;
+    // x = R from V, y = G from U, z = G from V, w = B from U.
+    uniform highp vec4 uMatrixCoefficients;
     void main() {
         highp float y = texture2D(uTextureY, vTexCoord).r;
         // GL_LUMINANCE_ALPHA: luminance->rgb, alpha->a
@@ -40,14 +45,55 @@ static const char* kFragmentShaderSource = R"(
         // So .r = U (luminance), .a = V (alpha)
         highp vec2 uv = texture2D(uTextureUV, vTexCoord).ra;
 
-        // BT.601 YCbCr -> RGB
-        highp float r = y + 1.402 * (uv.y - 0.5);
-        highp float g = y - 0.344136 * (uv.x - 0.5) - 0.714136 * (uv.y - 0.5);
-        highp float b = y + 1.772 * (uv.x - 0.5);
+        highp float normalizedY =
+            (y - uRangeParameters.x) * uRangeParameters.y;
+        highp vec2 normalizedUV =
+            (uv - vec2(uRangeParameters.z)) * uRangeParameters.w;
+
+        highp float r = normalizedY
+            + uMatrixCoefficients.x * normalizedUV.y;
+        highp float g = normalizedY
+            + uMatrixCoefficients.y * normalizedUV.x
+            + uMatrixCoefficients.z * normalizedUV.y;
+        highp float b = normalizedY
+            + uMatrixCoefficients.w * normalizedUV.x;
 
         gl_FragColor = vec4(r, g, b, 1.0);
     }
 )";
+
+static video_color::Range colorRangeForFrame(const AVFrame* frame) {
+    if (!frame) return video_color::Range::unspecified;
+    if (frame->format == AV_PIX_FMT_YUVJ420P
+        || frame->color_range == AVCOL_RANGE_JPEG) {
+        return video_color::Range::full;
+    }
+    if (frame->color_range == AVCOL_RANGE_MPEG) {
+        return video_color::Range::limited;
+    }
+    // H.264 screen-capture streams are video-range unless explicitly marked
+    // full-range. Both ScreenCaptureKit's 420v output and the Windows sender's
+    // BGRA-to-NV12 conversion use this range.
+    return video_color::Range::unspecified;
+}
+
+static video_color::MatrixSignal colorMatrixSignalForFrame(
+    const AVFrame* frame
+) {
+    if (!frame) {
+        return video_color::MatrixSignal::unspecified;
+    }
+    if (frame->colorspace == AVCOL_SPC_BT709) {
+        return video_color::MatrixSignal::bt709;
+    }
+    if (frame->colorspace == AVCOL_SPC_SMPTE170M
+        || frame->colorspace == AVCOL_SPC_BT470BG) {
+        return video_color::MatrixSignal::bt601;
+    }
+    // Rec.709 is the cross-platform SDR baseline. Legacy Windows senders that
+    // really use BT.601 now signal SMPTE170M explicitly.
+    return video_color::MatrixSignal::unspecified;
+}
 
 VideoRenderer::VideoRenderer(QWidget* parent)
     : QOpenGLWidget(parent)
@@ -142,11 +188,30 @@ void VideoRenderer::paintGL() {
         scaleX = videoAspect / widgetAspect;
     }
 
+    const auto colorParameters = m_colorParameters;
     lock.unlock();
 
     m_program->bind();
 
     m_program->setUniformValue("uViewport", offsetX, offsetY, scaleX, scaleY);
+    m_program->setUniformValue(
+        "uRangeParameters",
+        QVector4D(
+            colorParameters.yOffset,
+            colorParameters.yScale,
+            colorParameters.uvOffset,
+            colorParameters.uvScale
+        )
+    );
+    m_program->setUniformValue(
+        "uMatrixCoefficients",
+        QVector4D(
+            colorParameters.redFromV,
+            colorParameters.greenFromU,
+            colorParameters.greenFromV,
+            colorParameters.blueFromU
+        )
+    );
 
     // Bind textures
     glActiveTexture(GL_TEXTURE0);
@@ -185,6 +250,11 @@ void VideoRenderer::onFrameDecoded(AVFrame* frame) {
     }
 
     QMutexLocker lock(&m_frameMutex);
+
+    m_colorParameters = video_color::parametersFor(
+        colorRangeForFrame(frame),
+        video_color::matrixForSignal(colorMatrixSignalForFrame(frame))
+    );
 
     int w = frame->width;
     int h = frame->height;

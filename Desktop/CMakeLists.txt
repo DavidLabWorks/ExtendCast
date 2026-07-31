@@ -218,6 +218,11 @@ if(BUILD_TESTING)
         tests/VideoPacketTests.cpp
         VideoPacket.h
     )
+    add_executable(
+        VideoColorConversionTests
+        tests/VideoColorConversionTests.cpp
+        VideoColorConversion.h
+    )
     add_test(
         NAME InboundSessionRegistryTests
         COMMAND InboundSessionRegistryTests
@@ -233,6 +238,10 @@ if(BUILD_TESTING)
     add_test(
         NAME VideoPacketTests
         COMMAND VideoPacketTests
+    )
+    add_test(
+        NAME VideoColorConversionTests
+        COMMAND VideoColorConversionTests
     )
 endif()
 

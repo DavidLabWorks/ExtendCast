@@ -78,7 +78,7 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             config.width = width
             config.height = height
             config.minimumFrameInterval = CMTime(value: 1, timescale: captureFPS)
-            config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            SDRColorPipeline.configureCapture(config)
             config.queueDepth = 3
             config.capturesAudio = captureAudio
 
