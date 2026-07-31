@@ -646,37 +646,25 @@ struct ReceiverModeView: View {
     private func connectedSenderRow(
         _ sender: ReceiverConnectedSender
     ) -> some View {
-        HStack(alignment: .center, spacing: 16) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(sender.deviceName)
-                    .font(.system(size: 14, weight: .semibold))
+        VStack(alignment: .leading, spacing: 5) {
+            Text(sender.deviceName)
+                .font(.system(size: 14, weight: .semibold))
 
-                Text(sender.endpoint)
-                    .font(
-                        .system(
-                            size: 16,
-                            weight: .semibold,
-                            design: .monospaced
-                        )
+            Text(sender.endpoint)
+                .font(
+                    .system(
+                        size: 16,
+                        weight: .semibold,
+                        design: .monospaced
                     )
-                    .textSelection(.enabled)
-
-                Text("Mode: \(sender.connectionMode) · TCP")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 20)
-
-            Button("Copy") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(
-                    sender.endpoint,
-                    forType: .string
                 )
-            }
-            .buttonStyle(.bordered)
+                .textSelection(.enabled)
+
+            Text("Mode: \(sender.connectionMode) · TCP")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 4)
     }
 

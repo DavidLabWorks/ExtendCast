@@ -27,26 +27,33 @@ class VideoDecoder: ObservableObject {
     // NALU buffer management
     private var sps: Data?
     private var pps: Data?
+    private var currentStreamID: UInt64?
     
     private var timeOffset: Double = 0
     
     func decode(data: Data) {
-        // Expected format: [PTS: 8 bytes][NALUs...]
-        guard data.count > 8 else { return }
-        
-        let ptsData = data.prefix(8)
-        
-        // Use standard uInt64 instantiation to handle native endianness (matching Sender)
-        var ptsNanos: UInt64 = 0
-        let _ = Swift.withUnsafeMutableBytes(of: &ptsNanos) { ptr in
-            ptsData.copyBytes(to: ptr)
+        guard
+            let header = VideoFramePacketHeader.decode(from: data),
+            data.count > VideoFramePacketHeader.size
+        else {
+            return
         }
-        
-        // let ptsNanosSafe = rawValue // Renaming to ptsNanos for consistency with existing code usage below
 
-        // Create a fresh Data object to reset indices to 0.
-        // data.dropFirst(8) creates a Slice with startIndex=8, causing subdata(0..<4) to crash.
-        let videoData = Data(data.dropFirst(8))
+        if currentStreamID != header.streamID {
+            if let session = decompressionSession {
+                VTDecompressionSessionInvalidate(session)
+            }
+            decompressionSession = nil
+            formatDescription = nil
+            sps = nil
+            pps = nil
+            timeOffset = 0
+            currentStreamID = header.streamID
+        }
+
+        let videoData = Data(
+            data.dropFirst(VideoFramePacketHeader.size)
+        )
         
         // Scan for SPS/PPS in the received data (which might contain multiple NALUs)
         var offset = 0
@@ -74,7 +81,10 @@ class VideoDecoder: ObservableObject {
         createDecompressionSessionIfReady()
         
         if decompressionSession != nil {
-            decodeFrame(data: videoData, ptsNanos: ptsNanos)
+            decodeFrame(
+                data: videoData,
+                ptsNanos: header.presentationTimestampNanoseconds
+            )
         }
     }
     

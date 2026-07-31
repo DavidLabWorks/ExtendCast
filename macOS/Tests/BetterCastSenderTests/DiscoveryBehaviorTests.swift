@@ -4,6 +4,26 @@ import XCTest
 
 @MainActor
 final class DiscoveryBehaviorTests: XCTestCase {
+    func testConnectedSenderEndpointDisplaysMappedIPv4WithoutIPv6Wrapper() {
+        XCTAssertEqual(
+            ReceiverConnectedSender.displayEndpoint(
+                host: "::ffff:169.254.155.125%3",
+                port: 56098
+            ),
+            "169.254.155.125:56098"
+        )
+    }
+
+    func testConnectedSenderEndpointKeepsNativeIPv6Scope() {
+        XCTAssertEqual(
+            ReceiverConnectedSender.displayEndpoint(
+                host: "fe80::1234%en0",
+                port: 56098
+            ),
+            "[fe80::1234%en0]:56098"
+        )
+    }
+
     func testReceiverAdvertisementDeclaresRoutesExplicitly() {
         let metadata = NWBrowser.Result.Metadata.bonjour(
             NWTXTRecord([
@@ -296,19 +316,59 @@ final class DiscoveryBehaviorTests: XCTestCase {
         )
     }
 
-    func testReceiverHeartbeatTimeoutDoesNotWaitFifteenSeconds() {
+    func testReceiverHeartbeatTimeoutAllowsBriefPauseOnViablePath() {
         let now = Date()
 
         XCTAssertFalse(
             NetworkClient.receiverConnectionHasTimedOut(
                 lastHeartbeat: now.addingTimeInterval(-4.9),
-                now: now
+                now: now,
+                pathIsViable: true
+            )
+        )
+        XCTAssertFalse(
+            NetworkClient.receiverConnectionHasTimedOut(
+                lastHeartbeat: now.addingTimeInterval(-5.1),
+                now: now,
+                pathIsViable: true
+            )
+        )
+        XCTAssertTrue(
+            NetworkClient.receiverConnectionHasTimedOut(
+                lastHeartbeat: now.addingTimeInterval(-15.1),
+                now: now,
+                pathIsViable: true
             )
         )
         XCTAssertTrue(
             NetworkClient.receiverConnectionHasTimedOut(
                 lastHeartbeat: now.addingTimeInterval(-5.1),
-                now: now
+                now: now,
+                pathIsViable: false
+            )
+        )
+    }
+
+    func testConnectedReceiverDisappearanceDoesNotRestartBonjourBrowser() {
+        XCTAssertFalse(
+            NetworkClient.shouldRecoverBonjourBrowser(
+                hasDiscoveredServices: false,
+                missingServiceNames: ["Office PC"],
+                connectedServiceNames: ["Office PC"]
+            )
+        )
+        XCTAssertTrue(
+            NetworkClient.shouldRecoverBonjourBrowser(
+                hasDiscoveredServices: false,
+                missingServiceNames: ["Office PC", "Conference Display"],
+                connectedServiceNames: ["Office PC"]
+            )
+        )
+        XCTAssertFalse(
+            NetworkClient.shouldRecoverBonjourBrowser(
+                hasDiscoveredServices: true,
+                missingServiceNames: ["Conference Display"],
+                connectedServiceNames: []
             )
         )
     }

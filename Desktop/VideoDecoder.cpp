@@ -1,5 +1,6 @@
 #include "VideoDecoder.h"
 #include "MainWindow.h"  // for LogManager
+#include "VideoPacket.h"
 #include <QDebug>
 #include <QtEndian>
 #include <cstring>
@@ -18,15 +19,14 @@ VideoDecoder::~VideoDecoder() {
     destroyDecoder();
 }
 
-void VideoDecoder::decode(const QByteArray& data, bool hasPtsPrefix) {
+void VideoDecoder::decode(const QByteArray& data) {
     static int decodeCallCount = 0;
     decodeCallCount++;
 
-    // Type-byte framing (Mac sender): raw AVCC NALUs, no PTS prefix
-    // Legacy framing (Swift/Android): [PTS: 8 bytes][NALUs...]
-    int headerSize = hasPtsPrefix ? 8 : 0;
+    constexpr int videoHeaderSize =
+        static_cast<int>(video_packet::headerSize);
 
-    if (data.size() <= headerSize) {
+    if (data.size() <= videoHeaderSize) {
         if (decodeCallCount <= 5) {
             LogManager::instance().log(QString("Decoder: frame %1 too small (%2 bytes), skipping")
                 .arg(decodeCallCount).arg(data.size()));
@@ -36,8 +36,8 @@ void VideoDecoder::decode(const QByteArray& data, bool hasPtsPrefix) {
 
     const uint8_t* raw = reinterpret_cast<const uint8_t*>(data.constData());
 
-    const uint8_t* videoData = raw + headerSize;
-    int videoLen = data.size() - headerSize;
+    const uint8_t* videoData = raw + videoHeaderSize;
+    int videoLen = data.size() - videoHeaderSize;
 
     // Scan for SPS/PPS in AVCC-framed NALUs: [4-byte big-endian length][NALU data]
     int offset = 0;

@@ -6,6 +6,92 @@ import ScreenCaptureKit
 import IOKit.graphics
 
 
+private func extendCastIconPath(in rect: CGRect) -> CGPath {
+    let designSize = CGSize(width: 18, height: 18)
+    let scale = min(
+        rect.width / designSize.width,
+        rect.height / designSize.height
+    )
+    let offset = CGPoint(
+        x: rect.midX - designSize.width * scale / 2,
+        y: rect.midY - designSize.height * scale / 2
+    )
+
+    func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+        CGPoint(x: offset.x + x * scale, y: offset.y + y * scale)
+    }
+
+    let path = CGMutablePath()
+    path.move(to: point(14, 5.3))
+    path.addLine(to: point(14, 3.5))
+    path.addLine(to: point(10.5, 4))
+    path.addLine(to: point(3.5, 4))
+    path.addQuadCurve(
+        to: point(2, 5.5),
+        control: point(2, 4)
+    )
+    path.addLine(to: point(2, 12.5))
+    path.addQuadCurve(
+        to: point(3.5, 14),
+        control: point(2, 14)
+    )
+    path.addLine(to: point(10.5, 14))
+    path.addLine(to: point(14, 15))
+    path.addLine(to: point(14, 13.2))
+    path.addLine(to: point(16, 13.7))
+    path.addQuadCurve(
+        to: point(17, 12.5),
+        control: point(17, 13.7)
+    )
+    path.addLine(to: point(17, 6.5))
+    path.addQuadCurve(
+        to: point(16, 5),
+        control: point(17, 5)
+    )
+    path.closeSubpath()
+
+    return path
+}
+
+func makeExtendCastMenuBarIcon() -> NSImage {
+    let size = NSSize(width: 18, height: 18)
+    let image = NSImage(size: size, flipped: true) { rect in
+        guard let context = NSGraphicsContext.current?.cgContext else {
+            return false
+        }
+
+        context.addPath(extendCastIconPath(in: rect))
+        context.setStrokeColor(NSColor.black.cgColor)
+        context.setLineWidth(1.7)
+        context.setLineCap(.round)
+        context.setLineJoin(.round)
+        context.strokePath()
+        return true
+    }
+    image.isTemplate = true
+    return image
+}
+
+private struct ExtendCastMenuBarIcon: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path(extendCastIconPath(in: rect))
+    }
+}
+
+private struct ExtendCastIconMark: View {
+    var body: some View {
+        ExtendCastMenuBarIcon()
+            .stroke(
+                style: StrokeStyle(
+                    lineWidth: 1.7,
+                    lineCap: .round,
+                    lineJoin: .round
+                )
+            )
+            .frame(width: 18, height: 18)
+    }
+}
+
 final class SenderAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
@@ -43,7 +129,7 @@ final class SenderAppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct BetterCastSenderApp: App {
     static let mainWindowID = "main"
-    static let menuIconSystemName = "display.2"
+    static let menuBarIcon = makeExtendCastMenuBarIcon()
 
     @NSApplicationDelegateAdaptor(SenderAppDelegate.self) private var appDelegate
     @StateObject private var networkClient = NetworkClient()
@@ -68,7 +154,8 @@ struct BetterCastSenderApp: App {
         MenuBarExtra {
             StatusBarMenuView(client: networkClient)
         } label: {
-            Image(systemName: Self.menuIconSystemName)
+            Image(nsImage: Self.menuBarIcon)
+                .renderingMode(.template)
                 .accessibilityLabel(
                     networkClient.connectedDisplays.isEmpty
                         ? "ExtendCast — No connected displays"
@@ -185,7 +272,7 @@ struct StatusBarMenuView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: BetterCastSenderApp.menuIconSystemName)
+                ExtendCastIconMark()
                     .foregroundStyle(.tint)
                 Text("ExtendCast")
                     .font(.headline)
@@ -4044,12 +4131,33 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     var isConnected: Bool { !pipelines.isEmpty }
 
     static let receiverHeartbeatTimeout: TimeInterval = 5
+    static let viableReceiverHeartbeatTimeout: TimeInterval = 15
 
     static func receiverConnectionHasTimedOut(
         lastHeartbeat: Date,
-        now: Date
+        now: Date,
+        pathIsViable: Bool,
+        sessionIsSuspended: Bool = false
     ) -> Bool {
-        now.timeIntervalSince(lastHeartbeat) > receiverHeartbeatTimeout
+        guard !sessionIsSuspended else { return false }
+        let timeout = pathIsViable
+            ? viableReceiverHeartbeatTimeout
+            : receiverHeartbeatTimeout
+        return now.timeIntervalSince(lastHeartbeat) > timeout
+    }
+
+    static func shouldRecoverBonjourBrowser(
+        hasDiscoveredServices: Bool,
+        missingServiceNames: Set<String>,
+        connectedServiceNames: Set<String>
+    ) -> Bool {
+        guard !hasDiscoveredServices else { return false }
+        let connectedIdentities = Set(
+            connectedServiceNames.map(bonjourReceiverIdentity)
+        )
+        return missingServiceNames.contains {
+            !connectedIdentities.contains(bonjourReceiverIdentity($0))
+        }
     }
 
     static func bonjourReachabilityRecheckInterval(
@@ -4130,7 +4238,6 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 switch state {
                 case .ready:
                     self?.status = "Browsing..."
-                    self?.browserRecoveryAttempts[protocolType] = 0
                 case .failed(let error):
                     self?.status = "\(protocolType) browsing failed: \(error.localizedDescription)"
                     self?.scheduleBrowserRecovery(for: protocolType)
@@ -4171,6 +4278,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                             servicesByName[name] = discoveredService
                         }
                     }
+                }
+                if !servicesByName.isEmpty {
+                    self.browserRecoveryAttempts[protocolType] = 0
                 }
                 self.updateDiscoveredServices(
                     Array(servicesByName.values),
@@ -4399,11 +4509,16 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         discoveredServicesByProtocol[protocolType] = retainedServices
         rebuildFoundServices()
 
+        let shouldRecoverBrowser = Self.shouldRecoverBonjourBrowser(
+            hasDiscoveredServices: !services.isEmpty,
+            missingServiceNames: missingNames,
+            connectedServiceNames: Set(connectedServices.map(\.name))
+        )
         if !services.isEmpty {
             isDiscoveringDevices = false
             discoverySearchWorkItem?.cancel()
             discoverySearchWorkItem = nil
-        } else if !missingNames.isEmpty {
+        } else if shouldRecoverBrowser {
             scheduleBrowserRecovery(for: protocolType)
         }
     }
@@ -4486,6 +4601,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private var workspaceSessionObservers: [NSObjectProtocol] = []
     private var distributedSessionObservers: [NSObjectProtocol] = []
     private var sessionRecoveryWorkItem: DispatchWorkItem?
+    private var sessionRecoveryDeadline: Date?
+    private var sessionRecoveryGeneration: UInt64 = 0
+    private var sessionSuspensionReasons: Set<SessionSuspensionReason> = []
 
     init(
         discoveryRemovalDelay: TimeInterval = 8.0,
@@ -4663,45 +4781,129 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
     private func startSessionLifecycleMonitoring() {
         let workspaceCenter = NSWorkspace.shared.notificationCenter
-        let resumeNotifications: [(Notification.Name, String, TimeInterval)] = [
-            (NSWorkspace.sessionDidBecomeActiveNotification, "session became active", 1.0),
-            (NSWorkspace.didWakeNotification, "system woke", 3.0)
+        let suspendNotifications: [(Notification.Name, SessionSuspensionReason)] = [
+            (NSWorkspace.sessionDidResignActiveNotification, .inactive),
+            (NSWorkspace.willSleepNotification, .sleeping)
         ]
-        for (name, reason, delay) in resumeNotifications {
+        for (name, reason) in suspendNotifications {
             let observer = workspaceCenter.addObserver(
                 forName: name,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                self?.scheduleCaptureRecovery(reason: reason, delay: delay)
+                self?.suspendSession(for: reason)
             }
             workspaceSessionObservers.append(observer)
         }
+
+        let activeObserver = workspaceCenter.addObserver(
+            forName: NSWorkspace.sessionDidBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.resumeSession(
+                clearing: [.inactive, .locked, .sleeping],
+                reason: "session became active",
+                delay: 0
+            )
+        }
+        workspaceSessionObservers.append(activeObserver)
+
+        let wakeObserver = workspaceCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.resumeSession(
+                clearing: [.sleeping],
+                reason: "system woke",
+                delay: 0.2
+            )
+        }
+        workspaceSessionObservers.append(wakeObserver)
+
+        let lockObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsLocked"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.suspendSession(for: .locked)
+        }
+        distributedSessionObservers.append(lockObserver)
 
         let unlockObserver = DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("com.apple.screenIsUnlocked"),
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.scheduleCaptureRecovery(reason: "screen unlocked", delay: 1.0)
+            self?.resumeSession(
+                clearing: [.inactive, .locked, .sleeping],
+                reason: "screen unlocked",
+                delay: 0
+            )
         }
         distributedSessionObservers.append(unlockObserver)
+    }
+
+    private func suspendSession(for reason: SessionSuspensionReason) {
+        sessionSuspensionReasons.insert(reason)
+        sessionRecoveryGeneration &+= 1
+        sessionRecoveryWorkItem?.cancel()
+        sessionRecoveryWorkItem = nil
+        sessionRecoveryDeadline = nil
+    }
+
+    private func resumeSession(
+        clearing reasons: Set<SessionSuspensionReason>,
+        reason: String,
+        delay: TimeInterval
+    ) {
+        sessionSuspensionReasons.subtract(reasons)
+        guard sessionSuspensionReasons.isEmpty else { return }
+
+        let now = Date()
+        for connectionId in pipelines.keys {
+            pipelines[connectionId]?.lastHeartbeat = now
+        }
+        scheduleCaptureRecovery(reason: reason, delay: delay)
     }
 
     private func scheduleCaptureRecovery(reason: String, delay: TimeInterval) {
         guard !pipelines.isEmpty else { return }
 
-        // macOS commonly emits wake, session-active and screen-unlocked events
-        // together. Coalesce them so one unlock causes one capture restart.
+        // macOS commonly emits wake, session-active, and screen-unlocked events
+        // together. Keep the earliest requested deadline so a later wake event
+        // cannot turn an immediate unlock recovery into a multi-second delay.
+        let deadline = Date().addingTimeInterval(delay)
+        guard Self.shouldScheduleSessionRecovery(
+            scheduledDeadline: sessionRecoveryDeadline,
+            proposedDeadline: deadline
+        ) else {
+            return
+        }
+
         sessionRecoveryWorkItem?.cancel()
+        sessionRecoveryGeneration &+= 1
+        let generation = sessionRecoveryGeneration
         let work = DispatchWorkItem { [weak self] in
-            self?.recoverCaptureAfterSessionResume(reason: reason)
+            guard let self,
+                  self.sessionRecoveryGeneration == generation else { return }
+            self.sessionRecoveryWorkItem = nil
+            self.sessionRecoveryDeadline = nil
+            self.recoverCaptureAfterSessionResume(
+                reason: reason,
+                generation: generation
+            )
         }
         sessionRecoveryWorkItem = work
+        sessionRecoveryDeadline = deadline
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    private func recoverCaptureAfterSessionResume(reason: String) {
+    private func recoverCaptureAfterSessionResume(
+        reason: String,
+        generation: UInt64
+    ) {
         let connectionIds = Array(pipelines.keys)
         guard !connectionIds.isEmpty else { return }
 
@@ -4710,19 +4912,26 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             "\(connectionIds.count) display(s) while preserving virtual displays"
         )
 
-        for connectionId in connectionIds {
-            pipelines[connectionId]?.screenRecorder?.stopCapture()
-            pipelines[connectionId]?.screenRecorder = nil
-            pipelines[connectionId]?.videoEncoder = nil
-            pipelines[connectionId]?.audioEncoder = nil
+        let recorders = connectionIds.compactMap { connectionId in
+            pipelines[connectionId]?.screenRecorder.map { (connectionId, $0) }
         }
-
-        // Give ScreenCaptureKit a short window to tear down the stale stream
-        // before starting its replacement. startPipeline reuses the existing
-        // VirtualDisplayManager and its stable display identity.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self else { return }
+
+            // Await the real ScreenCaptureKit teardown instead of guessing with
+            // a fixed delay. A new encoder gives the receiver a new stream ID,
+            // and its first frame is forced to be an IDR keyframe.
+            for (_, recorder) in recorders {
+                await recorder.stopCaptureAndWait()
+            }
+
+            guard self.sessionRecoveryGeneration == generation,
+                  self.sessionSuspensionReasons.isEmpty else { return }
+
             for connectionId in connectionIds where self.pipelines[connectionId] != nil {
+                self.pipelines[connectionId]?.screenRecorder = nil
+                self.pipelines[connectionId]?.videoEncoder = nil
+                self.pipelines[connectionId]?.audioEncoder = nil
                 self.startPipeline(for: connectionId)
             }
         }
@@ -6884,13 +7093,20 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 var disconnectedIds: [UUID] = []
 
                 for (id, pipeline) in self.pipelines {
+                    let pathIsViable =
+                        pipeline.connection.currentPath?.status == .satisfied
                     if Self.receiverConnectionHasTimedOut(
                         lastHeartbeat: pipeline.lastHeartbeat,
-                        now: now
+                        now: now,
+                        pathIsViable: pathIsViable,
+                        sessionIsSuspended: !self.sessionSuspensionReasons.isEmpty
                     ) {
+                        let timeout = pathIsViable
+                            ? Self.viableReceiverHeartbeatTimeout
+                            : Self.receiverHeartbeatTimeout
                         LogManager.shared.log(
                             "Sender: Connection to \(pipeline.service.name) timed out "
-                                + "(No heartbeat for \(Int(Self.receiverHeartbeatTimeout))s)"
+                                + "(No heartbeat for \(Int(timeout))s)"
                         )
                         disconnectedIds.append(id)
                     }
@@ -7439,12 +7655,21 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
 
-    func videoEncoder(_ encoder: VideoEncoder, didEncode data: Data, for connectionId: UUID, isKeyframe: Bool) {
+    func videoEncoder(
+        _ encoder: VideoEncoder,
+        didEncode frame: EncodedVideoFrame,
+        for connectionId: UUID
+    ) {
         guard let pipeline = pipelines[connectionId] else { return }
+        let data = frame.wirePayload
 
         encodedFrameCount += 1
         if encodedFrameCount <= 3 || encodedFrameCount % 300 == 0 {
-            LogManager.shared.log("Sender: Sending frame #\(encodedFrameCount) (\(data.count) bytes, KF: \(isKeyframe)) to \(pipeline.service.name)")
+            LogManager.shared.log(
+                "Sender: Sending frame #\(encodedFrameCount) " +
+                "(\(data.count) bytes, stream: \(frame.streamID), " +
+                "KF: \(frame.isKeyframe)) to \(pipeline.service.name)"
+            )
         }
 
         // Determine if this connection uses TCP framing (ADB/localhost always TCP, else follow global)

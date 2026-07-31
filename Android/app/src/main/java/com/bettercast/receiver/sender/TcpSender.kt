@@ -121,7 +121,7 @@ class TcpSender(
 
     /**
      * Enqueue an encoded video frame for sending.
-     * Frame data is already in megapacket format (PTS + AVCC NALUs).
+     * Frame data already contains the explicit video header and AVCC NALUs.
      * This wraps it as a typed video message.
      */
     fun sendFrame(frameData: ByteArray) {

@@ -3,7 +3,11 @@ import VideoToolbox
 import CoreMedia
 
 protocol VideoEncoderDelegate: AnyObject {
-    func videoEncoder(_ encoder: VideoEncoder, didEncode data: Data, for connectionId: UUID, isKeyframe: Bool)
+    func videoEncoder(
+        _ encoder: VideoEncoder,
+        didEncode frame: EncodedVideoFrame,
+        for connectionId: UUID
+    )
 }
 
 class VideoEncoder {
@@ -11,6 +15,9 @@ class VideoEncoder {
     let connectionId: UUID
     private var compressionSession: VTCompressionSession?
     private var frameCount = 0
+    private var encodedFrameSequence: UInt64 = 0
+    private let streamID = UInt64.random(in: 1...UInt64.max)
+    private var timestampNormalizer: VideoTimestampNormalizer
     private let bitrate: Int
 
     // Cache for headers so we can re-send them if needed
@@ -27,6 +34,9 @@ class VideoEncoder {
         self.connectionId = connectionId
         self.bitrate = bitrate
         self.expectedFPS = expectedFPS
+        self.timestampNormalizer = VideoTimestampNormalizer(
+            expectedFPS: expectedFPS
+        )
         self.keyframeThrottleInterval = max(0.3, keyframeIntervalSeconds / 3.0) // Allow forced keyframes at 1/3 the interval
         
         let status = VTCompressionSessionCreate(
@@ -129,6 +139,19 @@ class VideoEncoder {
         
         // Extract timestamp
         let presentationTimeStamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let timestampAtNanosecondScale = CMTimeConvertScale(
+            presentationTimeStamp,
+            timescale: 1_000_000_000,
+            method: .default
+        )
+        let rawTimestampNanoseconds: Int64? =
+            timestampAtNanosecondScale.isNumeric
+                && timestampAtNanosecondScale.value >= 0
+            ? timestampAtNanosecondScale.value
+            : nil
+        let normalizedTimestampNanoseconds = timestampNormalizer.normalize(
+            rawNanoseconds: rawTimestampNanoseconds
+        )
         
         // Check if keyframe using Swift casting (Safe)
         let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[CFString: Any]]
@@ -206,15 +229,21 @@ class VideoEncoder {
             }
         }
         
-        // 4. Send One Megapacket (with PTS Header)
+        // 4. Send one explicitly described video frame.
         if !coalescedData.isEmpty {
-             var packetWithPTS = Data()
-             // Convert PTS to UInt64 nanoseconds (8 bytes)
-             var ptsNanos = UInt64(presentationTimeStamp.seconds * 1_000_000_000)
-             packetWithPTS.append(Data(bytes: &ptsNanos, count: 8))
-             packetWithPTS.append(coalescedData)
-            
-             delegate?.videoEncoder(self, didEncode: packetWithPTS, for: connectionId, isKeyframe: isKeyframe)
+            let frame = EncodedVideoFrame(
+                streamID: streamID,
+                sequence: encodedFrameSequence,
+                presentationTimestampNanoseconds: normalizedTimestampNanoseconds,
+                isKeyframe: isKeyframe,
+                avccData: coalescedData
+            )
+            encodedFrameSequence &+= 1
+            delegate?.videoEncoder(
+                self,
+                didEncode: frame,
+                for: connectionId
+            )
         }
     }
     

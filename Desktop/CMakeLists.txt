@@ -213,6 +213,11 @@ if(BUILD_TESTING)
         tests/ReceiverRouteClassifierTests.cpp
         ReceiverRouteClassifier.h
     )
+    add_executable(
+        VideoPacketTests
+        tests/VideoPacketTests.cpp
+        VideoPacket.h
+    )
     add_test(
         NAME InboundSessionRegistryTests
         COMMAND InboundSessionRegistryTests
@@ -224,6 +229,10 @@ if(BUILD_TESTING)
     add_test(
         NAME ReceiverRouteClassifierTests
         COMMAND ReceiverRouteClassifierTests
+    )
+    add_test(
+        NAME VideoPacketTests
+        COMMAND VideoPacketTests
     )
 endif()
 

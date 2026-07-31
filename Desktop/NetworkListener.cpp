@@ -2,12 +2,14 @@
 #include "MainWindow.h"  // for LogManager
 #include "NetworkInterfaceDescription.h"
 #include "ReceiverRouteClassifier.h"
+#include "VideoPacket.h"
 
 #include <QHostAddress>
 #include <QDebug>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkInterface>
+#include <QPointer>
 #include <QUuid>
 #include <QtEndian>
 #include <vector>
@@ -17,6 +19,7 @@ NetworkListener::NetworkListener(QObject* parent)
     , m_lastKeyframeRequest(QDateTime::fromMSecsSinceEpoch(0))
     , m_lastStatsTime(QDateTime::currentDateTime())
 {
+    m_videoTimelineClock.start();
 }
 
 NetworkListener::~NetworkListener() {
@@ -109,9 +112,13 @@ void NetworkListener::disconnectAll() {
     }
     m_clients.clear();
     m_tcpBuffers.clear();
-    m_connectionFormat.clear();
+    m_identifiedConnections.clear();
     m_connectionIds.clear();
     m_socketsByConnectionId.clear();
+    m_lastTcpCatchUpCheck.clear();
+    m_lastTcpKeyframeRequest.clear();
+    m_waitingForVideoKeyframe.clear();
+    m_videoTimelines.clear();
     m_inboundSessions.clear();
 }
 
@@ -210,7 +217,6 @@ void NetworkListener::registerSocket(QTcpSocket* socket) {
 
     m_clients.append(socket);
     m_tcpBuffers[socket] = QByteArray();
-    m_connectionFormat[socket] = -1;
     m_connectionIds[socket] = connectionId;
     m_socketsByConnectionId[connectionId] = socket;
     m_inboundSessions.open(
@@ -226,6 +232,7 @@ void NetworkListener::onTcpReadyRead() {
 
     QByteArray& buffer = m_tcpBuffers[socket];
     buffer.append(socket->readAll());
+    catchUpStaleTcpVideo(socket, buffer);
 
     // Safety: if buffer grows beyond 32MB, framing is likely desynced — reset
     if (buffer.size() > kMaxBufferSize) {
@@ -238,12 +245,113 @@ void NetworkListener::onTcpReadyRead() {
     processTcpBuffer(socket);
 }
 
+void NetworkListener::catchUpStaleTcpVideo(
+    QTcpSocket* socket,
+    QByteArray& buffer
+) {
+    if (!m_identifiedConnections.contains(socket) || buffer.isEmpty()) {
+        return;
+    }
+
+    const QDateTime now = QDateTime::currentDateTime();
+    if (m_lastTcpCatchUpCheck.contains(socket)
+        && m_lastTcpCatchUpCheck[socket].msecsTo(now)
+            < kTcpCatchUpCheckIntervalMs) {
+        return;
+    }
+    m_lastTcpCatchUpCheck[socket] = now;
+
+    std::optional<video_packet::LivePosition> livePosition;
+    if (m_videoTimelines.contains(socket)) {
+        const VideoTimeline& timeline = m_videoTimelines[socket];
+        livePosition = video_packet::LivePosition{
+            timeline.streamId,
+            timeline.anchorPts
+                + static_cast<std::uint64_t>(
+                    m_videoTimelineClock.nsecsElapsed()
+                    - timeline.anchorReceiverNanoseconds
+                ),
+        };
+    }
+
+    const auto decision = video_packet::planTcpVideoCatchUp(
+        reinterpret_cast<const std::uint8_t*>(buffer.constData()),
+        static_cast<std::size_t>(buffer.size()),
+        kMaximumBufferedVideoNanoseconds,
+        kMaxPacketSize,
+        livePosition
+    );
+
+    const auto binding = m_inboundSessions.sessionForConnection(
+        connectionIdFor(socket).toStdString()
+    );
+    if (!binding.has_value()) {
+        return;
+    }
+    const QString deviceId = QString::fromStdString(binding->deviceId);
+
+    if (decision.discardBytes > 0) {
+        buffer.remove(
+            0,
+            static_cast<qsizetype>(decision.discardBytes)
+        );
+        const QString action = decision.requestKeyframe
+            ? QStringLiteral(
+                "discarded stale packets and is waiting for a fresh keyframe"
+            )
+            : QStringLiteral(
+                "discarded stale packets and resumed at the latest keyframe"
+            );
+        LogManager::instance().log(
+            QString("Receiver: Video backlog reached %1 ms; %2")
+                .arg(static_cast<qulonglong>(
+                    decision.bufferedDurationNanoseconds / 1'000'000
+                ))
+                .arg(action)
+        );
+    }
+    if (decision.resetDecoder) {
+        emit videoStreamResetRequired(deviceId);
+    }
+
+    if (!decision.requestKeyframe) {
+        return;
+    }
+    m_waitingForVideoKeyframe.insert(socket);
+    if (m_lastTcpKeyframeRequest.contains(socket)
+        && m_lastTcpKeyframeRequest[socket].msecsTo(now)
+            < kTcpKeyframeRequestIntervalMs) {
+        return;
+    }
+
+    m_lastTcpKeyframeRequest[socket] = now;
+    LogManager::instance().log(
+        QString("Receiver: Video backlog reached %1 ms; "
+                "requesting a fresh keyframe")
+            .arg(static_cast<qulonglong>(
+                decision.bufferedDurationNanoseconds / 1'000'000
+            ))
+    );
+    writeInputEvent(
+        socket,
+        InputEvent(
+            InputEventType::Command,
+            0,
+            0,
+            kIDRRequestKeyCode
+        )
+    );
+}
+
 void NetworkListener::processTcpBuffer(QTcpSocket* socket) {
     QByteArray& buffer = m_tcpBuffers[socket];
+    catchUpStaleTcpVideo(socket, buffer);
     int consumed = 0;
+    int processedPackets = 0;
 
     // Length-prefixed framing: [uint32_be length][body]
-    while (buffer.size() - consumed >= 4) {
+    while (buffer.size() - consumed >= 4
+           && processedPackets < kMaxTcpPacketsPerDrain) {
         uint32_t length = qFromBigEndian<uint32_t>(
             reinterpret_cast<const uchar*>(buffer.constData() + consumed));
 
@@ -263,12 +371,12 @@ void NetworkListener::processTcpBuffer(QTcpSocket* socket) {
 
         QByteArray body = buffer.mid(consumed + 4, static_cast<int>(length));
         consumed += totalNeeded;
+        processedPackets++;
 
         // Every media connection must start with a typed identity message.
-        int& format = m_connectionFormat[socket];
         const uint8_t typeByte =
             body.isEmpty() ? 0 : static_cast<uint8_t>(body[0]);
-        if (format < 0) {
+        if (!m_identifiedConnections.contains(socket)) {
             if (typeByte != 0x03 || body.size() <= 1) {
                 rejectUnidentifiedConnection(
                     socket,
@@ -276,18 +384,18 @@ void NetworkListener::processTcpBuffer(QTcpSocket* socket) {
                 );
                 return;
             }
-            format = 1;
+            m_identifiedConnections.insert(socket);
         }
 
-        if (format == 1 && body.size() > 1) {
+        if (body.size() > 1) {
             if (typeByte == 0x03) {
                 if (!handleIdentity(socket, body.mid(1))) {
                     return;
                 }
             } else if (typeByte == 0x01) {
-                // The type byte only wraps the existing video payload. That payload
-                // is still [8-byte PTS][AVCC NALUs] for both Mac and desktop senders.
-                handleVideoData(socket, body.mid(1), true);
+                // The video payload carries its stream identity, sequence,
+                // timestamp and keyframe flag before the AVCC NALUs.
+                handleVideoData(socket, body.mid(1));
             } else if (typeByte == 0x02) {
                 handleAudioData(socket, body.mid(1));
             }
@@ -297,6 +405,24 @@ void NetworkListener::processTcpBuffer(QTcpSocket* socket) {
     // Remove all consumed bytes at once (avoids repeated O(n) shifts)
     if (consumed > 0) {
         buffer.remove(0, consumed);
+    }
+
+    // Video decode is synchronous on the Qt GUI thread. Bound each drain so
+    // heartbeat and mDNS timers get a chance to run even when frames arrive
+    // faster than they can be decoded.
+    if (buffer.size() >= 4) {
+        const uint32_t nextLength = qFromBigEndian<uint32_t>(
+            reinterpret_cast<const uchar*>(buffer.constData())
+        );
+        if (nextLength <= kMaxPacketSize
+            && buffer.size() >= 4 + static_cast<int>(nextLength)) {
+            const QPointer<QTcpSocket> guardedSocket(socket);
+            QTimer::singleShot(0, this, [this, guardedSocket]() {
+                if (guardedSocket && m_tcpBuffers.contains(guardedSocket)) {
+                    processTcpBuffer(guardedSocket);
+                }
+            });
+        }
     }
 }
 
@@ -410,8 +536,7 @@ void NetworkListener::rejectUnidentifiedConnection(
 
 void NetworkListener::handleVideoData(
     QTcpSocket* socket,
-    const QByteArray& data,
-    bool hasPtsPrefix
+    const QByteArray& data
 ) {
     const auto binding = m_inboundSessions.sessionForConnection(
         connectionIdFor(socket).toStdString()
@@ -419,6 +544,59 @@ void NetworkListener::handleVideoData(
     if (!binding.has_value()) {
         rejectUnidentifiedConnection(socket, "video arrived before sender identity");
         return;
+    }
+
+    video_packet::Header frameHeader;
+    if (!video_packet::parseHeader(
+            reinterpret_cast<const std::uint8_t*>(data.constData()),
+            static_cast<std::size_t>(data.size()),
+            frameHeader
+        )) {
+        LogManager::instance().log(
+            "Receiver: Ignoring malformed video frame header"
+        );
+        return;
+    }
+
+    const qint64 receiverNow = m_videoTimelineClock.nsecsElapsed();
+    const QString deviceId =
+        QString::fromStdString(binding->deviceId);
+
+    if (m_waitingForVideoKeyframe.contains(socket)) {
+        if (!frameHeader.isKeyframe) {
+            return;
+        }
+        m_waitingForVideoKeyframe.remove(socket);
+    }
+
+    if (!m_videoTimelines.contains(socket)) {
+        m_videoTimelines[socket] = VideoTimeline{
+            frameHeader.streamId,
+            frameHeader.presentationTimestampNanoseconds,
+            receiverNow,
+        };
+    } else {
+        VideoTimeline& timeline = m_videoTimelines[socket];
+        const std::uint64_t expectedPts =
+            timeline.anchorPts
+            + static_cast<std::uint64_t>(
+                receiverNow - timeline.anchorReceiverNanoseconds
+            );
+        if (frameHeader.streamId != timeline.streamId) {
+            timeline = VideoTimeline{
+                frameHeader.streamId,
+                frameHeader.presentationTimestampNanoseconds,
+                receiverNow,
+            };
+            emit videoStreamResetRequired(deviceId);
+        } else {
+            if (frameHeader.presentationTimestampNanoseconds
+                > expectedPts + kMaximumBufferedVideoNanoseconds) {
+                timeline.anchorPts =
+                    frameHeader.presentationTimestampNanoseconds;
+                timeline.anchorReceiverNanoseconds = receiverNow;
+            }
+        }
     }
 
     static int frameCount = 0;
@@ -430,13 +608,18 @@ void NetworkListener::handleVideoData(
         for (int i = 0; i < previewLen; i++) {
             hexPreview += QString("%1 ").arg(static_cast<uint8_t>(data[i]), 2, 16, QChar('0'));
         }
-        LogManager::instance().log(QString("Video: frame %1, %2 bytes, pts=%3 [%4]")
-                                   .arg(frameCount).arg(data.size()).arg(hasPtsPrefix).arg(hexPreview.trimmed()));
+        LogManager::instance().log(
+            QString("Video: frame %1, %2 bytes, stream=%3, sequence=%4 [%5]")
+                .arg(frameCount)
+                .arg(data.size())
+                .arg(static_cast<qulonglong>(frameHeader.streamId))
+                .arg(static_cast<qulonglong>(frameHeader.sequence))
+                .arg(hexPreview.trimmed())
+        );
     }
     emit videoDataReceived(
-        QString::fromStdString(binding->deviceId),
-        data,
-        hasPtsPrefix
+        deviceId,
+        data
     );
 }
 
@@ -473,9 +656,13 @@ void NetworkListener::onTcpDisconnected() {
         m_inboundSessions.close(connectionId.toStdString());
     m_clients.removeAll(socket);
     m_tcpBuffers.remove(socket);
-    m_connectionFormat.remove(socket);
+    m_identifiedConnections.remove(socket);
     m_connectionIds.remove(socket);
     m_socketsByConnectionId.remove(connectionId);
+    m_lastTcpCatchUpCheck.remove(socket);
+    m_lastTcpKeyframeRequest.remove(socket);
+    m_waitingForVideoKeyframe.remove(socket);
+    m_videoTimelines.remove(socket);
     socket->deleteLater();
 
     if (!closed.wasActive) {

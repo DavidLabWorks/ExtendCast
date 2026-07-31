@@ -35,7 +35,8 @@ public:
         const QString& deviceName
     );
     void show();
-    void decodeVideo(const QByteArray& data, bool hasPtsPrefix);
+    void resetVideoDecoder();
+    void decodeVideo(const QByteArray& data);
     void decodeAudio(const QByteArray& data);
 
 signals:

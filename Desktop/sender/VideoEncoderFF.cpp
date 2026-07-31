@@ -1,6 +1,8 @@
 #include "VideoEncoderFF.h"
+#include "../VideoPacket.h"
 #include <QDebug>
 #include <QElapsedTimer>
+#include <QRandomGenerator>
 #include <cstring>
 
 extern "C" {
@@ -151,6 +153,11 @@ bool VideoEncoderFF::init(int width, int height, int fps, int bitrateMbps) {
 
     m_pkt = av_packet_alloc();
     m_frameCount = 0;
+    m_streamId = QRandomGenerator::global()->generate64();
+    if (m_streamId == 0) {
+        m_streamId = 1;
+    }
+    m_frameSequence = 0;
     m_forceKeyframe = false;
     return true;
 }
@@ -259,18 +266,28 @@ void VideoEncoderFF::encode(const QByteArray& nv12Data, int width, int height) {
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
         if (ret < 0) break;
 
-        // Build BetterCast video payload: [8B PTS nanoseconds][AVCC NALUs]
-        // PTS in nanoseconds: frame_pts * (1e9 / fps)
-        uint64_t ptsNanos = static_cast<uint64_t>(m_pkt->pts) * (1000000000ULL / m_fps);
+        // Check if this is a keyframe — prepend cached SPS/PPS
+        const bool isKeyframe = (m_pkt->flags & AV_PKT_FLAG_KEY);
+        const uint64_t ptsNanos =
+            static_cast<uint64_t>(m_pkt->pts)
+            * (1000000000ULL / m_fps);
 
         QByteArray payload;
-        payload.reserve(8 + m_pkt->size + 64);
+        payload.resize(static_cast<qsizetype>(video_packet::headerSize));
+        auto* header = reinterpret_cast<std::uint8_t*>(payload.data());
+        video_packet::writeBigEndianUInt64(header, m_streamId);
+        video_packet::writeBigEndianUInt64(
+            header + 8,
+            m_frameSequence++
+        );
+        video_packet::writeBigEndianUInt64(header + 16, ptsNanos);
+        header[24] = isKeyframe ? video_packet::keyframeFlag : 0;
+        payload.reserve(
+            static_cast<qsizetype>(
+                video_packet::headerSize + m_pkt->size + 64
+            )
+        );
 
-        // 8-byte PTS (written as raw bytes — receiver reads as uint64)
-        payload.append(reinterpret_cast<const char*>(&ptsNanos), 8);
-
-        // Check if this is a keyframe — prepend cached SPS/PPS
-        bool isKeyframe = (m_pkt->flags & AV_PKT_FLAG_KEY);
         if (isKeyframe && !m_sps.isEmpty() && !m_pps.isEmpty()) {
             // SPS as AVCC NALU
             int spsLen = m_sps.size();

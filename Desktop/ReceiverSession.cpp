@@ -117,11 +117,14 @@ void ReceiverSession::show() {
     m_window->showForVideo();
 }
 
+void ReceiverSession::resetVideoDecoder() {
+    m_decoder->reset();
+}
+
 void ReceiverSession::decodeVideo(
-    const QByteArray& data,
-    bool hasPtsPrefix
+    const QByteArray& data
 ) {
-    m_decoder->decode(data, hasPtsPrefix);
+    m_decoder->decode(data);
 }
 
 void ReceiverSession::decodeAudio(const QByteArray& data) {

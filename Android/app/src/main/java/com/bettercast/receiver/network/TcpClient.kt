@@ -125,25 +125,9 @@ class TcpClient {
         }
     }
 
-    /**
-     * Check if a frame contains a keyframe (IDR NALU type 5) or SPS (type 7).
-     * Frame format: [8 bytes PTS][4-byte NALU length][NALU data]...
-     */
     private fun isKeyframe(frameData: ByteArray): Boolean {
-        if (frameData.size < 13) return false // 8 PTS + 4 length + 1 NALU min
-        var offset = 8 // skip PTS
-        while (offset + 4 < frameData.size) {
-            val naluLen = ((frameData[offset].toInt() and 0xFF) shl 24) or
-                    ((frameData[offset + 1].toInt() and 0xFF) shl 16) or
-                    ((frameData[offset + 2].toInt() and 0xFF) shl 8) or
-                    (frameData[offset + 3].toInt() and 0xFF)
-            offset += 4
-            if (naluLen <= 0 || offset + naluLen > frameData.size) break
-            val naluType = frameData[offset].toInt() and 0x1F
-            if (naluType == 5 || naluType == 7) return true // IDR or SPS
-            offset += naluLen
-        }
-        return false
+        return frameData.size >= 25
+            && (frameData[24].toInt() and 0x01) != 0
     }
 
     var onAudioReceived: ((ByteArray) -> Unit)? = null
@@ -169,8 +153,6 @@ class TcpClient {
                     val buffer = ByteArray(length)
                     input.readFully(buffer)
 
-                    // Check for type byte prefix (added with audio streaming)
-                    // 0x01 = video, 0x02 = audio, 0x03 = sender identity
                     if (buffer.isNotEmpty()) {
                         val typeByte = buffer[0].toInt() and 0xFF
                         if (typeByte == 0x01 && buffer.size > 1) {
@@ -198,13 +180,7 @@ class TcpClient {
                         }
                     }
 
-                    // Legacy: no type byte, treat as video (backward compat)
-                    frameCount++
-                    if (frameCount <= 5 || frameCount % 300 == 0L) {
-                        val keyframe = isKeyframe(buffer)
-                        Log.i(TAG, "Deliver frame #$frameCount: ${buffer.size} bytes${if (keyframe) " [KEYFRAME]" else ""}")
-                    }
-                    onFrameReceived?.invoke(buffer)
+                    Log.w(TAG, "Unknown packet type")
                 }
             } catch (e: IOException) {
                 if (isActive) {

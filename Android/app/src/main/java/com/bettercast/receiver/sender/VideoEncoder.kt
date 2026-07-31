@@ -10,6 +10,7 @@ import kotlinx.coroutines.*
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.random.Random
 
 class VideoEncoder(
     val width: Int = 1280,
@@ -34,8 +35,12 @@ class VideoEncoder(
     private var drainJob: Job? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var frameCount = 0L
+    private var streamId = 1L
+    private var frameSequence = 0L
 
     fun start() {
+        streamId = Random.nextLong(1, Long.MAX_VALUE)
+        frameSequence = 0
         val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
@@ -146,9 +151,7 @@ class VideoEncoder(
     }
 
     /**
-     * Convert Annex-B encoded frame to AVCC megapacket format:
-     * [8-byte PTS little-endian nanos][4-byte BE NALU len][NALU data]...
-     *
+     * Convert an Annex-B frame to the explicit video header plus AVCC NALUs.
      * Keyframes get SPS + PPS prepended.
      */
     private fun buildAvccPacket(annexBData: ByteArray, ptsUs: Long, isKeyframe: Boolean): ByteArray? {
@@ -172,11 +175,13 @@ class VideoEncoder(
             writeAvccNalu(avccPayload, nalu)
         }
 
-        // Build final packet: [8-byte PTS][AVCC NALUs]
         val payload = avccPayload.toByteArray()
-        val result = ByteBuffer.allocate(8 + payload.size)
-        result.order(ByteOrder.LITTLE_ENDIAN)
+        val result = ByteBuffer.allocate(25 + payload.size)
+        result.order(ByteOrder.BIG_ENDIAN)
+        result.putLong(streamId)
+        result.putLong(frameSequence++)
         result.putLong(ptsNanos)
+        result.put(if (isKeyframe) 0x01.toByte() else 0x00.toByte())
         result.put(payload)
         return result.array()
     }

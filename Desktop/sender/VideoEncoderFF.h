@@ -27,7 +27,7 @@ public:
     QString encoderName() const { return m_encoderName; }
 
 signals:
-    // data: BetterCast video payload = [8B PTS nanoseconds][AVCC NALUs]
+    // data: explicit BetterCast video header followed by AVCC NALUs
     void encoded(const QByteArray& data);
     void error(const QString& message);
 
@@ -39,6 +39,8 @@ private:
     AVFrame* m_frame = nullptr;
     AVPacket* m_pkt = nullptr;
     int64_t m_frameCount = 0;
+    std::uint64_t m_streamId = 0;
+    std::uint64_t m_frameSequence = 0;
     int m_fps = 30;
     bool m_forceKeyframe = false;
     QString m_encoderName;

@@ -38,6 +38,7 @@
 #include <QHash>
 #include <QDir>
 #include <QDebug>
+#include <QHostAddress>
 #include <QNetworkInterface>
 #include <QTcpSocket>
 #include <QUrl>
@@ -57,6 +58,32 @@
 #include <windows.h>
 #include <windowsx.h>
 #endif
+
+static QString displayEndpoint(const QString& host, quint16 port) {
+    QString displayHost = host;
+    if (displayHost.startsWith('[') && displayHost.endsWith(']')) {
+        displayHost = displayHost.mid(1, displayHost.size() - 2);
+    }
+
+    const QString unscopedHost = displayHost.section('%', 0, 0);
+    const QString mappedIPv4Prefix = QStringLiteral("::ffff:");
+    if (unscopedHost.startsWith(
+            mappedIPv4Prefix,
+            Qt::CaseInsensitive
+        )) {
+        const QString ipv4Text =
+            unscopedHost.mid(mappedIPv4Prefix.size());
+        const QHostAddress ipv4Address(ipv4Text);
+        if (ipv4Address.protocol() == QAbstractSocket::IPv4Protocol) {
+            displayHost = ipv4Address.toString();
+        }
+    }
+
+    return displayHost.contains(':')
+        ? QString("[%1]:%2").arg(displayHost).arg(port)
+        : QString("%1:%2").arg(displayHost).arg(port);
+}
+
 // ─── Dark theme stylesheet ─────────────────────────────────────────────────────
 
 static const char* kDarkStylesheet = R"(
@@ -773,6 +800,16 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::onVideoDataReceived);
     connect(m_network, &NetworkListener::audioDataReceived,
             this, &MainWindow::onAudioDataReceived);
+    connect(
+        m_network,
+        &NetworkListener::videoStreamResetRequired,
+        this,
+        [this](const QString& deviceId) {
+            if (auto* session = m_receiverSessions.value(deviceId)) {
+                session->resetVideoDecoder();
+            }
+        }
+    );
     connect(m_network, &NetworkListener::statusChanged,
             this, &MainWindow::onStatusChanged);
     connect(
@@ -1728,9 +1765,8 @@ void MainWindow::refreshConnectedSendersCard() {
 
     for (const QString& deviceId : deviceIds) {
         const ConnectedSenderInfo info = m_connectedSenders.value(deviceId);
-        const QString endpoint = info.peerAddress.contains(':')
-            ? QString("[%1]:%2").arg(info.peerAddress).arg(info.peerPort)
-            : QString("%1:%2").arg(info.peerAddress).arg(info.peerPort);
+        const QString endpoint =
+            displayEndpoint(info.peerAddress, info.peerPort);
 
         auto* panel = makeMethodPanel();
         panel->setToolTip(QString("Sender ID: %1").arg(deviceId));
@@ -1763,25 +1799,6 @@ void MainWindow::refreshConnectedSendersCard() {
         textCol->addWidget(modeLabel);
 
         row->addLayout(textCol, 1);
-
-        auto* copyBtn = new QPushButton("Copy");
-        copyBtn->setCursor(Qt::PointingHandCursor);
-        copyBtn->setFixedWidth(68);
-        copyBtn->setStyleSheet(
-            "QPushButton { background-color: #2b2b2b; "
-            "border: 1px solid #3a3a3a; border-radius: 8px; "
-            "color: #d8d8d8; font-size: 12px; font-weight: 600; "
-            "padding: 6px 10px; }"
-            "QPushButton:hover { background-color: #333333; "
-            "border-color: #4d4d4d; }"
-        );
-        connect(copyBtn, &QPushButton::clicked, this, [endpoint]() {
-            QApplication::clipboard()->setText(endpoint);
-            LogManager::instance().log(
-                QString("Copied sender endpoint: %1").arg(endpoint)
-            );
-        });
-        row->addWidget(copyBtn, 0, Qt::AlignTop);
 
         m_connectedSenderListLayout->addWidget(panel);
     }
@@ -2265,11 +2282,10 @@ void MainWindow::onConnectionLost(const QString& deviceId) {
 
 void MainWindow::onVideoDataReceived(
     const QString& deviceId,
-    const QByteArray& data,
-    bool hasPtsPrefix
+    const QByteArray& data
 ) {
     if (auto* session = m_receiverSessions.value(deviceId)) {
-        session->decodeVideo(data, hasPtsPrefix);
+        session->decodeVideo(data);
     }
 }
 
@@ -2866,7 +2882,7 @@ void MainWindow::updateLocalIpDisplay() {
                 QApplication::clipboard()->setText(address);
                 LogManager::instance().log(QString("Copied receiver address: %1").arg(address));
             });
-            row->addWidget(copyBtn, 0, Qt::AlignTop);
+            row->addWidget(copyBtn, 0, Qt::AlignVCenter);
 
             m_recvAddressListLayout->addWidget(panel);
         }

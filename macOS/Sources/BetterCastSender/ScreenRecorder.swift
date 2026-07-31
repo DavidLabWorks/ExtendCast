@@ -107,8 +107,19 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     
     func stopCapture() {
         Task {
-            try? await stream?.stopCapture()
-            stream = nil
+            await stopCaptureAndWait()
+        }
+    }
+
+    func stopCaptureAndWait() async {
+        guard let activeStream = stream else { return }
+        stream = nil
+        do {
+            try await activeStream.stopCapture()
+        } catch {
+            LogManager.shared.log(
+                "ScreenRecorder: Failed to stop capture cleanly: \(error.localizedDescription)"
+            )
         }
     }
     
@@ -130,6 +141,9 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
                 LogManager.shared.log("ScreenRecorder: Audio frame \(audioFrameCount)")
             }
             audioEncoder?.encode(sampleBuffer: sampleBuffer)
+
+        case .microphone:
+            break
 
         @unknown default:
             break

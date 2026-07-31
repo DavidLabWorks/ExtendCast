@@ -62,7 +62,11 @@ private:
 
     void handleMdnsQuery(const QByteArray& packet, const QHostAddress& sender, uint16_t senderPort);
     void handleMdnsResponse(const QByteArray& packet);
-    QByteArray buildMdnsResponse(uint16_t transactionId, const QHostAddress& targetAddr);
+    QByteArray buildMdnsResponse(
+        uint16_t transactionId,
+        const QHostAddress& targetAddr,
+        const QByteArray& advertisementTxtRecord
+    );
     QByteArray buildBrowseQuery();
     QByteArray encodeDnsName(const QString& name);
     QString decodeDnsName(const QByteArray& packet, int& offset);
@@ -86,6 +90,7 @@ private:
     QString m_serviceName;
     bool m_advertising = false;
     int m_announceCount = 0;
+    QByteArray m_cachedAdvertisementTxtRecord;
 
     // Browsing
     QTimer* m_browseTimer = nullptr;

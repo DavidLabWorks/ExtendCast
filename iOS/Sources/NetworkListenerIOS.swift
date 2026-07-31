@@ -231,11 +231,9 @@ class NetworkListenerIOS {
         if let index = connectedClients.firstIndex(where: { $0 === connection }) {
             connectedClients.remove(at: index)
         }
-        connectionFormat.removeValue(forKey: ObjectIdentifier(connection))
     }
     
     // Per-connection framing format: nil = not yet detected, true = type-byte (desktop), false = legacy (Swift/Android)
-    private var connectionFormat: [ObjectIdentifier: Bool] = [:]
 
     private func receiveTCP(on connection: NWConnection) {
         connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] content, contentContext, isComplete, error in
@@ -261,33 +259,15 @@ class NetworkListenerIOS {
     }
 
     private func handleReceivedBody(_ body: Data, connection: NWConnection) {
-        let connId = ObjectIdentifier(connection)
         let firstByte = body[body.startIndex]
 
-        // Auto-detect framing on first frame
-        if connectionFormat[connId] == nil {
-            if firstByte == 0x01 || firstByte == 0x02 || firstByte == 0x03 {
-                connectionFormat[connId] = true
-                LogManager.shared.log("ReceiverIOS: Detected type-byte framing (desktop sender)")
-            } else {
-                connectionFormat[connId] = false
-                LogManager.shared.log("ReceiverIOS: Detected legacy framing (Swift/Android sender)")
-            }
-        }
-
-        if connectionFormat[connId] == true {
-            // Type-byte framing: [0x01=video | 0x02=audio][payload]
-            let payload = body.dropFirst(1)
-            if firstByte == 0x01 {
-                videoDecoder?.decode(data: payload)
-            } else if firstByte == 0x02 {
-                audioPlayer?.decode(aacData: payload)
-            } else if firstByte == 0x03 {
-                LogManager.shared.log("ReceiverIOS: Sender identity received")
-            }
-        } else {
-            // Legacy framing: raw video data (with 8-byte PTS prefix handled by decoder)
-            videoDecoder?.decode(data: body)
+        let payload = body.dropFirst(1)
+        if firstByte == 0x01 {
+            videoDecoder?.decode(data: payload)
+        } else if firstByte == 0x02 {
+            audioPlayer?.decode(aacData: payload)
+        } else if firstByte == 0x03 {
+            LogManager.shared.log("ReceiverIOS: Sender identity received")
         }
     }
     

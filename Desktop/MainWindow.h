@@ -99,8 +99,7 @@ private slots:
     void onConnectionLost(const QString& deviceId);
     void onVideoDataReceived(
         const QString& deviceId,
-        const QByteArray& data,
-        bool hasPtsPrefix
+        const QByteArray& data
     );
     void onAudioDataReceived(
         const QString& deviceId,

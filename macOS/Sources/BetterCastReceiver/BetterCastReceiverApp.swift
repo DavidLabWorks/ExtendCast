@@ -739,8 +739,13 @@ class NetworkListener: ObservableObject, VideoDecoderDelegate {
                 let bodyLength = Int(length)
                 
                 connection.receive(minimumIncompleteLength: bodyLength, maximumLength: bodyLength) { body, bodyContext, isComplete, error in
-                    if let body = body {
-                         self?.videoDecoder?.decode(data: body)
+                    if let body, !body.isEmpty {
+                        let type = body[body.startIndex]
+                        if type == 0x01 {
+                            self?.videoDecoder?.decode(
+                                data: Data(body.dropFirst())
+                            )
+                        }
                     }
                     self?.receiveTCP(on: connection)
                 }

@@ -13,7 +13,28 @@ struct ReceiverConnectedSender: Identifiable, Equatable {
     var id: ObjectIdentifier { connectionID }
 
     var endpoint: String {
-        host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
+        Self.displayEndpoint(host: host, port: port)
+    }
+
+    static func displayEndpoint(host: String, port: UInt16) -> String {
+        var displayHost = host
+        if displayHost.hasPrefix("[") && displayHost.hasSuffix("]") {
+            displayHost.removeFirst()
+            displayHost.removeLast()
+        }
+
+        let unscopedHost = String(displayHost.split(separator: "%", maxSplits: 1)[0])
+        let mappedIPv4Prefix = "::ffff:"
+        if unscopedHost.lowercased().hasPrefix(mappedIPv4Prefix) {
+            let ipv4 = String(unscopedHost.dropFirst(mappedIPv4Prefix.count))
+            if IPv4Address(ipv4) != nil {
+                displayHost = ipv4
+            }
+        }
+
+        return displayHost.contains(":")
+            ? "[\(displayHost)]:\(port)"
+            : "\(displayHost):\(port)"
     }
 }
 
@@ -45,7 +66,6 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
     var adbInputInjector: ADBInputInjector?
 
     // Per-connection format detection: true = has type byte, false = legacy, nil = unknown
-    private var connectionFormat: [ObjectIdentifier: Bool] = [:]
 
     // Auto-reconnect state
     private var lastADBPort: UInt16?       // remote port on Android
@@ -566,38 +586,14 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
     }
 
     private func handleReceivedBody(_ body: Data, connection: NWConnection) {
-        let connId = ObjectIdentifier(connection)
-        let hasTypeByte: Bool
-
-        if let known = connectionFormat[connId] {
-            hasTypeByte = known
-        } else {
-            // Auto-detect typed framing: 0x01=video, 0x02=audio,
-            // 0x03=sender identity. Legacy format starts with 8-byte PTS (little-endian),
-            // where the first frame always has PTS=0 so byte[0]=0x00.
-            let firstByte = body[body.startIndex]
-            if firstByte == 0x01 || firstByte == 0x02 || firstByte == 0x03 {
-                hasTypeByte = true
-                LogManager.shared.log("Receiver: Detected type-byte framing (desktop sender)")
-            } else {
-                hasTypeByte = false
-                LogManager.shared.log("Receiver: Detected legacy framing (Swift sender)")
-            }
-            connectionFormat[connId] = hasTypeByte
-        }
-
-        if hasTypeByte {
-            let typeByte = body[body.startIndex]
-            let payload = Data(body.dropFirst(1))
-            if typeByte == 0x01 && !payload.isEmpty {
-                videoDecoder?.decode(data: payload)
-            } else if typeByte == 0x02 {
-                // TODO: route to audio decoder
-            } else if typeByte == 0x03 {
-                registerSenderIdentity(payload, for: connection)
-            }
-        } else {
-            videoDecoder?.decode(data: body)
+        let typeByte = body[body.startIndex]
+        let payload = Data(body.dropFirst(1))
+        if typeByte == 0x01 && !payload.isEmpty {
+            videoDecoder?.decode(data: payload)
+        } else if typeByte == 0x02 {
+            // TODO: route to audio decoder
+        } else if typeByte == 0x03 {
+            registerSenderIdentity(payload, for: connection)
         }
     }
 
@@ -686,7 +682,6 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
             self.connectedClients.removeAll(where: { $0 === connection })
             self.connectedSendersByConnection.removeValue(forKey: connId)
             self.publishConnectedSenders()
-            self.connectionFormat.removeValue(forKey: connId)
             // Do NOT reset wirelessADBEnabled — once enabled, it stays enabled
             // to prevent re-running adb tcpip 5555 on every reconnect
             guard !self.isStopped else { return }

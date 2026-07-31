@@ -26,22 +26,28 @@ class ReceiverVideoDecoder: ObservableObject {
 
     private var sps: Data?
     private var pps: Data?
+    private var currentStreamID: UInt64?
 
     private var timeOffset: Double = 0
     private var consecutiveErrors: Int = 0
     private var lastKeyframeRequestTime: Date = .distantPast
 
     func decode(data: Data) {
-        guard data.count > 8 else { return }
-
-        let ptsData = data.prefix(8)
-
-        var ptsNanos: UInt64 = 0
-        let _ = Swift.withUnsafeMutableBytes(of: &ptsNanos) { ptr in
-            ptsData.copyBytes(to: ptr)
+        guard
+            let header = VideoFramePacketHeader.decode(from: data),
+            data.count > EncodedVideoFrame.headerSize
+        else {
+            return
         }
 
-        let videoData = Data(data.dropFirst(8))
+        if currentStreamID != header.streamID {
+            reset()
+            currentStreamID = header.streamID
+        }
+
+        let videoData = Data(
+            data.dropFirst(EncodedVideoFrame.headerSize)
+        )
 
         // Parse NALUs: extract SPS/PPS and build frame-only data (strip parameter sets)
         var frameOnlyData = Data()
@@ -72,7 +78,10 @@ class ReceiverVideoDecoder: ObservableObject {
         createDecompressionSessionIfReady()
 
         if decompressionSession != nil && !frameOnlyData.isEmpty {
-            decodeFrame(data: frameOnlyData, ptsNanos: ptsNanos)
+            decodeFrame(
+                data: frameOnlyData,
+                ptsNanos: header.presentationTimestampNanoseconds
+            )
         }
     }
 
@@ -84,6 +93,7 @@ class ReceiverVideoDecoder: ObservableObject {
         formatDescription = nil
         sps = nil
         pps = nil
+        currentStreamID = nil
         timeOffset = 0
         DispatchQueue.main.async {
             self.decoderState = "Waiting for Data..."

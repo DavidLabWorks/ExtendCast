@@ -35,6 +35,7 @@ class VideoDecoder {
 
     private var cachedSps: ByteArray? = null
     private var cachedPps: ByteArray? = null
+    private var currentStreamId: Long? = null
 
     private var framesDecoded: Long = 0
     private var framesRendered: Long = 0
@@ -75,7 +76,7 @@ class VideoDecoder {
 
     fun onFrameData(frameData: ByteArray) {
         receiveCount++
-        if (frameData.size < 12) {
+        if (frameData.size <= 25) {
             Log.w(TAG, "Frame too small: ${frameData.size} bytes")
             return
         }
@@ -84,10 +85,20 @@ class VideoDecoder {
             Log.i(TAG, "onFrameData #$receiveCount: ${frameData.size} bytes, configured=$isConfigured started=$isStarted surface=${surface != null}")
         }
 
-        val ptsNs = ByteBuffer.wrap(frameData, 0, 8).order(ByteOrder.LITTLE_ENDIAN).long
+        val streamId =
+            ByteBuffer.wrap(frameData, 0, 8).order(ByteOrder.BIG_ENDIAN).long
+        val ptsNs =
+            ByteBuffer.wrap(frameData, 16, 8).order(ByteOrder.BIG_ENDIAN).long
         val ptsUs = ptsNs / 1000
 
-        val naluData = frameData.copyOfRange(8, frameData.size)
+        if (currentStreamId != streamId) {
+            stop()
+            cachedSps = null
+            cachedPps = null
+            currentStreamId = streamId
+        }
+
+        val naluData = frameData.copyOfRange(25, frameData.size)
         processNaluData(naluData, ptsUs)
     }
 

@@ -174,6 +174,7 @@ void ServiceDiscovery::startAdvertising(uint16_t tcpPort) {
 #endif
     QByteArray svcName = svcStr.toUtf8();
     const QByteArray txtRecord = buildAdvertisementTxtRecord();
+    m_cachedAdvertisementTxtRecord = txtRecord;
     DNSServiceErrorType err = DNSServiceRegister(
         &ref, 0, 0, svcName.constData(), "_bettercast._tcp",
         nullptr, nullptr, htons(tcpPort),
@@ -635,8 +636,16 @@ void ServiceDiscovery::handleMdnsQuery(const QByteArray& packet,
                 MDNS_LOG(QString("mDNS: Query for %1 from %2:%3 — responding")
                          .arg(qname, sender.toString()).arg(senderPort));
             }
+            if (m_cachedAdvertisementTxtRecord.isEmpty()) {
+                m_cachedAdvertisementTxtRecord =
+                    buildAdvertisementTxtRecord();
+            }
             for (const auto& addr : addrs) {
-                QByteArray response = buildMdnsResponse(txId, addr);
+                QByteArray response = buildMdnsResponse(
+                    txId,
+                    addr,
+                    m_cachedAdvertisementTxtRecord
+                );
                 // Send to multicast (standard mDNS)
                 m_mdnsSocket->writeDatagram(response, kMdnsAddress, kMdnsPort);
                 // Also send unicast directly to the querier — this works even if
@@ -660,8 +669,13 @@ void ServiceDiscovery::sendAnnouncement() {
     }
 
     auto addrs = getLocalAddresses();
+    m_cachedAdvertisementTxtRecord = buildAdvertisementTxtRecord();
     for (const auto& addr : addrs) {
-        QByteArray response = buildMdnsResponse(0, addr);
+        QByteArray response = buildMdnsResponse(
+            0,
+            addr,
+            m_cachedAdvertisementTxtRecord
+        );
         qint64 sent = m_mdnsSocket->writeDatagram(response, kMdnsAddress, kMdnsPort);
         if (m_announceCount <= 3) {
             qDebug() << "mDNS: Announcement" << m_announceCount
@@ -682,8 +696,11 @@ QByteArray ServiceDiscovery::encodeDnsName(const QString& name) {
     return result;
 }
 
-QByteArray ServiceDiscovery::buildMdnsResponse(uint16_t transactionId,
-                                                const QHostAddress& targetAddr) {
+QByteArray ServiceDiscovery::buildMdnsResponse(
+    uint16_t transactionId,
+    const QHostAddress& targetAddr,
+    const QByteArray& advertisementTxtRecord
+) {
     QByteArray pkt;
     QString hostname = getHostname();
     QString instanceName = m_serviceName;    // "BetterCast Receiver"
@@ -745,9 +762,8 @@ QByteArray ServiceDiscovery::buildMdnsResponse(uint16_t transactionId,
     appendU16(kTypeTXT);
     appendU16(kClassFlush);
     appendU32(ttl);
-    const QByteArray txtRecord = buildAdvertisementTxtRecord();
-    appendU16(static_cast<uint16_t>(txtRecord.size()));
-    pkt.append(txtRecord);
+    appendU16(static_cast<uint16_t>(advertisementTxtRecord.size()));
+    pkt.append(advertisementTxtRecord);
 
     // 4. A record: hostname.local → IP address
     pkt.append(encodeDnsName(hostTarget));
