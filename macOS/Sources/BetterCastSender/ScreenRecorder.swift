@@ -9,6 +9,7 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private var targetDisplayID: CGDirectDisplayID?
     var audioEncoder: AudioEncoder?
     var captureAudio: Bool = false
+    var onUnexpectedStop: (() -> Void)?
 
     private var width: Int
     private var height: Int
@@ -20,17 +21,34 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         // frame after interactive work instead of making typing feel blocked.
         qos: .utility
     )
+    private let frameAdmissionController: StreamFeedbackController
+    private let frameStateLock = NSLock()
+    private var producedVideoFrame = false
 
-    init(videoEncoder: VideoEncoder, targetDisplayID: CGDirectDisplayID? = nil, width: Int = 1920, height: Int = 1080, captureFPS: Int32 = 120) {
+    private func resetFrameState() {
+        frameStateLock.lock()
+        producedVideoFrame = false
+        frameStateLock.unlock()
+    }
+
+    private func markVideoFrameProduced() {
+        frameStateLock.lock()
+        producedVideoFrame = true
+        frameStateLock.unlock()
+    }
+
+    init(videoEncoder: VideoEncoder, targetDisplayID: CGDirectDisplayID? = nil, width: Int = 1920, height: Int = 1080, captureFPS: Int32 = 120, frameAdmissionController: StreamFeedbackController) {
         self.videoEncoder = videoEncoder
         self.targetDisplayID = targetDisplayID
         self.width = width
         self.height = height
         self.captureFPS = captureFPS
+        self.frameAdmissionController = frameAdmissionController
         super.init()
     }
     
-    func startCapture() async {
+    func startCapture() async -> Bool {
+        resetFrameState()
         do {
             // Retry logic for Virtual Display availability (Race condition fix)
             var display: SCDisplay?
@@ -52,7 +70,7 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
                         "ScreenRecorder: Target display \(targetID) not found after retries; " +
                         "capture aborted to avoid streaming the main display"
                     )
-                    return
+                    return false
                 }
             }
             
@@ -69,7 +87,7 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             
             guard let display = display else {
                 LogManager.shared.log("ScreenRecorder: No display found")
-                return
+                return false
             }
             
             let filter = SCContentFilter(display: display, excludingWindows: [])
@@ -95,6 +113,7 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
                 "ScreenRecorder: Started capture for display \(display.displayID) " +
                 "(\(width)x\(height) @ \(captureFPS) FPS, 420v, queueDepth=3)"
             )
+            return true
 
         } catch {
             LogManager.shared.log("ScreenRecorder: Failed to start capture: \(error.localizedDescription)")
@@ -102,7 +121,14 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             if let scError = error as? SCStreamError, scError.code == .userDeclined {
                  LogManager.shared.log("ScreenRecorder: PERMISSION DENIED. Go to System Settings > Privacy > Screen Recording")
             }
+            return false
         }
+    }
+
+    var hasProducedVideoFrame: Bool {
+        frameStateLock.lock()
+        defer { frameStateLock.unlock() }
+        return producedVideoFrame
     }
     
     func stopCapture() {
@@ -129,6 +155,8 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         switch type {
         case .screen:
+            markVideoFrameProduced()
+            guard frameAdmissionController.shouldEncodeFrame() else { return }
             frameCount += 1
             if frameCount % 300 == 0 {
                 LogManager.shared.log("ScreenRecorder: Captured frame \(frameCount)")
@@ -153,5 +181,6 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     // SCStreamDelegate
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         LogManager.shared.log("ScreenRecorder: Stream stopped with error: \(error.localizedDescription)")
+        onUnexpectedStop?()
     }
 }

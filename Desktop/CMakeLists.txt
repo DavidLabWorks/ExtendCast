@@ -128,6 +128,8 @@ set(HEADERS
     NetworkInterfaceDescription.h
     NetworkListener.h
     VideoDecoder.h
+    DecodedVideoFrame.h
+    LatestValueMailbox.h
     VideoRenderer.h
     VideoWindow.h
     ReceiverSession.h
@@ -223,6 +225,11 @@ if(BUILD_TESTING)
         tests/VideoColorConversionTests.cpp
         VideoColorConversion.h
     )
+    add_executable(
+        LatestValueMailboxTests
+        tests/LatestValueMailboxTests.cpp
+        LatestValueMailbox.h
+    )
     add_test(
         NAME InboundSessionRegistryTests
         COMMAND InboundSessionRegistryTests
@@ -242,6 +249,10 @@ if(BUILD_TESTING)
     add_test(
         NAME VideoColorConversionTests
         COMMAND VideoColorConversionTests
+    )
+    add_test(
+        NAME LatestValueMailboxTests
+        COMMAND LatestValueMailboxTests
     )
 endif()
 

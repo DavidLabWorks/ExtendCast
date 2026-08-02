@@ -20,21 +20,35 @@ VideoDecoder::~VideoDecoder() {
 }
 
 void VideoDecoder::decode(const QByteArray& data) {
-    static int decodeCallCount = 0;
-    decodeCallCount++;
+    m_decodeCallCount++;
 
     constexpr int videoHeaderSize =
         static_cast<int>(video_packet::headerSize);
 
     if (data.size() <= videoHeaderSize) {
-        if (decodeCallCount <= 5) {
+        if (m_decodeCallCount <= 5) {
             LogManager::instance().log(QString("Decoder: frame %1 too small (%2 bytes), skipping")
-                .arg(decodeCallCount).arg(data.size()));
+                .arg(m_decodeCallCount).arg(data.size()));
         }
         return;
     }
 
     const uint8_t* raw = reinterpret_cast<const uint8_t*>(data.constData());
+
+    video_packet::Header header;
+    if (!video_packet::parseHeader(
+            raw,
+            static_cast<std::size_t>(data.size()),
+            header
+        )) {
+        return;
+    }
+
+    DecodedVideoFrame metadata;
+    metadata.streamId = header.streamId;
+    metadata.sequence = header.sequence;
+    metadata.presentationTimestampNanoseconds =
+        header.presentationTimestampNanoseconds;
 
     const uint8_t* videoData = raw + videoHeaderSize;
     int videoLen = data.size() - videoHeaderSize;
@@ -45,9 +59,9 @@ void VideoDecoder::decode(const QByteArray& data) {
     while (offset + 4 <= videoLen) {
         uint32_t naluLen = qFromBigEndian<uint32_t>(videoData + offset);
         if (naluLen == 0 || offset + 4 + static_cast<int>(naluLen) > videoLen) {
-            if (decodeCallCount <= 5) {
+            if (m_decodeCallCount <= 5) {
                 LogManager::instance().log(QString("Decoder: frame %1 NALU scan stopped at offset %2, naluLen=%3, videoLen=%4")
-                    .arg(decodeCallCount).arg(offset).arg(naluLen).arg(videoLen));
+                    .arg(m_decodeCallCount).arg(offset).arg(naluLen).arg(videoLen));
             }
             break;
         }
@@ -55,9 +69,9 @@ void VideoDecoder::decode(const QByteArray& data) {
         uint8_t naluType = videoData[offset + 4] & 0x1F;
         naluCount++;
 
-        if (decodeCallCount <= 3) {
+        if (m_decodeCallCount <= 3) {
             LogManager::instance().log(QString("Decoder: frame %1 NALU #%2: type=%3, len=%4")
-                .arg(decodeCallCount).arg(naluCount).arg(naluType).arg(naluLen));
+                .arg(m_decodeCallCount).arg(naluCount).arg(naluType).arg(naluLen));
         }
 
         if (naluType == 7) { // SPS
@@ -94,10 +108,10 @@ void VideoDecoder::decode(const QByteArray& data) {
     }
 
     if (m_codecCtx) {
-        decodeNalus(videoData, videoLen);
-    } else if (decodeCallCount <= 10) {
+        decodeNalus(videoData, videoLen, metadata);
+    } else if (m_decodeCallCount <= 10) {
         LogManager::instance().log(QString("Decoder: frame %1 — no codec context yet (waiting for SPS/PPS)")
-            .arg(decodeCallCount));
+            .arg(m_decodeCallCount));
     }
 }
 
@@ -234,10 +248,11 @@ QByteArray VideoDecoder::avccToAnnexB(const uint8_t* data, int size, int* naluCo
     return converted;
 }
 
-void VideoDecoder::decodeNalus(const uint8_t* data, int size) {
-    static int sendCount = 0;
-    static int outputCount = 0;
-
+void VideoDecoder::decodeNalus(
+    const uint8_t* data,
+    int size,
+    const DecodedVideoFrame& metadata
+) {
     int naluCount = 0;
     QByteArray packetData = avccToAnnexB(data, size, &naluCount);
     if (packetData.isEmpty()) {
@@ -247,12 +262,12 @@ void VideoDecoder::decodeNalus(const uint8_t* data, int size) {
         return;
     }
 
-    if (sendCount < 3) {
+    if (m_sendCount < 3) {
         LogManager::instance().log(QString("Decoder: converted AVCC to Annex-B (%1 NALUs, %2 -> %3 bytes)")
             .arg(naluCount).arg(size).arg(packetData.size()));
     }
 
-    sendCount++;
+    m_sendCount++;
     av_packet_unref(m_packet);
     int packetRet = av_new_packet(m_packet, packetData.size());
     if (packetRet < 0) {
@@ -264,9 +279,9 @@ void VideoDecoder::decodeNalus(const uint8_t* data, int size) {
     int ret = avcodec_send_packet(m_codecCtx, m_packet);
     av_packet_unref(m_packet);
     if (ret < 0) {
-        if (sendCount <= 10 || sendCount % 100 == 0) {
+        if (m_sendCount <= 10 || m_sendCount % 100 == 0) {
             LogManager::instance().log(QString("Decoder: send_packet #%1 failed: %2")
-                .arg(sendCount).arg(ret));
+                .arg(m_sendCount).arg(ret));
         }
         if (ret == AVERROR_INVALIDDATA) {
             avcodec_flush_buffers(m_codecCtx);
@@ -281,16 +296,16 @@ void VideoDecoder::decodeNalus(const uint8_t* data, int size) {
             break;
         }
         if (ret < 0) {
-            if (outputCount <= 5) {
+            if (m_outputCount <= 5) {
                 LogManager::instance().log(QString("Decoder: receive_frame error: %1").arg(ret));
             }
             break;
         }
 
-        outputCount++;
-        if (outputCount <= 3 || outputCount % 300 == 0) {
+        m_outputCount++;
+        if (m_outputCount <= 3 || m_outputCount % 300 == 0) {
             LogManager::instance().log(QString("Decoder: decoded frame #%1 — %2x%3 format=%4")
-                .arg(outputCount).arg(m_frame->width).arg(m_frame->height).arg(m_frame->format));
+                .arg(m_outputCount).arg(m_frame->width).arg(m_frame->height).arg(m_frame->format));
         }
 
         // Check for dimension change (orientation switch)
@@ -302,6 +317,61 @@ void VideoDecoder::decodeNalus(const uint8_t* data, int size) {
             emit dimensionsChanged(m_currentWidth, m_currentHeight);
         }
 
-        emit frameDecoded(m_frame);
+        DecodedVideoFrame decoded = metadata;
+        decoded.width = m_frame->width;
+        decoded.height = m_frame->height;
+        decoded.colorParameters = video_color::parametersFor(
+            m_frame->color_range == AVCOL_RANGE_JPEG
+                || m_frame->format == AV_PIX_FMT_YUVJ420P
+                ? video_color::Range::full
+                : video_color::Range::unspecified,
+            m_frame->colorspace == AVCOL_SPC_SMPTE170M
+                || m_frame->colorspace == AVCOL_SPC_BT470BG
+                ? video_color::Matrix::bt601
+                : video_color::Matrix::bt709
+        );
+        decoded.yPlane.resize(decoded.width * decoded.height);
+        decoded.uvPlane.resize(decoded.width * decoded.height / 2);
+
+        for (int row = 0; row < decoded.height; ++row) {
+            memcpy(
+                decoded.yPlane.data() + row * decoded.width,
+                m_frame->data[0] + row * m_frame->linesize[0],
+                decoded.width
+            );
+        }
+        const int chromaHeight = decoded.height / 2;
+        if (m_frame->format == AV_PIX_FMT_NV12) {
+            for (int row = 0; row < chromaHeight; ++row) {
+                memcpy(
+                    decoded.uvPlane.data() + row * decoded.width,
+                    m_frame->data[1] + row * m_frame->linesize[1],
+                    decoded.width
+                );
+            }
+        } else if (m_frame->format == AV_PIX_FMT_YUV420P
+                   || m_frame->format == AV_PIX_FMT_YUVJ420P) {
+            const int chromaWidth = decoded.width / 2;
+            for (int row = 0; row < chromaHeight; ++row) {
+                const uint8_t* u =
+                    m_frame->data[1] + row * m_frame->linesize[1];
+                const uint8_t* v =
+                    m_frame->data[2] + row * m_frame->linesize[2];
+                char* destination =
+                    decoded.uvPlane.data() + row * decoded.width;
+                for (int column = 0; column < chromaWidth; ++column) {
+                    destination[column * 2] = static_cast<char>(u[column]);
+                    destination[column * 2 + 1] = static_cast<char>(v[column]);
+                }
+            }
+        } else {
+            LogManager::instance().log(
+                QString("Decoder: unsupported output format %1")
+                    .arg(m_frame->format)
+            );
+            continue;
+        }
+
+        emit frameDecoded(decoded);
     }
 }

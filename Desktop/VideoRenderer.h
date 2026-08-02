@@ -1,15 +1,16 @@
 #pragma once
 
 #include "VideoColorConversion.h"
+#include "DecodedVideoFrame.h"
+#include "LatestValueMailbox.h"
 
 #include <QOpenGLWidget>
 #include <QOpenGLFunctions>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLTexture>
-#include <QMutex>
 #include <QSize>
 
-struct AVFrame;
+#include <atomic>
 
 class VideoRenderer : public QOpenGLWidget, protected QOpenGLFunctions {
     Q_OBJECT
@@ -22,9 +23,14 @@ public:
 
 signals:
     void videoSizeChanged(QSize size);
+    void framePresented(
+        quint64 streamId,
+        quint64 sequence,
+        quint64 presentationTimestampNanoseconds
+    );
 
 public slots:
-    void onFrameDecoded(AVFrame* frame);
+    void onFrameDecoded(const DecodedVideoFrame& frame);
 
 protected:
     void initializeGL() override;
@@ -32,7 +38,6 @@ protected:
     void resizeGL(int w, int h) override;
 
 private:
-    void uploadFrame(AVFrame* frame);
     void createTextures(int width, int height);
     void deleteTextures();
 
@@ -50,16 +55,8 @@ private:
     int m_texWidth = 0;
     int m_texHeight = 0;
 
-    // Thread-safe frame buffer
-    QMutex m_frameMutex;
-    uint8_t* m_yBuffer = nullptr;
-    uint8_t* m_uvBuffer = nullptr;
-    int m_yStride = 0;
-    int m_uvStride = 0;
-    int m_frameWidth = 0;
-    int m_frameHeight = 0;
-    bool m_hasNewFrame = false;
-    bool m_updatePending = false;
+    LatestValueMailbox<DecodedVideoFrame> m_pendingFrame;
+    std::atomic_bool m_updatePending{false};
     video_color::Parameters m_colorParameters = video_color::parametersFor(
         video_color::Range::unspecified,
         video_color::Matrix::bt709

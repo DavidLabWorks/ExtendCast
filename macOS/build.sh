@@ -18,8 +18,13 @@ if ! [[ "$CURRENT_BUILD" =~ ^[0-9]+$ ]]; then
 fi
 BUILD_NUMBER=$((CURRENT_BUILD + 1))
 
-# Stable local signing identity. Override with SIGN_IDENTITY=- for ad-hoc builds.
-SIGN_IDENTITY="${SIGN_IDENTITY:-Apple Development: ruobin521@gmail.com (JWP5TQ78Q7)}"
+# Stable signing preserves macOS privacy permissions across app updates.
+SIGN_IDENTITY="${SIGN_IDENTITY:-Apple Development: David Dang (2YY486X632)}"
+if [ "$SIGN_IDENTITY" = "-" ] && [ "${ALLOW_ADHOC_SIGNING:-0}" != "1" ]; then
+    echo "Error: ad-hoc signing changes the app identity and resets macOS permissions."
+    echo "Set ALLOW_ADHOC_SIGNING=1 only for disposable test builds."
+    exit 1
+fi
 
 echo "============================================"
 echo "  Building ExtendCast $VERSION (Build $BUILD_NUMBER, Universal 2)"
@@ -76,6 +81,15 @@ fi
 
 # Code sign with entitlements
 codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" --entitlements "ExtendCast.entitlements" "$APP_NAME"
+codesign --verify --deep --strict "$APP_NAME"
+
+if [ "$SIGN_IDENTITY" != "-" ]; then
+    TEAM_IDENTIFIER="$(codesign -dvv "$APP_NAME" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    if [ -z "$TEAM_IDENTIFIER" ] || [ "$TEAM_IDENTIFIER" = "not set" ]; then
+        echo "Error: signed app does not contain a stable Team Identifier."
+        exit 1
+    fi
+fi
 
 echo "Creating release archive..."
 ditto -c -k --sequesterRsrc --keepParent "$APP_NAME" "$ZIP_NAME"

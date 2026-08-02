@@ -2,8 +2,28 @@ import Foundation
 import VideoToolbox
 import CoreMedia
 
+struct ReceiverVideoFrameMetadata {
+    let streamID: UInt64
+    let sequence: UInt64
+    let presentationTimestampNanoseconds: UInt64
+    let sourceConnectionID: ObjectIdentifier?
+}
+
+struct ReceiverDecodedVideoFrame {
+    let sampleBuffer: CMSampleBuffer
+    let metadata: ReceiverVideoFrameMetadata
+}
+
+private final class ReceiverDecodeFrameContext {
+    let metadata: ReceiverVideoFrameMetadata
+
+    init(metadata: ReceiverVideoFrameMetadata) {
+        self.metadata = metadata
+    }
+}
+
 protocol ReceiverVideoDecoderDelegate: AnyObject {
-    func didDecode(sampleBuffer: CMSampleBuffer)
+    func didDecode(frame: ReceiverDecodedVideoFrame)
     func decoderDidChangeFormat()
     func decoderNeedsKeyframe()
 }
@@ -32,7 +52,10 @@ class ReceiverVideoDecoder: ObservableObject {
     private var consecutiveErrors: Int = 0
     private var lastKeyframeRequestTime: Date = .distantPast
 
-    func decode(data: Data) {
+    func decode(
+        data: Data,
+        sourceConnectionID: ObjectIdentifier? = nil
+    ) {
         guard
             let header = VideoFramePacketHeader.decode(from: data),
             data.count > EncodedVideoFrame.headerSize
@@ -80,7 +103,13 @@ class ReceiverVideoDecoder: ObservableObject {
         if decompressionSession != nil && !frameOnlyData.isEmpty {
             decodeFrame(
                 data: frameOnlyData,
-                ptsNanos: header.presentationTimestampNanoseconds
+                metadata: ReceiverVideoFrameMetadata(
+                    streamID: header.streamID,
+                    sequence: header.sequence,
+                    presentationTimestampNanoseconds:
+                        header.presentationTimestampNanoseconds,
+                    sourceConnectionID: sourceConnectionID
+                )
             )
         }
     }
@@ -184,7 +213,10 @@ class ReceiverVideoDecoder: ObservableObject {
         }
     }
 
-    private func decodeFrame(data: Data, ptsNanos: UInt64) {
+    private func decodeFrame(
+        data: Data,
+        metadata: ReceiverVideoFrameMetadata
+    ) {
         guard let session = decompressionSession else { return }
 
         var blockBuffer: CMBlockBuffer?
@@ -239,14 +271,22 @@ class ReceiverVideoDecoder: ObservableObject {
         if sbStatus == noErr, let sb = sampleBuffer {
             let flags: VTDecodeFrameFlags = [._EnableAsynchronousDecompression, ._EnableTemporalProcessing]
             var infoFlags: VTDecodeInfoFlags = []
+            let frameContext = ReceiverDecodeFrameContext(metadata: metadata)
+            let frameContextPointer = Unmanaged.passRetained(frameContext).toOpaque()
 
             let decodeStatus = VTDecompressionSessionDecodeFrame(
                 session,
                 sampleBuffer: sb,
                 flags: flags,
-                frameRefcon: nil,
+                frameRefcon: frameContextPointer,
                 infoFlagsOut: &infoFlags
             )
+
+            if decodeStatus != noErr {
+                Unmanaged<ReceiverDecodeFrameContext>
+                    .fromOpaque(frameContextPointer)
+                    .release()
+            }
 
             if decodeStatus == -12916 { // kVTInvalidSessionErr
                 // Session invalidated — clear it so it gets recreated on next keyframe
@@ -282,6 +322,11 @@ private func receiverDecompressionCallback(
     presentationTimeStamp: CMTime,
     presentationDuration: CMTime
 ) {
+    guard let sourceFrameRefCon = sourceFrameRefCon else { return }
+    let frameContext = Unmanaged<ReceiverDecodeFrameContext>
+        .fromOpaque(sourceFrameRefCon)
+        .takeRetainedValue()
+
     guard status == noErr, let imageBuffer = imageBuffer, let refCon = decompressionOutputRefCon else { return }
     let decoder = Unmanaged<ReceiverVideoDecoder>.fromOpaque(refCon).takeUnretainedValue()
 
@@ -302,9 +347,13 @@ private func receiverDecompressionCallback(
     )
 
     if let sb = sampleBuffer {
+        let frame = ReceiverDecodedVideoFrame(
+            sampleBuffer: sb,
+            metadata: frameContext.metadata
+        )
+        decoder.delegate?.didDecode(frame: frame)
         DispatchQueue.main.async {
             decoder.decodedFrameCount += 1
-            decoder.delegate?.didDecode(sampleBuffer: sb)
         }
     }
 }

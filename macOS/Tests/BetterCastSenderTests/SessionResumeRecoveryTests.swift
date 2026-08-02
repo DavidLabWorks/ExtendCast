@@ -43,4 +43,26 @@ final class SessionResumeRecoveryTests: XCTestCase {
             )
         )
     }
+
+    func testInvalidVirtualDisplayMustBeRecreatedAfterWake() {
+        XCTAssertEqual(
+            NetworkClient.virtualDisplayRecoveryAction(
+                hasManager: true,
+                displayIsActive: false,
+                displayHasBounds: false
+            ),
+            .recreate
+        )
+    }
+
+    func testLiveVirtualDisplayIsPreservedAfterWake() {
+        XCTAssertEqual(
+            NetworkClient.virtualDisplayRecoveryAction(
+                hasManager: true,
+                displayIsActive: true,
+                displayHasBounds: true
+            ),
+            .reuse
+        )
+    }
 }

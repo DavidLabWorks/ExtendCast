@@ -21,6 +21,7 @@
 #include <QTime>
 #include <QHash>
 #include <QSet>
+#include <QThread>
 
 // Simple log manager (mirrors macOS LogManager)
 class LogManager : public QObject {
@@ -32,6 +33,14 @@ public:
     }
 
     void log(const QString& msg) {
+        if (QThread::currentThread() != thread()) {
+            QMetaObject::invokeMethod(
+                this,
+                [this, msg]() { log(msg); },
+                Qt::QueuedConnection
+            );
+            return;
+        }
         QString entry = QString("[%1] %2")
             .arg(QTime::currentTime().toString("HH:mm:ss"), msg);
         m_entries.append(entry);

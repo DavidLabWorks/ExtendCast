@@ -4,6 +4,7 @@
 #include <QJsonObject>
 #include <QJsonDocument>
 #include <QByteArray>
+#include <QString>
 #include <atomic>
 
 // Matches Swift InputEventType exactly
@@ -22,6 +23,7 @@ enum class InputEventType : int {
 // Special command keyCodes
 constexpr uint16_t kHeartbeatKeyCode = 888;
 constexpr uint16_t kIDRRequestKeyCode = 999;
+constexpr uint16_t kPlaybackAcknowledgementKeyCode = 666;
 
 struct InputEvent {
     InputEventType type;
@@ -31,6 +33,9 @@ struct InputEvent {
     double deltaX = 0.0;
     double deltaY = 0.0;
     uint64_t eventId = 0;
+    QString streamId;
+    QString sequence;
+    QString presentationTimestampNanoseconds;
 
     InputEvent() : type(InputEventType::MouseMove) {
         eventId = nextId();
@@ -52,6 +57,12 @@ struct InputEvent {
         obj["deltaX"] = deltaX;
         obj["deltaY"] = deltaY;
         obj["eventId"] = static_cast<qint64>(eventId);
+        if (!streamId.isEmpty()) obj["streamID"] = streamId;
+        if (!sequence.isEmpty()) obj["sequence"] = sequence;
+        if (!presentationTimestampNanoseconds.isEmpty()) {
+            obj["presentationTimestampNanoseconds"] =
+                presentationTimestampNanoseconds;
+        }
         return QJsonDocument(obj).toJson(QJsonDocument::Compact);
     }
 

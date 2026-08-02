@@ -4,6 +4,11 @@ enum SessionResumeRecoveryAction: Equatable {
     case restartCapture
 }
 
+enum VirtualDisplayRecoveryAction: Equatable {
+    case reuse
+    case recreate
+}
+
 enum SessionSuspensionReason: Hashable {
     case inactive
     case locked
@@ -26,5 +31,13 @@ extension NetworkClient {
     ) -> Bool {
         guard let scheduledDeadline else { return true }
         return proposedDeadline < scheduledDeadline
+    }
+
+    static func virtualDisplayRecoveryAction(
+        hasManager: Bool,
+        displayIsActive: Bool,
+        displayHasBounds: Bool
+    ) -> VirtualDisplayRecoveryAction {
+        hasManager && displayIsActive && displayHasBounds ? .reuse : .recreate
     }
 }

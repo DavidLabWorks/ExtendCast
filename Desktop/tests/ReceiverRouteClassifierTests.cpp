@@ -4,6 +4,19 @@
 #include <iostream>
 
 int main() {
+    assert(preferredBufferedVideoNanosecondsFor(
+        ReceiverAdvertisedRoute::thunderbolt
+    ) == 150'000'000);
+    assert(preferredBufferedVideoNanosecondsFor(
+        ReceiverAdvertisedRoute::ethernet
+    ) == 200'000'000);
+    assert(preferredBufferedVideoNanosecondsFor(
+        ReceiverAdvertisedRoute::wifi
+    ) == 300'000'000);
+    assert(preferredBufferedVideoNanosecondsFor(
+        ReceiverAdvertisedRoute::excluded
+    ) == 300'000'000);
+
     assert(classifyReceiverAdvertisedRoute(
         "Wi-Fi Intel Wireless",
         {"192.168.31.235"},

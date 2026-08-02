@@ -1,4 +1,5 @@
 #include "../VideoPacket.h"
+#include "../ReceiverRouteClassifier.h"
 
 #include <cassert>
 #include <cstdint>
@@ -60,6 +61,7 @@ constexpr std::uint64_t milliseconds(std::uint64_t value) {
 }
 
 constexpr std::uint64_t maximumDelay = milliseconds(500);
+constexpr std::uint64_t preferredDelay = milliseconds(150);
 constexpr std::uint32_t maximumPacketSize = 8 * 1024 * 1024;
 
 } // namespace
@@ -73,6 +75,7 @@ int main() {
         const auto decision = planTcpVideoCatchUp(
             buffer.data(),
             buffer.size(),
+            preferredDelay,
             maximumDelay,
             maximumPacketSize
         );
@@ -93,6 +96,7 @@ int main() {
         const auto decision = planTcpVideoCatchUp(
             buffer.data(),
             buffer.size(),
+            preferredDelay,
             maximumDelay,
             maximumPacketSize,
             LivePosition{7, milliseconds(800)}
@@ -107,6 +111,116 @@ int main() {
     {
         std::vector<std::uint8_t> buffer;
         appendVideoPacket(buffer, 7, 0, milliseconds(0), true);
+        appendVideoPacket(buffer, 7, 1, milliseconds(60), false);
+
+        const auto decision = planTcpVideoCatchUp(
+            buffer.data(),
+            buffer.size(),
+            preferredBufferedVideoNanosecondsFor(
+                ReceiverAdvertisedRoute::thunderbolt
+            ),
+            maximumDelay,
+            maximumPacketSize,
+            LivePosition{7, milliseconds(60)}
+        );
+
+        assert(decision.discardBytes == 0);
+        assert(!decision.resetDecoder);
+        assert(!decision.requestKeyframe);
+    }
+
+    {
+        std::vector<std::uint8_t> buffer;
+        appendVideoPacket(buffer, 7, 0, milliseconds(0), true);
+        appendVideoPacket(buffer, 7, 1, milliseconds(480), false);
+
+        const auto decision = planTcpVideoCatchUp(
+            buffer.data(),
+            buffer.size(),
+            preferredBufferedVideoNanosecondsFor(
+                ReceiverAdvertisedRoute::thunderbolt
+            ),
+            maximumDelay,
+            maximumPacketSize,
+            LivePosition{7, milliseconds(480)}
+        );
+
+        assert(decision.discardBytes == 0);
+        assert(!decision.resetDecoder);
+        assert(!decision.requestKeyframe);
+    }
+
+    {
+        std::vector<std::uint8_t> buffer;
+        appendVideoPacket(buffer, 7, 0, milliseconds(0), true);
+        for (std::uint64_t sequence = 1; sequence <= 10; ++sequence) {
+            appendVideoPacket(
+                buffer,
+                7,
+                sequence,
+                milliseconds(sequence * 20),
+                false
+            );
+        }
+
+        const auto decision = planTcpVideoCatchUp(
+            buffer.data(),
+            buffer.size(),
+            preferredBufferedVideoNanosecondsFor(
+                ReceiverAdvertisedRoute::thunderbolt
+            ),
+            maximumDelay,
+            maximumPacketSize
+        );
+
+        assert(decision.discardBytes == 0);
+        assert(!decision.resetDecoder);
+        assert(!decision.requestKeyframe);
+    }
+
+    {
+        std::vector<std::uint8_t> buffer;
+        appendVideoPacket(buffer, 7, 0, milliseconds(0), true);
+        appendVideoPacket(buffer, 7, 1, milliseconds(600), false);
+
+        const auto decision = planTcpVideoCatchUp(
+            buffer.data(),
+            buffer.size(),
+            preferredDelay,
+            maximumDelay,
+            maximumPacketSize,
+            LivePosition{7, milliseconds(600)}
+        );
+
+        assert(decision.discardBytes == buffer.size());
+        assert(decision.resetDecoder);
+        assert(decision.requestKeyframe);
+    }
+
+    {
+        std::vector<std::uint8_t> buffer;
+        appendVideoPacket(buffer, 7, 0, milliseconds(0), true);
+        appendVideoPacket(buffer, 7, 1, milliseconds(100), false);
+        const std::size_t preferredKeyframeOffset =
+            appendVideoPacket(buffer, 7, 2, milliseconds(180), true);
+        appendVideoPacket(buffer, 7, 3, milliseconds(200), false);
+
+        const auto decision = planTcpVideoCatchUp(
+            buffer.data(),
+            buffer.size(),
+            preferredDelay,
+            maximumDelay,
+            maximumPacketSize
+        );
+
+        assert(decision.discardBytes == preferredKeyframeOffset);
+        assert(decision.resetDecoder);
+        assert(!decision.requestKeyframe);
+    }
+
+    {
+        std::vector<std::uint8_t> buffer;
+        appendVideoPacket(buffer, 7, 0, milliseconds(0), true);
         appendVideoPacket(buffer, 7, 1, milliseconds(300), false);
         const std::size_t liveKeyframeOffset =
             appendVideoPacket(buffer, 7, 2, milliseconds(700), true);
@@ -115,6 +229,7 @@ int main() {
         const auto decision = planTcpVideoCatchUp(
             buffer.data(),
             buffer.size(),
+            preferredDelay,
             maximumDelay,
             maximumPacketSize
         );
@@ -134,6 +249,7 @@ int main() {
         const auto decision = planTcpVideoCatchUp(
             buffer.data(),
             buffer.size(),
+            preferredDelay,
             maximumDelay,
             maximumPacketSize,
             LivePosition{7, milliseconds(5'030)}
@@ -151,6 +267,7 @@ int main() {
         const auto decision = planTcpVideoCatchUp(
             buffer.data(),
             buffer.size(),
+            preferredDelay,
             maximumDelay,
             maximumPacketSize,
             LivePosition{7, milliseconds(10'000)}
@@ -170,6 +287,7 @@ int main() {
         const auto decision = planTcpVideoCatchUp(
             buffer.data(),
             buffer.size(),
+            preferredDelay,
             maximumDelay,
             maximumPacketSize,
             LivePosition{7, milliseconds(5'020)}
@@ -188,6 +306,7 @@ int main() {
         const auto decision = planTcpVideoCatchUp(
             buffer.data(),
             buffer.size(),
+            preferredDelay,
             maximumDelay,
             maximumPacketSize,
             LivePosition{7, milliseconds(10'000)}

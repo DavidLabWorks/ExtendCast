@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -11,6 +12,21 @@ enum class ReceiverAdvertisedRoute {
     ethernet,
     thunderbolt,
 };
+
+inline std::uint64_t preferredBufferedVideoNanosecondsFor(
+    ReceiverAdvertisedRoute route
+) {
+    switch (route) {
+    case ReceiverAdvertisedRoute::thunderbolt:
+        return 150'000'000;
+    case ReceiverAdvertisedRoute::ethernet:
+        return 200'000'000;
+    case ReceiverAdvertisedRoute::wifi:
+    case ReceiverAdvertisedRoute::excluded:
+        return 300'000'000;
+    }
+    return 300'000'000;
+}
 
 inline ReceiverAdvertisedRoute classifyReceiverAdvertisedRoute(
     std::string interfaceDescription,

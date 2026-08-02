@@ -20,6 +20,7 @@ class VideoEncoder {
     private let streamID = UInt64.random(in: 1...UInt64.max)
     private var timestampNormalizer: VideoTimestampNormalizer
     private let bitrate: Int
+    private let feedbackController: StreamFeedbackController
 
     // Cache for headers so we can re-send them if needed
     private var cachedSPS: Data?
@@ -31,9 +32,10 @@ class VideoEncoder {
 
     private var expectedFPS: Int
 
-    init(connectionId: UUID, width: Int, height: Int, bitrate: Int = 20_000_000, expectedFPS: Int = 120, keyframeIntervalSeconds: Double = 10.0, rateLimitWindow: Double = 1.0) {
+    init(connectionId: UUID, width: Int, height: Int, bitrate: Int = 20_000_000, expectedFPS: Int = 120, keyframeIntervalSeconds: Double = 10.0, rateLimitWindow: Double = 1.0, feedbackController: StreamFeedbackController) {
         self.connectionId = connectionId
         self.bitrate = bitrate
+        self.feedbackController = feedbackController
         self.expectedFPS = expectedFPS
         self.timestampNormalizer = VideoTimestampNormalizer(
             expectedFPS: expectedFPS
@@ -255,6 +257,10 @@ class VideoEncoder {
                 presentationTimestampNanoseconds: normalizedTimestampNanoseconds,
                 isKeyframe: isKeyframe,
                 avccData: coalescedData
+            )
+            feedbackController.noteEncodedFrame(
+                streamID: frame.streamID,
+                timestampNanoseconds: frame.presentationTimestampNanoseconds
             )
             encodedFrameSequence &+= 1
             delegate?.videoEncoder(

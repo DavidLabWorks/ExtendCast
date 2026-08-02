@@ -147,7 +147,12 @@ class ReceiverInputOverlayView: NSView {
 class ReceiverVideoRenderer: ObservableObject {
     let view = ReceiverInputOverlayView()
     private var displayLayer = AVSampleBufferDisplayLayer()
+    private let pendingFrames = LatestFrameMailbox<ReceiverDecodedVideoFrame>()
+    private let deliveryLock = NSLock()
+    private var deliveryScheduled = false
     @Published var videoSize: CGSize = .zero
+
+    var onFramePresented: ((ReceiverVideoFrameMetadata) -> Void)?
 
     var onInput: ((InputEvent) -> Void)? {
         didSet {
@@ -179,12 +184,59 @@ class ReceiverVideoRenderer: ObservableObject {
         CATransaction.commit()
     }
 
-    func enqueue(_ sampleBuffer: CMSampleBuffer) {
+    /// Offers a decoded frame without allowing display work to queue up.
+    /// If rendering is slower than decoding, only the newest frame survives.
+    func offer(_ frame: ReceiverDecodedVideoFrame) {
+        pendingFrames.replace(with: frame)
+        scheduleDelivery()
+    }
+
+    private func scheduleDelivery(after delay: TimeInterval = 0) {
+        let shouldSchedule = deliveryLock.withLock {
+            guard !deliveryScheduled else { return false }
+            deliveryScheduled = true
+            return true
+        }
+        guard shouldSchedule else { return }
+
+        let deliveryWorkItem = DispatchWorkItem { [weak self] in
+            self?.deliverLatestFrame()
+        }
+        if delay > 0 {
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + delay,
+                execute: deliveryWorkItem
+            )
+        } else {
+            DispatchQueue.main.async(execute: deliveryWorkItem)
+        }
+    }
+
+    private func deliverLatestFrame() {
+        dispatchPrecondition(condition: .onQueue(.main))
+
+        guard pendingFrames.pendingCount > 0 else {
+            deliveryLock.withLock { deliveryScheduled = false }
+            return
+        }
+
         // Recover from failed state — try flush first, rebuild layer if still stuck
         if displayLayer.status == .failed {
             LogManager.shared.log("ReceiverVideoRenderer: Display layer failed, recovering...")
             rebuildDisplayLayer()
         }
+
+        guard displayLayer.isReadyForMoreMediaData else {
+            deliveryLock.withLock { deliveryScheduled = false }
+            scheduleDelivery(after: 0.01)
+            return
+        }
+
+        guard let frame = pendingFrames.take() else {
+            deliveryLock.withLock { deliveryScheduled = false }
+            return
+        }
+        let sampleBuffer = frame.sampleBuffer
 
         if let format = CMSampleBufferGetFormatDescription(sampleBuffer) {
             let dim = CMVideoFormatDescriptionGetDimensions(format)
@@ -206,11 +258,17 @@ class ReceiverVideoRenderer: ObservableObject {
         }
 
         displayLayer.enqueue(sampleBuffer)
+        onFramePresented?(frame.metadata)
+
+        deliveryLock.withLock { deliveryScheduled = false }
+        if pendingFrames.pendingCount > 0 {
+            scheduleDelivery()
+        }
     }
 
     /// Flush the display layer in preparation for a format/dimension change.
     func flushForFormatChange() {
-        displayLayer.flush()
+        performFlush(resetVideoSize: false)
     }
 
     /// Rebuild the display layer from scratch when flush alone cannot recover it.
@@ -235,9 +293,29 @@ class ReceiverVideoRenderer: ObservableObject {
     }
 
     func flush() {
-        displayLayer.flush()
-        DispatchQueue.main.async {
-            self.videoSize = .zero
+        performFlush(resetVideoSize: true)
+    }
+
+    func prepareForSessionSuspension() {
+        performFlush(resetVideoSize: false)
+    }
+
+    func recoverAfterSessionResume() {
+        pendingFrames.removeAll()
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.rebuildDisplayLayer()
+        }
+    }
+
+    private func performFlush(resetVideoSize: Bool) {
+        pendingFrames.removeAll()
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.displayLayer.flush()
+            if resetVideoSize {
+                self.videoSize = .zero
+            }
         }
     }
 }

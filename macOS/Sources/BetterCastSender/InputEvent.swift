@@ -20,16 +20,22 @@ struct InputEvent: Codable {
     let deltaX: Double
     let deltaY: Double
     let eventId: UInt64 // Unique ID for deduplication of redundant UDP sends
+    let streamID: String?
+    let sequence: String?
+    let presentationTimestampNanoseconds: String?
 
     private static var nextId: UInt64 = 0
 
-    init(type: InputEventType, x: Double = 0, y: Double = 0, keyCode: UInt16 = 0, deltaX: Double = 0, deltaY: Double = 0, eventId: UInt64? = nil) {
+    init(type: InputEventType, x: Double = 0, y: Double = 0, keyCode: UInt16 = 0, deltaX: Double = 0, deltaY: Double = 0, eventId: UInt64? = nil, streamID: String? = nil, sequence: String? = nil, presentationTimestampNanoseconds: String? = nil) {
         self.type = type
         self.x = x
         self.y = y
         self.keyCode = keyCode
         self.deltaX = deltaX
         self.deltaY = deltaY
+        self.streamID = streamID
+        self.sequence = sequence
+        self.presentationTimestampNanoseconds = presentationTimestampNanoseconds
         if let id = eventId {
             self.eventId = id
         } else {

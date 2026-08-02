@@ -3,6 +3,8 @@
 #include <QObject>
 #include <QByteArray>
 #include <QString>
+#include <QElapsedTimer>
+#include <QThread>
 
 #include "InputEvent.h"
 
@@ -57,4 +59,6 @@ private:
     AudioDecoder* m_audioDecoder = nullptr;
     AudioPlayer* m_audioPlayer = nullptr;
     VideoWindow* m_window = nullptr;
+    QThread m_decoderThread;
+    QElapsedTimer m_playbackAcknowledgementTimer;
 };

@@ -1,12 +1,6 @@
 #include "VideoRenderer.h"
-#include "MainWindow.h"  // for LogManager
 #include <QDebug>
 #include <QVector4D>
-
-extern "C" {
-#include <libavutil/frame.h>
-#include <libavutil/pixfmt.h>
-}
 
 // Vertex data: position (x,y) + texcoord (u,v)
 static const float kVertexData[] = {
@@ -62,39 +56,6 @@ static const char* kFragmentShaderSource = R"(
     }
 )";
 
-static video_color::Range colorRangeForFrame(const AVFrame* frame) {
-    if (!frame) return video_color::Range::unspecified;
-    if (frame->format == AV_PIX_FMT_YUVJ420P
-        || frame->color_range == AVCOL_RANGE_JPEG) {
-        return video_color::Range::full;
-    }
-    if (frame->color_range == AVCOL_RANGE_MPEG) {
-        return video_color::Range::limited;
-    }
-    // H.264 screen-capture streams are video-range unless explicitly marked
-    // full-range. Both ScreenCaptureKit's 420v output and the Windows sender's
-    // BGRA-to-NV12 conversion use this range.
-    return video_color::Range::unspecified;
-}
-
-static video_color::MatrixSignal colorMatrixSignalForFrame(
-    const AVFrame* frame
-) {
-    if (!frame) {
-        return video_color::MatrixSignal::unspecified;
-    }
-    if (frame->colorspace == AVCOL_SPC_BT709) {
-        return video_color::MatrixSignal::bt709;
-    }
-    if (frame->colorspace == AVCOL_SPC_SMPTE170M
-        || frame->colorspace == AVCOL_SPC_BT470BG) {
-        return video_color::MatrixSignal::bt601;
-    }
-    // Rec.709 is the cross-platform SDR baseline. Legacy Windows senders that
-    // really use BT.601 now signal SMPTE170M explicitly.
-    return video_color::MatrixSignal::unspecified;
-}
-
 VideoRenderer::VideoRenderer(QWidget* parent)
     : QOpenGLWidget(parent)
 {
@@ -110,8 +71,6 @@ VideoRenderer::~VideoRenderer() {
         doneCurrent();
     }
     delete m_program;
-    free(m_yBuffer);
-    free(m_uvBuffer);
 }
 
 void VideoRenderer::initializeGL() {
@@ -149,28 +108,33 @@ void VideoRenderer::resizeGL(int w, int h) {
 void VideoRenderer::paintGL() {
     glClear(GL_COLOR_BUFFER_BIT);
 
-    QMutexLocker lock(&m_frameMutex);
-    m_updatePending = false;
-    if (!m_hasNewFrame && m_texWidth == 0) return;
-
-    if (m_hasNewFrame && m_frameWidth > 0 && m_frameHeight > 0) {
-        // Upload new frame data to textures
-        if (m_texWidth != m_frameWidth || m_texHeight != m_frameHeight) {
-            createTextures(m_frameWidth, m_frameHeight);
+    m_updatePending.store(false);
+    auto pendingFrame = m_pendingFrame.take();
+    if (pendingFrame.has_value()) {
+        const auto& frame = *pendingFrame;
+        if (m_texWidth != frame.width || m_texHeight != frame.height) {
+            createTextures(frame.width, frame.height);
         }
 
-        // Upload Y plane (tightly packed, stride == width)
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glBindTexture(GL_TEXTURE_2D, m_textureY);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_frameWidth, m_frameHeight,
-                        GL_LUMINANCE, GL_UNSIGNED_BYTE, m_yBuffer);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, frame.width, frame.height,
+                        GL_LUMINANCE, GL_UNSIGNED_BYTE, frame.yPlane.constData());
 
-        // Upload UV plane (tightly packed, half width, half height)
         glBindTexture(GL_TEXTURE_2D, m_textureUV);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_frameWidth / 2, m_frameHeight / 2,
-                        GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, m_uvBuffer);
-
-        m_hasNewFrame = false;
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, frame.width / 2, frame.height / 2,
+                        GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, frame.uvPlane.constData());
+        m_colorParameters = frame.colorParameters;
+        const QSize newSize(frame.width, frame.height);
+        if (m_videoSize != newSize) {
+            m_videoSize = newSize;
+            emit videoSizeChanged(newSize);
+        }
+        emit framePresented(
+            frame.streamId,
+            frame.sequence,
+            frame.presentationTimestampNanoseconds
+        );
     }
 
     if (m_texWidth == 0) return;
@@ -189,7 +153,6 @@ void VideoRenderer::paintGL() {
     }
 
     const auto colorParameters = m_colorParameters;
-    lock.unlock();
 
     m_program->bind();
 
@@ -238,89 +201,11 @@ void VideoRenderer::paintGL() {
     m_program->release();
 }
 
-void VideoRenderer::onFrameDecoded(AVFrame* frame) {
-    static int renderCount = 0;
-    if (!frame || frame->width <= 0 || frame->height <= 0) return;
+void VideoRenderer::onFrameDecoded(const DecodedVideoFrame& frame) {
+    if (frame.width <= 0 || frame.height <= 0) return;
 
-    renderCount++;
-    if (renderCount <= 3 || renderCount % 300 == 0) {
-        LogManager::instance().log(QString("Renderer: frame #%1, %2x%3, visible=%4, size=%5x%6")
-            .arg(renderCount).arg(frame->width).arg(frame->height)
-            .arg(isVisible()).arg(width()).arg(height()));
-    }
-
-    QMutexLocker lock(&m_frameMutex);
-
-    m_colorParameters = video_color::parametersFor(
-        colorRangeForFrame(frame),
-        video_color::matrixForSignal(colorMatrixSignalForFrame(frame))
-    );
-
-    int w = frame->width;
-    int h = frame->height;
-
-    // Reallocate buffers if size changed
-    if (w != m_frameWidth || h != m_frameHeight) {
-        free(m_yBuffer);
-        free(m_uvBuffer);
-        m_yBuffer = static_cast<uint8_t*>(malloc(w * h));
-        m_uvBuffer = static_cast<uint8_t*>(malloc(w * h / 2));
-        m_frameWidth = w;
-        m_frameHeight = h;
-
-        LogManager::instance().log(QString("Renderer: new frame size %1x%2 format=%3")
-            .arg(w).arg(h).arg(frame->format));
-
-        QSize newSize(w, h);
-        if (m_videoSize != newSize) {
-            m_videoSize = newSize;
-            QMetaObject::invokeMethod(this, [this, newSize]() {
-                emit videoSizeChanged(newSize);
-            }, Qt::QueuedConnection);
-        }
-    }
-
-    if (frame->format == AV_PIX_FMT_NV12) {
-        // NV12: copy row-by-row to produce tightly-packed buffers
-        // (FFmpeg stride may be larger than width due to alignment)
-        for (int row = 0; row < h; row++) {
-            memcpy(m_yBuffer + row * w,
-                   frame->data[0] + row * frame->linesize[0], w);
-        }
-        int uvH = h / 2;
-        int uvW = w; // UV interleaved = w bytes per row (w/2 pairs * 2 bytes)
-        for (int row = 0; row < uvH; row++) {
-            memcpy(m_uvBuffer + row * uvW,
-                   frame->data[1] + row * frame->linesize[1], uvW);
-        }
-    } else if (frame->format == AV_PIX_FMT_YUV420P || frame->format == AV_PIX_FMT_YUVJ420P) {
-        // YUV420P: Y plane row-by-row, then interleave U+V into NV12
-        for (int row = 0; row < h; row++) {
-            memcpy(m_yBuffer + row * w,
-                   frame->data[0] + row * frame->linesize[0], w);
-        }
-        int uvH = h / 2;
-        int uvW = w / 2;
-        for (int row = 0; row < uvH; row++) {
-            const uint8_t* uRow = frame->data[1] + row * frame->linesize[1];
-            const uint8_t* vRow = frame->data[2] + row * frame->linesize[2];
-            uint8_t* dst = m_uvBuffer + row * w;
-            for (int col = 0; col < uvW; col++) {
-                dst[col * 2]     = uRow[col];
-                dst[col * 2 + 1] = vRow[col];
-            }
-        }
-    } else {
-        qWarning() << "Unsupported pixel format:" << frame->format;
-        return;
-    }
-
-    m_hasNewFrame = true;
-    const bool shouldScheduleUpdate = !m_updatePending;
-    m_updatePending = true;
-    lock.unlock();
-
-    if (shouldScheduleUpdate) {
+    m_pendingFrame.replace(frame);
+    if (!m_updatePending.exchange(true)) {
         QMetaObject::invokeMethod(this, QOverload<>::of(&QWidget::update), Qt::QueuedConnection);
     }
 }

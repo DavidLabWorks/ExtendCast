@@ -4,6 +4,8 @@
 #include <QByteArray>
 #include <QSize>
 
+#include "DecodedVideoFrame.h"
+
 // Forward declarations for FFmpeg types
 struct AVCodecContext;
 struct AVFrame;
@@ -20,15 +22,18 @@ public:
     void reset();
 
 signals:
-    // Emitted when a frame is decoded. Receiver must copy data before returning.
-    void frameDecoded(AVFrame* frame);
+    void frameDecoded(const DecodedVideoFrame& frame);
     void dimensionsChanged(int width, int height);
     void keyframeNeeded();  // Emitted on decode errors — receiver should request IDR from sender
 
 private:
     bool initDecoder(const uint8_t* sps, int spsLen, const uint8_t* pps, int ppsLen);
     void destroyDecoder();
-    void decodeNalus(const uint8_t* data, int size);
+    void decodeNalus(
+        const uint8_t* data,
+        int size,
+        const DecodedVideoFrame& metadata
+    );
     QByteArray avccToAnnexB(const uint8_t* data, int size, int* naluCount = nullptr) const;
 
     AVCodecContext* m_codecCtx = nullptr;
@@ -45,4 +50,7 @@ private:
     // Track dimensions for change detection (orientation switch)
     int m_currentWidth = 0;
     int m_currentHeight = 0;
+    int m_decodeCallCount = 0;
+    int m_sendCount = 0;
+    int m_outputCount = 0;
 };

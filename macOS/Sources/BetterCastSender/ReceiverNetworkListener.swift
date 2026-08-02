@@ -54,6 +54,9 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
     private var connectedSendersByConnection: [
         ObjectIdentifier: ReceiverConnectedSender
     ] = [:]
+    private var lastPlaybackAcknowledgementByConnection: [
+        ObjectIdentifier: Date
+    ] = [:]
 
     private let networkQueue = DispatchQueue(label: "com.bettercast.receiver-network", qos: .userInteractive)
     private lazy var inboundCompatibilityConnector =
@@ -89,6 +92,9 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
         self.videoDecoder = decoder
         self.videoRenderer = renderer
         decoder.delegate = self
+        renderer.onFramePresented = { [weak self] metadata in
+            self?.sendPlaybackAcknowledgement(metadata)
+        }
     }
 
     func start() {
@@ -132,6 +138,7 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
         }
         connectedClients.removeAll()
         connectedSendersByConnection.removeAll()
+        lastPlaybackAcknowledgementByConnection.removeAll()
         connectedSenders.removeAll()
     }
 
@@ -589,7 +596,10 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
         let typeByte = body[body.startIndex]
         let payload = Data(body.dropFirst(1))
         if typeByte == 0x01 && !payload.isEmpty {
-            videoDecoder?.decode(data: payload)
+            videoDecoder?.decode(
+                data: payload,
+                sourceConnectionID: ObjectIdentifier(connection)
+            )
         } else if typeByte == 0x02 {
             // TODO: route to audio decoder
         } else if typeByte == 0x03 {
@@ -613,7 +623,10 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
             }
 
             if let content = content, !content.isEmpty {
-                self?.handleUDPPacket(content)
+                self?.handleUDPPacket(
+                    content,
+                    sourceConnectionID: ObjectIdentifier(connection)
+                )
             }
             self?.receiveUDP(on: connection)
         }
@@ -622,7 +635,10 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
     private var lastDecodedFrameId: UInt32 = 0
     private var lastKeyframeRequest = Date.distantPast
 
-    private func handleUDPPacket(_ data: Data) {
+    private func handleUDPPacket(
+        _ data: Data,
+        sourceConnectionID: ObjectIdentifier
+    ) {
         guard data.count > 8 else { return }
 
         let header = data.prefix(8)
@@ -651,7 +667,10 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
             let diff = Int(frameID) - Int(lastDecodedFrameId)
             if diff > 1 && diff < 1000 {
                 if Date().timeIntervalSince(lastKeyframeRequest) > 2.0 {
-                    sendInputEvent(InputEvent(type: .command, keyCode: 999))
+                    sendInputEvent(
+                        InputEvent(type: .command, keyCode: 999),
+                        to: sourceConnectionID
+                    )
                     lastKeyframeRequest = Date()
                 }
             }
@@ -663,7 +682,10 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
                 fullData.append(chunkData)
             }
 
-            self.videoDecoder?.decode(data: fullData)
+            self.videoDecoder?.decode(
+                data: fullData,
+                sourceConnectionID: sourceConnectionID
+            )
             udpBuffer.removeValue(forKey: frameID)
         }
 
@@ -681,6 +703,9 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
         DispatchQueue.main.async {
             self.connectedClients.removeAll(where: { $0 === connection })
             self.connectedSendersByConnection.removeValue(forKey: connId)
+            self.lastPlaybackAcknowledgementByConnection.removeValue(
+                forKey: connId
+            )
             self.publishConnectedSenders()
             // Do NOT reset wirelessADBEnabled — once enabled, it stays enabled
             // to prevent re-running adb tcpip 5555 on every reconnect
@@ -917,24 +942,24 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
 
     // MARK: - VideoDecoderDelegate
 
-    func didDecode(sampleBuffer: CMSampleBuffer) {
-        lastDecodedFrameTime = Date()
-        if isReconnecting {
-            isReconnecting = false
-            reconnectAttempts = 0
-            stopReconnectTimer()
-            LogManager.shared.log("Receiver: Connection recovered — stream active")
-        }
+    func didDecode(frame: ReceiverDecodedVideoFrame) {
+        videoRenderer?.offer(frame)
         DispatchQueue.main.async {
-            self.videoRenderer?.enqueue(sampleBuffer)
+            self.lastDecodedFrameTime = Date()
+            if self.isReconnecting {
+                self.isReconnecting = false
+                self.reconnectAttempts = 0
+                self.stopReconnectTimer()
+                LogManager.shared.log(
+                    "Receiver: Connection recovered — stream active"
+                )
+            }
         }
     }
 
     func decoderDidChangeFormat() {
         LogManager.shared.log("Receiver: Format changed — flushing display layer")
-        DispatchQueue.main.async {
-            self.videoRenderer?.flushForFormatChange()
-        }
+        videoRenderer?.flushForFormatChange()
     }
 
     func decoderNeedsKeyframe() {
@@ -942,13 +967,61 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
         sendInputEvent(InputEvent(type: .command, keyCode: 999))
     }
 
-    func sendInputEvent(_ event: InputEvent) {
+    static func transmissionRepeatCount(for event: InputEvent) -> Int {
+        if event.type == .command,
+           (event.keyCode == 666 || event.keyCode == 888) {
+            return 1
+        }
+
+        let isCritical = event.type == .leftMouseDown
+            || event.type == .leftMouseUp
+            || event.type == .rightMouseDown
+            || event.type == .rightMouseUp
+            || event.type == .keyDown
+            || event.type == .keyUp
+            || event.type == .command
+        return isCritical ? 3 : 1
+    }
+
+    func requestFreshVideoFrame() {
+        sendInputEvent(InputEvent(type: .command, keyCode: 999))
+    }
+
+    private func sendPlaybackAcknowledgement(
+        _ metadata: ReceiverVideoFrameMetadata
+    ) {
+        guard let connectionID = metadata.sourceConnectionID else { return }
+
+        let now = Date()
+        if let lastSent = lastPlaybackAcknowledgementByConnection[connectionID],
+           now.timeIntervalSince(lastSent) < 0.25 {
+            return
+        }
+        lastPlaybackAcknowledgementByConnection[connectionID] = now
+
+        sendInputEvent(
+            InputEvent(
+                type: .command,
+                keyCode: 666,
+                streamID: String(metadata.streamID),
+                sequence: String(metadata.sequence),
+                presentationTimestampNanoseconds: String(
+                    metadata.presentationTimestampNanoseconds
+                )
+            ),
+            to: connectionID
+        )
+    }
+
+    func sendInputEvent(
+        _ event: InputEvent,
+        to sourceConnectionID: ObjectIdentifier? = nil
+    ) {
         if event.type != .command {
             adbInputInjector?.inject(event)
         }
 
-        let isCritical = (event.type == .leftMouseDown || event.type == .leftMouseUp || event.type == .rightMouseDown || event.type == .rightMouseUp || event.type == .keyDown || event.type == .keyUp || event.type == .command)
-        let repeatCount = isCritical ? 3 : 1
+        let repeatCount = Self.transmissionRepeatCount(for: event)
 
         guard let data = try? JSONEncoder().encode(event) else { return }
 
@@ -960,6 +1033,10 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
         networkQueue.async { [weak self] in
             guard let self = self else { return }
             for connection in self.connectedClients {
+                if let sourceConnectionID,
+                   ObjectIdentifier(connection) != sourceConnectionID {
+                    continue
+                }
                 for _ in 0..<repeatCount {
                     connection.send(content: packet, completion: .contentProcessed { _ in })
                 }

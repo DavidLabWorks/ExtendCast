@@ -6,7 +6,13 @@ import ScreenCaptureKit
 import IOKit.graphics
 
 
-private func extendCastIconPath(in rect: CGRect) -> CGPath {
+struct ExtendCastMenuBarIconPaths {
+    let outerDisplay: CGPath
+    let innerDisplay: CGPath
+    let arrow: CGPath
+}
+
+func extendCastMenuBarIconPaths(in rect: CGRect) -> ExtendCastMenuBarIconPaths {
     let designSize = CGSize(width: 18, height: 18)
     let scale = min(
         rect.width / designSize.width,
@@ -21,36 +27,47 @@ private func extendCastIconPath(in rect: CGRect) -> CGPath {
         CGPoint(x: offset.x + x * scale, y: offset.y + y * scale)
     }
 
-    let path = CGMutablePath()
-    path.move(to: point(14, 5.3))
-    path.addLine(to: point(14, 3.5))
-    path.addLine(to: point(10.5, 4))
-    path.addLine(to: point(3.5, 4))
-    path.addQuadCurve(
-        to: point(2, 5.5),
-        control: point(2, 4)
+    let outerRect = CGRect(
+        x: point(1.2, 1.8).x,
+        y: point(1.2, 1.8).y,
+        width: 15.6 * scale,
+        height: 14.4 * scale
     )
-    path.addLine(to: point(2, 12.5))
-    path.addQuadCurve(
-        to: point(3.5, 14),
-        control: point(2, 14)
+    let outerDisplay = CGPath(
+        roundedRect: outerRect,
+        cornerWidth: 3 * scale,
+        cornerHeight: 3 * scale,
+        transform: nil
     )
-    path.addLine(to: point(10.5, 14))
-    path.addLine(to: point(14, 15))
-    path.addLine(to: point(14, 13.2))
-    path.addLine(to: point(16, 13.7))
-    path.addQuadCurve(
-        to: point(17, 12.5),
-        control: point(17, 13.7)
-    )
-    path.addLine(to: point(17, 6.5))
-    path.addQuadCurve(
-        to: point(16, 5),
-        control: point(17, 5)
-    )
-    path.closeSubpath()
 
-    return path
+    let innerRect = CGRect(
+        x: point(4.1, 4.7).x,
+        y: point(4.1, 4.7).y,
+        width: 9.8 * scale,
+        height: 8.6 * scale
+    )
+    let innerDisplay = CGPath(
+        roundedRect: innerRect,
+        cornerWidth: 2 * scale,
+        cornerHeight: 2 * scale,
+        transform: nil
+    )
+
+    let arrow = CGMutablePath()
+    arrow.move(to: point(6.8, 7.5))
+    arrow.addLine(to: point(9.2, 7.5))
+    arrow.addLine(to: point(9.2, 6.6))
+    arrow.addLine(to: point(11.9, 9))
+    arrow.addLine(to: point(9.2, 11.4))
+    arrow.addLine(to: point(9.2, 10.5))
+    arrow.addLine(to: point(6.8, 10.5))
+    arrow.closeSubpath()
+
+    return ExtendCastMenuBarIconPaths(
+        outerDisplay: outerDisplay,
+        innerDisplay: innerDisplay,
+        arrow: arrow
+    )
 }
 
 func makeExtendCastMenuBarIcon() -> NSImage {
@@ -60,34 +77,28 @@ func makeExtendCastMenuBarIcon() -> NSImage {
             return false
         }
 
-        context.addPath(extendCastIconPath(in: rect))
-        context.setStrokeColor(NSColor.black.cgColor)
-        context.setLineWidth(1.7)
         context.setLineCap(.round)
         context.setLineJoin(.round)
-        context.strokePath()
+        context.setStrokeColor(NSColor.black.cgColor)
+        context.setLineWidth(1.2)
+
+        let paths = extendCastMenuBarIconPaths(in: rect)
+        for path in [paths.outerDisplay, paths.innerDisplay] {
+            context.addPath(path)
+            context.strokePath()
+        }
+        context.addPath(paths.arrow)
+        context.fillPath()
         return true
     }
     image.isTemplate = true
     return image
 }
 
-private struct ExtendCastMenuBarIcon: Shape {
-    func path(in rect: CGRect) -> Path {
-        Path(extendCastIconPath(in: rect))
-    }
-}
-
 private struct ExtendCastIconMark: View {
     var body: some View {
-        ExtendCastMenuBarIcon()
-            .stroke(
-                style: StrokeStyle(
-                    lineWidth: 1.7,
-                    lineCap: .round,
-                    lineJoin: .round
-                )
-            )
+        Image(nsImage: BetterCastSenderApp.menuBarIcon)
+            .renderingMode(.template)
             .frame(width: 18, height: 18)
     }
 }
@@ -143,10 +154,10 @@ struct BetterCastSenderApp: App {
             if hasCompletedOnboarding {
                 mainView
             } else {
-                OnboardingView(onComplete: {
+                SetupAssistantView(onComplete: {
                     hasCompletedOnboarding = true
                 })
-                .frame(minWidth: 520, minHeight: 600)
+                .frame(minWidth: 620, minHeight: 480)
                 .background(Color(nsColor: .windowBackgroundColor))
             }
         }
@@ -674,358 +685,6 @@ struct SpotlightCutoutShape: Shape {
             path = path.subtracting(cutout)
         }
         return path
-    }
-}
-
-// MARK: - Onboarding View
-
-struct OnboardingView: View {
-    let onComplete: () -> Void
-
-    @State private var currentStep = 0
-    @State private var screenRecordingGranted = false
-    @State private var accessibilityGranted = false
-    @State private var pollTimer: Timer?
-
-    private let steps = ["Screen Recording", "Accessibility", "Ready"]
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            HStack(spacing: 16) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(.thinMaterial)
-                        .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
-                    Image(nsImage: NSApp.applicationIconImage)
-                        .resizable()
-                        .frame(width: 66, height: 66)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-                .frame(width: 82, height: 82)
-
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Welcome to ExtendCast")
-                        .font(.system(size: 26, weight: .semibold))
-                        .tracking(-0.5)
-
-                    Text("Turn the devices you already own into a seamless extension of your Mac.")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 40)
-            .padding(.top, 34)
-            .padding(.bottom, 26)
-
-            // Step indicators
-            HStack(spacing: 24) {
-                ForEach(0..<steps.count, id: \.self) { index in
-                    StepIndicator(
-                        number: index + 1,
-                        title: steps[index],
-                        isActive: currentStep == index,
-                        isCompleted: stepCompleted(index)
-                    )
-                    if index < steps.count - 1 {
-                        Rectangle()
-                            .fill(stepCompleted(index) ? Color.green : Color(nsColor: .separatorColor))
-                            .frame(height: 2)
-                            .frame(maxWidth: 40)
-                    }
-                }
-            }
-            .padding(.horizontal, 40)
-            .padding(.bottom, 30)
-
-            // Step content
-            VStack(spacing: 20) {
-                switch currentStep {
-                case 0:
-                    screenRecordingStep
-                case 1:
-                    accessibilityStep
-                default:
-                    readyStep
-                }
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 40)
-
-            Spacer()
-
-            // Navigation buttons
-            HStack {
-                if currentStep > 0 {
-                    Button("Back") {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            currentStep -= 1
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                }
-
-                Spacer()
-
-                if currentStep < 2 {
-                    Button(stepCompleted(currentStep) ? "Next" : "Skip") {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            currentStep += 1
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                } else {
-                    Button("Get Started") {
-                        onComplete()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .tint(.green)
-                }
-            }
-            .padding(.horizontal, 40)
-            .padding(.bottom, 30)
-        }
-        .background {
-            LinearGradient(
-                colors: [
-                    Color.accentColor.opacity(0.055),
-                    Color(nsColor: .windowBackgroundColor),
-                    Color(nsColor: .windowBackgroundColor)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        }
-        .onAppear {
-            checkPermissions()
-            startPolling()
-        }
-        .onDisappear {
-            pollTimer?.invalidate()
-        }
-    }
-
-    // MARK: - Step Views
-
-    private var screenRecordingStep: some View {
-        PermissionStepCard(
-            icon: "record.circle",
-            iconColor: .red,
-            title: "Screen Recording",
-            description: "ExtendCast needs Screen Recording permission to capture your display and stream it to receivers.",
-            isGranted: screenRecordingGranted,
-            actionTitle: "Open Screen Recording Settings",
-            action: {
-                // macOS 13+ deep link
-                if let url = URL(string: "x-apple.systempreferences:com.apple.PrivacySecurity.extension?Privacy_ScreenCapture") {
-                    NSWorkspace.shared.open(url)
-                }
-                // Fallback for older macOS
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-                    NSWorkspace.shared.open(url)
-                }
-            }
-        )
-    }
-
-    private var accessibilityStep: some View {
-        PermissionStepCard(
-            icon: "hand.point.up.left",
-            iconColor: .blue,
-            title: "Accessibility",
-            description: "Accessibility permission lets ExtendCast relay mouse and keyboard input from your receivers back to this Mac.",
-            isGranted: accessibilityGranted,
-            actionTitle: "Open Accessibility Settings",
-            action: {
-                let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-                _ = AXIsProcessTrustedWithOptions(options)
-            }
-        )
-    }
-
-    private var readyStep: some View {
-        VStack(spacing: 16) {
-            DashboardCard {
-                VStack(spacing: 16) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.green)
-
-                    Text("You're all set!")
-                        .font(.system(size: 20, weight: .semibold))
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        permissionRow("Screen Recording", granted: screenRecordingGranted)
-                        permissionRow("Accessibility", granted: accessibilityGranted)
-                    }
-                    .padding(.top, 4)
-
-                    if !screenRecordingGranted || !accessibilityGranted {
-                        Text("Some permissions are missing. You can grant them later in System Settings, but some features won't work until they're enabled.")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-            }
-        }
-    }
-
-    private func permissionRow(_ name: String, granted: Bool) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: granted ? "checkmark.circle.fill" : "xmark.circle")
-                .foregroundStyle(granted ? .green : .orange)
-            Text(name)
-                .font(.system(size: 14))
-            Spacer()
-            Text(granted ? "Granted" : "Not granted")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(granted ? .green : .orange)
-        }
-    }
-
-    // MARK: - Helpers
-
-    private func stepCompleted(_ step: Int) -> Bool {
-        switch step {
-        case 0: return screenRecordingGranted
-        case 1: return accessibilityGranted
-        case 2: return true
-        default: return false
-        }
-    }
-
-    private func checkPermissions() {
-        // Screen Recording: check via CGPreflightScreenCaptureAccess (macOS 10.15+)
-        screenRecordingGranted = CGPreflightScreenCaptureAccess()
-
-        // Accessibility: check without prompting
-        accessibilityGranted = AXIsProcessTrusted()
-    }
-
-    private func startPolling() {
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
-            checkPermissions()
-            // Auto-advance when permission is granted on current step
-            if currentStep == 0 && screenRecordingGranted {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    currentStep = 1
-                }
-            } else if currentStep == 1 && accessibilityGranted {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    currentStep = 2
-                }
-            }
-        }
-    }
-}
-
-// MARK: - Step Indicator
-
-struct StepIndicator: View {
-    let number: Int
-    let title: String
-    let isActive: Bool
-    let isCompleted: Bool
-
-    var body: some View {
-        VStack(spacing: 6) {
-            ZStack {
-                Circle()
-                    .fill(isCompleted ? Color.green : (isActive ? Color.accentColor : Color(nsColor: .separatorColor)))
-                    .frame(width: 32, height: 32)
-                if isCompleted {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                } else {
-                    Text("\(number)")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(isActive ? .white : .secondary)
-                }
-            }
-            Text(title)
-                .font(.system(size: 11, weight: isActive ? .semibold : .regular))
-                .foregroundStyle(isActive ? .primary : .secondary)
-        }
-    }
-}
-
-// MARK: - Permission Step Card
-
-struct PermissionStepCard: View {
-    let icon: String
-    let iconColor: Color
-    let title: String
-    let description: String
-    let isGranted: Bool
-    let actionTitle: String
-    let action: () -> Void
-
-    var body: some View {
-        DashboardCard {
-            VStack(spacing: 16) {
-                HStack(spacing: 14) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(iconColor.opacity(0.12))
-                            .frame(width: 48, height: 48)
-                        Image(systemName: icon)
-                            .font(.system(size: 22))
-                            .foregroundStyle(iconColor)
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 8) {
-                            Text(title)
-                                .font(.system(size: 16, weight: .semibold))
-                            if isGranted {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
-                            }
-                        }
-                        Text(description)
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-
-                if isGranted {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                        Text("Permission granted")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(.green)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.green.opacity(0.08))
-                    )
-                } else {
-                    Button(action: action) {
-                        HStack {
-                            Image(systemName: "gear")
-                            Text(actionTitle)
-                        }
-                        .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                }
-            }
-            .padding(.vertical, 4)
-        }
     }
 }
 
@@ -4072,6 +3731,8 @@ struct ConnectionPipeline {
     var screenRecorder: ScreenRecorder?
     var videoEncoder: VideoEncoder?
     var audioEncoder: AudioEncoder?
+    var streamFeedbackController: StreamFeedbackController?
+    var captureRecoveryAttempts: Int = 0
 
     // Adaptive: P2P (AWDL) connections get full quality; infrastructure gets throttled
     var isP2P: Bool = false
@@ -5066,9 +4727,32 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private func suspendSession(for reason: SessionSuspensionReason) {
         sessionSuspensionReasons.insert(reason)
         sessionRecoveryGeneration &+= 1
+        let generation = sessionRecoveryGeneration
         sessionRecoveryWorkItem?.cancel()
         sessionRecoveryWorkItem = nil
         sessionRecoveryDeadline = nil
+
+        // Stop producing media immediately. Keeping capture alive while the
+        // screen is locked fills TCP with frames that cannot be made current
+        // again after unlock.
+        let recorders = pipelines.compactMap { connectionId, pipeline in
+            pipeline.screenRecorder.map { (connectionId, $0) }
+        }
+        Task { @MainActor [weak self] in
+            for (_, recorder) in recorders {
+                await recorder.stopCaptureAndWait()
+            }
+            guard let self,
+                  self.sessionRecoveryGeneration == generation,
+                  !self.sessionSuspensionReasons.isEmpty else { return }
+            for (connectionId, recorder) in recorders
+                where self.pipelines[connectionId]?.screenRecorder === recorder {
+                self.pipelines[connectionId]?.screenRecorder = nil
+                self.pipelines[connectionId]?.videoEncoder = nil
+                self.pipelines[connectionId]?.audioEncoder = nil
+                self.pipelines[connectionId]?.streamFeedbackController?.reset()
+            }
+        }
     }
 
     private func resumeSession(
@@ -5147,6 +4831,23 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                   self.sessionSuspensionReasons.isEmpty else { return }
 
             for connectionId in connectionIds where self.pipelines[connectionId] != nil {
+                if let manager = self.pipelines[connectionId]?.virtualDisplayManager,
+                   let displayID = manager.displayID {
+                    let bounds = CGDisplayBounds(displayID)
+                    let action = Self.virtualDisplayRecoveryAction(
+                        hasManager: true,
+                        displayIsActive: CGDisplayIsActive(displayID) != 0,
+                        displayHasBounds: bounds.width > 0 && bounds.height > 0
+                    )
+                    if action == .recreate {
+                        LogManager.shared.log(
+                            "Sender: Virtual display \(displayID) is stale after resume; recreating"
+                        )
+                        manager.destroyDisplay()
+                        self.pipelines[connectionId]?.virtualDisplayManager = nil
+                        InputHandler.shared.removeDisplayBounds(for: connectionId)
+                    }
+                }
                 self.pipelines[connectionId]?.screenRecorder = nil
                 self.pipelines[connectionId]?.videoEncoder = nil
                 self.pipelines[connectionId]?.audioEncoder = nil
@@ -7100,14 +6801,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
 
     func openPrivacySettings() {
-        // macOS 13+ Deep Link
-        if let url = URL(string: "x-apple.systempreferences:com.apple.PrivacySecurity.extension?Privacy_ScreenCapture") {
-            NSWorkspace.shared.open(url)
-        }
-        // Fallback for older macOS
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-            NSWorkspace.shared.open(url)
-        }
+        PrivacySettingsLink.open(.screenRecording)
     }
 
     func resetScreenCapturePermissions() {
@@ -7118,7 +6812,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         // Reset Screen Recording
         let screenCapture = Process()
         screenCapture.executableURL = URL(fileURLWithPath: BCConstants.tccutilPath)
-        screenCapture.arguments = ["reset", "ScreenCapture", "com.extendcast.app"]
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier else {
+            LogManager.shared.log("Permissions: Bundle identifier is unavailable")
+            return
+        }
+        screenCapture.arguments = ["reset", "ScreenCapture", bundleIdentifier]
         do {
             try screenCapture.run()
             screenCapture.waitUntilExit()
@@ -7136,7 +6834,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         // Reset Accessibility (for mouse/keyboard control)
         let accessibility = Process()
         accessibility.executableURL = URL(fileURLWithPath: BCConstants.tccutilPath)
-        accessibility.arguments = ["reset", "Accessibility", "com.extendcast.app"]
+        accessibility.arguments = ["reset", "Accessibility", bundleIdentifier]
         do {
             try accessibility.run()
             accessibility.waitUntilExit()
@@ -7545,6 +7243,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                                 } else if event.type == .command && event.keyCode == 777 {
                                     // Screen info from receiver: deltaX=width, deltaY=height (pixels)
                                     self?.handleScreenInfo(for: connectionId, width: Int(event.deltaX), height: Int(event.deltaY))
+                                } else if event.type == .command && event.keyCode == 666,
+                                          let streamID = event.streamID.flatMap(UInt64.init),
+                                          let timestamp = event.presentationTimestampNanoseconds.flatMap(UInt64.init) {
+                                    self?.pipelines[connectionId]?.streamFeedbackController?.notePresentedFrame(
+                                        streamID: streamID,
+                                        timestampNanoseconds: timestamp
+                                    )
                                 } else if self?.isDuplicateEvent(event.eventId) == false {
                                     InputHandler.shared.handle(event: event, for: connectionId)
                                 }
@@ -7590,6 +7295,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                                 self?.pipelines[connectionId]?.videoEncoder?.forceKeyframe()
                             } else if event.type == .command && event.keyCode == 777 {
                                 self?.handleScreenInfo(for: connectionId, width: Int(event.deltaX), height: Int(event.deltaY))
+                            } else if event.type == .command && event.keyCode == 666,
+                                      let streamID = event.streamID.flatMap(UInt64.init),
+                                      let timestamp = event.presentationTimestampNanoseconds.flatMap(UInt64.init) {
+                                self?.pipelines[connectionId]?.streamFeedbackController?.notePresentedFrame(
+                                    streamID: streamID,
+                                    timestampNanoseconds: timestamp
+                                )
                             } else if self?.isDuplicateEvent(event.eventId) == false {
                                 InputHandler.shared.handle(event: event, for: connectionId)
                             }
@@ -7802,7 +7514,14 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         // P2P: tight 0.1s rate limit window prevents AWDL buffer bloat
         // Infrastructure: loose 1.0s window lets the encoder handle burst scenes naturally
         let rateLimitWindow: Double = isP2P ? 0.1 : 1.0
-        let encoder = VideoEncoder(connectionId: connectionId, width: captureWidth, height: captureHeight, bitrate: bitrate, expectedFPS: fps, keyframeIntervalSeconds: keyframeInterval, rateLimitWindow: rateLimitWindow)
+        let feedbackController = StreamFeedbackController(maximumFPS: fps)
+        feedbackController.onTargetFPSChanged = { targetFPS in
+            LogManager.shared.log(
+                "Sender: End-to-end playback pacing adjusted to \(targetFPS) FPS for \(serviceName)"
+            )
+        }
+        pipelines[connectionId]?.streamFeedbackController = feedbackController
+        let encoder = VideoEncoder(connectionId: connectionId, width: captureWidth, height: captureHeight, bitrate: bitrate, expectedFPS: fps, keyframeIntervalSeconds: keyframeInterval, rateLimitWindow: rateLimitWindow, feedbackController: feedbackController)
         encoder.delegate = self
         pipelines[connectionId]?.videoEncoder = encoder
 
@@ -7823,15 +7542,69 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             targetDisplayID: targetDisplayID,
             width: captureWidth,
             height: captureHeight,
-            captureFPS: Int32(fps)
+            captureFPS: Int32(fps),
+            frameAdmissionController: feedbackController
         )
         recorder.captureAudio = audioEnabled
         recorder.audioEncoder = audioEnc
+        recorder.onUnexpectedStop = { [weak self, weak recorder] in
+            DispatchQueue.main.async {
+                guard let self, let recorder,
+                      self.pipelines[connectionId]?.screenRecorder === recorder,
+                      self.sessionSuspensionReasons.isEmpty else { return }
+                self.handleCaptureStartResult(
+                    connectionId: connectionId,
+                    recorder: recorder,
+                    succeeded: false
+                )
+            }
+        }
         pipelines[connectionId]?.screenRecorder = recorder
 
-        Task {
-            await recorder.startCapture()
+        Task { @MainActor [weak self, weak recorder] in
+            guard let recorder else { return }
+            let succeeded = await recorder.startCapture()
+            self?.handleCaptureStartResult(
+                connectionId: connectionId,
+                recorder: recorder,
+                succeeded: succeeded
+            )
         }
+    }
+
+    private func handleCaptureStartResult(
+        connectionId: UUID,
+        recorder: ScreenRecorder,
+        succeeded: Bool
+    ) {
+        guard pipelines[connectionId]?.screenRecorder === recorder else { return }
+        if succeeded {
+            pipelines[connectionId]?.captureRecoveryAttempts = 0
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self, weak recorder] in
+                guard let self, let recorder,
+                      self.pipelines[connectionId]?.screenRecorder === recorder,
+                      self.sessionSuspensionReasons.isEmpty,
+                      !recorder.hasProducedVideoFrame else { return }
+                LogManager.shared.log(
+                    "Sender: Capture started but produced no video frame; rebuilding pipeline"
+                )
+                self.handleCaptureStartResult(
+                    connectionId: connectionId,
+                    recorder: recorder,
+                    succeeded: false
+                )
+            }
+            return
+        }
+        guard sessionSuspensionReasons.isEmpty else { return }
+
+        let attempts = (pipelines[connectionId]?.captureRecoveryAttempts ?? 0) + 1
+        pipelines[connectionId]?.captureRecoveryAttempts = attempts
+        let delay = min(0.5 * pow(2.0, Double(min(attempts - 1, 3))), 4.0)
+        LogManager.shared.log(
+            "Sender: Capture unavailable; recovery attempt \(attempts) in \(delay)s"
+        )
+        scheduleCaptureRecovery(reason: "capture watchdog", delay: delay)
     }
 
     // VideoEncoderDelegate - Send to the specific connection that owns this encoder

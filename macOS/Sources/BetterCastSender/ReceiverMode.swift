@@ -168,6 +168,11 @@ class ReceiverManager: ObservableObject {
     @Published var isRunning = false
 
     private var cancellables = Set<AnyCancellable>()
+    private var workspaceSessionObservers: [NSObjectProtocol] = []
+    private var distributedSessionObservers: [NSObjectProtocol] = []
+    private var sessionSuspensionReasons: Set<SessionSuspensionReason> = []
+    private var sessionRecoveryWorkItem: DispatchWorkItem?
+    private var sessionRecoveryGeneration: UInt64 = 0
 
     private init() {
         // Forward child objectWillChange so SwiftUI redraws when nested state changes
@@ -200,6 +205,8 @@ class ReceiverManager: ObservableObject {
                 self?.windowController.resizeToFitVideo(size)
             }
             .store(in: &cancellables)
+
+        startSessionLifecycleMonitoring()
     }
 
     func start() {
@@ -214,6 +221,10 @@ class ReceiverManager: ObservableObject {
     }
 
     func stop() {
+        sessionRecoveryGeneration &+= 1
+        sessionRecoveryWorkItem?.cancel()
+        sessionRecoveryWorkItem = nil
+        sessionSuspensionReasons.removeAll()
         windowController.close()
         networkListener.stop()
         videoDecoder.reset()
@@ -224,6 +235,125 @@ class ReceiverManager: ObservableObject {
 
     func showWindow() {
         windowController.open(renderer: videoRenderer)
+    }
+
+    private func startSessionLifecycleMonitoring() {
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        let suspendNotifications: [
+            (Notification.Name, SessionSuspensionReason)
+        ] = [
+            (NSWorkspace.sessionDidResignActiveNotification, .inactive),
+            (NSWorkspace.willSleepNotification, .sleeping)
+        ]
+
+        for (name, reason) in suspendNotifications {
+            let observer = workspaceCenter.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.suspendReceiverSession(for: reason)
+            }
+            workspaceSessionObservers.append(observer)
+        }
+
+        workspaceSessionObservers.append(
+            workspaceCenter.addObserver(
+                forName: NSWorkspace.sessionDidBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.resumeReceiverSession(
+                    clearing: [.inactive, .locked, .sleeping],
+                    delay: 0.2
+                )
+            }
+        )
+
+        workspaceSessionObservers.append(
+            workspaceCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.resumeReceiverSession(
+                    clearing: [.sleeping],
+                    delay: 0.2
+                )
+            }
+        )
+
+        let distributedCenter = DistributedNotificationCenter.default()
+        distributedSessionObservers.append(
+            distributedCenter.addObserver(
+                forName: Notification.Name("com.apple.screenIsLocked"),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.suspendReceiverSession(for: .locked)
+            }
+        )
+        distributedSessionObservers.append(
+            distributedCenter.addObserver(
+                forName: Notification.Name("com.apple.screenIsUnlocked"),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.resumeReceiverSession(
+                    clearing: [.inactive, .locked, .sleeping],
+                    delay: 0.2
+                )
+            }
+        )
+    }
+
+    private func suspendReceiverSession(for reason: SessionSuspensionReason) {
+        guard isRunning else { return }
+        let insertion = sessionSuspensionReasons.insert(reason)
+        guard insertion.inserted else { return }
+
+        sessionRecoveryGeneration &+= 1
+        sessionRecoveryWorkItem?.cancel()
+        sessionRecoveryWorkItem = nil
+        videoRenderer.prepareForSessionSuspension()
+        videoDecoder.reset()
+        LogManager.shared.log(
+            "ReceiverMode: Suspended media pipeline for \(reason)"
+        )
+    }
+
+    private func resumeReceiverSession(
+        clearing reasons: Set<SessionSuspensionReason>,
+        delay: TimeInterval
+    ) {
+        guard isRunning else { return }
+        let wasSuspended = !sessionSuspensionReasons.isEmpty
+        sessionSuspensionReasons.subtract(reasons)
+        guard wasSuspended else { return }
+        guard sessionSuspensionReasons.isEmpty else { return }
+
+        sessionRecoveryGeneration &+= 1
+        let generation = sessionRecoveryGeneration
+        sessionRecoveryWorkItem?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self,
+                  self.isRunning,
+                  self.sessionRecoveryGeneration == generation,
+                  self.sessionSuspensionReasons.isEmpty else { return }
+            self.videoDecoder.reset()
+            self.videoRenderer.recoverAfterSessionResume()
+            self.networkListener.requestFreshVideoFrame()
+            self.sessionRecoveryWorkItem = nil
+            LogManager.shared.log(
+                "ReceiverMode: Media pipeline recovered after session resume"
+            )
+        }
+        sessionRecoveryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + delay,
+            execute: workItem
+        )
     }
 }
 

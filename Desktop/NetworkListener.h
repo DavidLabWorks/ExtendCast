@@ -17,6 +17,7 @@
 
 #include "InputEvent.h"
 #include "InboundSessionRegistry.h"
+#include "ReceiverRouteClassifier.h"
 
 class NetworkListener : public QObject {
     Q_OBJECT
@@ -82,6 +83,7 @@ private:
     void handleAudioData(QTcpSocket* socket, const QByteArray& data);
     void handleUdpPacket(const QByteArray& data);
     QString connectionIdFor(QTcpSocket* socket) const;
+    ReceiverAdvertisedRoute connectionRouteFor(QTcpSocket* socket) const;
     QString connectionModeFor(QTcpSocket* socket) const;
     void registerSocket(QTcpSocket* socket);
     void rejectUnidentifiedConnection(QTcpSocket* socket, const QString& reason);
@@ -92,6 +94,7 @@ private:
     QList<QTcpSocket*> m_clients;
     QHash<QTcpSocket*, QByteArray> m_tcpBuffers;
     QHash<QTcpSocket*, QString> m_connectionIds;
+    QHash<QTcpSocket*, ReceiverAdvertisedRoute> m_connectionRoutes;
     QHash<QString, QTcpSocket*> m_socketsByConnectionId;
     InboundSessionRegistry m_inboundSessions;
 

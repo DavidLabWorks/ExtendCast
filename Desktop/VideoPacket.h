@@ -73,6 +73,7 @@ inline bool parseHeader(
 inline CatchUpDecision planTcpVideoCatchUp(
     const std::uint8_t* tcpBuffer,
     std::size_t tcpBufferSize,
+    std::uint64_t preferredBufferedDurationNanoseconds,
     std::uint64_t maximumBufferedDurationNanoseconds,
     std::uint32_t maximumPacketSize,
     std::optional<LivePosition> livePosition = std::nullopt
@@ -133,7 +134,9 @@ inline CatchUpDecision planTcpVideoCatchUp(
         && newestVideoHeader->presentationTimestampNanoseconds
             < firstVideoHeader->presentationTimestampNanoseconds;
 
-    if (!bufferedStreamChanged && !currentStreamChanged && !timestampReset) {
+    const bool streamIsContinuous =
+        !bufferedStreamChanged && !currentStreamChanged && !timestampReset;
+    if (streamIsContinuous) {
         decision.bufferedDurationNanoseconds =
             newestVideoHeader->presentationTimestampNanoseconds
             - firstVideoHeader->presentationTimestampNanoseconds;
@@ -148,7 +151,7 @@ inline CatchUpDecision planTcpVideoCatchUp(
             }
         }
         if (decision.bufferedDurationNanoseconds
-            <= maximumBufferedDurationNanoseconds) {
+            <= preferredBufferedDurationNanoseconds) {
             return decision;
         }
     }
@@ -166,6 +169,15 @@ inline CatchUpDecision planTcpVideoCatchUp(
         // after skipping dependent frames to a newer keyframe.
         decision.resetDecoder =
             !bufferedStreamChanged && !currentStreamChanged;
+        return decision;
+    }
+
+    // A normal network burst may exceed the preferred latency budget before
+    // it contains a newer keyframe. Keep decoding until the hard limit rather
+    // than resetting a healthy stream during startup or routine batching.
+    if (streamIsContinuous
+        && decision.bufferedDurationNanoseconds
+            <= maximumBufferedDurationNanoseconds) {
         return decision;
     }
 

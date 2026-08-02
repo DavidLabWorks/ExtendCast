@@ -114,6 +114,7 @@ void NetworkListener::disconnectAll() {
     m_tcpBuffers.clear();
     m_identifiedConnections.clear();
     m_connectionIds.clear();
+    m_connectionRoutes.clear();
     m_socketsByConnectionId.clear();
     m_lastTcpCatchUpCheck.clear();
     m_lastTcpKeyframeRequest.clear();
@@ -162,14 +163,16 @@ QString NetworkListener::connectionIdFor(QTcpSocket* socket) const {
     return m_connectionIds.value(socket);
 }
 
-QString NetworkListener::connectionModeFor(QTcpSocket* socket) const {
-    if (!socket) return "Local Network";
+ReceiverAdvertisedRoute NetworkListener::connectionRouteFor(
+    QTcpSocket* socket
+) const {
+    if (!socket) return ReceiverAdvertisedRoute::excluded;
 
     bool hasLocalIpv4 = false;
     const quint32 localIpv4 = socket->localAddress().toIPv4Address(
         &hasLocalIpv4
     );
-    if (!hasLocalIpv4) return "Local Network";
+    if (!hasLocalIpv4) return ReceiverAdvertisedRoute::excluded;
 
     for (const auto& iface : QNetworkInterface::allInterfaces()) {
         std::vector<std::string> ipv4Addresses;
@@ -185,7 +188,7 @@ QString NetworkListener::connectionModeFor(QTcpSocket* socket) const {
         }
         if (!ownsLocalAddress) continue;
 
-        switch (classifyReceiverAdvertisedRoute(
+        return classifyReceiverAdvertisedRoute(
             detailedNetworkInterfaceDescription(iface).toStdString(),
             ipv4Addresses,
 #ifdef _WIN32
@@ -193,16 +196,25 @@ QString NetworkListener::connectionModeFor(QTcpSocket* socket) const {
 #else
             false
 #endif
-        )) {
-        case ReceiverAdvertisedRoute::wifi:
-            return "Wi-Fi";
-        case ReceiverAdvertisedRoute::ethernet:
-            return "Ethernet";
-        case ReceiverAdvertisedRoute::thunderbolt:
-            return "Thunderbolt Bridge";
-        case ReceiverAdvertisedRoute::excluded:
-            return "Local Network";
-        }
+        );
+    }
+    return ReceiverAdvertisedRoute::excluded;
+}
+
+QString NetworkListener::connectionModeFor(QTcpSocket* socket) const {
+    const auto routeIt = m_connectionRoutes.constFind(socket);
+    const auto route = routeIt != m_connectionRoutes.cend()
+        ? routeIt.value()
+        : connectionRouteFor(socket);
+    switch (route) {
+    case ReceiverAdvertisedRoute::wifi:
+        return "Wi-Fi";
+    case ReceiverAdvertisedRoute::ethernet:
+        return "Ethernet";
+    case ReceiverAdvertisedRoute::thunderbolt:
+        return "Thunderbolt Bridge";
+    case ReceiverAdvertisedRoute::excluded:
+        return "Local Network";
     }
     return "Local Network";
 }
@@ -218,6 +230,7 @@ void NetworkListener::registerSocket(QTcpSocket* socket) {
     m_clients.append(socket);
     m_tcpBuffers[socket] = QByteArray();
     m_connectionIds[socket] = connectionId;
+    m_connectionRoutes[socket] = connectionRouteFor(socket);
     m_socketsByConnectionId[connectionId] = socket;
     m_inboundSessions.open(
         connectionId.toStdString(),
@@ -274,9 +287,17 @@ void NetworkListener::catchUpStaleTcpVideo(
         };
     }
 
+    const auto preferredBufferedVideoNanoseconds =
+        preferredBufferedVideoNanosecondsFor(
+            m_connectionRoutes.value(
+                socket,
+                ReceiverAdvertisedRoute::excluded
+            )
+        );
     const auto decision = video_packet::planTcpVideoCatchUp(
         reinterpret_cast<const std::uint8_t*>(buffer.constData()),
         static_cast<std::size_t>(buffer.size()),
+        preferredBufferedVideoNanoseconds,
         kMaximumBufferedVideoNanoseconds,
         kMaxPacketSize,
         livePosition
@@ -303,9 +324,16 @@ void NetworkListener::catchUpStaleTcpVideo(
                 "discarded stale packets and resumed at the latest keyframe"
             );
         LogManager::instance().log(
-            QString("Receiver: Video backlog reached %1 ms; %2")
+            QString("Receiver: Video backlog reached %1 ms "
+                    "(preferred %2 ms, hard limit %3 ms); %4")
                 .arg(static_cast<qulonglong>(
                     decision.bufferedDurationNanoseconds / 1'000'000
+                ))
+                .arg(static_cast<qulonglong>(
+                    preferredBufferedVideoNanoseconds / 1'000'000
+                ))
+                .arg(static_cast<qulonglong>(
+                    kMaximumBufferedVideoNanoseconds / 1'000'000
                 ))
                 .arg(action)
         );
@@ -326,10 +354,17 @@ void NetworkListener::catchUpStaleTcpVideo(
 
     m_lastTcpKeyframeRequest[socket] = now;
     LogManager::instance().log(
-        QString("Receiver: Video backlog reached %1 ms; "
+        QString("Receiver: Video backlog reached %1 ms "
+                "(preferred %2 ms, hard limit %3 ms); "
                 "requesting a fresh keyframe")
             .arg(static_cast<qulonglong>(
                 decision.bufferedDurationNanoseconds / 1'000'000
+            ))
+            .arg(static_cast<qulonglong>(
+                preferredBufferedVideoNanoseconds / 1'000'000
+            ))
+            .arg(static_cast<qulonglong>(
+                kMaximumBufferedVideoNanoseconds / 1'000'000
             ))
     );
     writeInputEvent(
@@ -658,6 +693,7 @@ void NetworkListener::onTcpDisconnected() {
     m_tcpBuffers.remove(socket);
     m_identifiedConnections.remove(socket);
     m_connectionIds.remove(socket);
+    m_connectionRoutes.remove(socket);
     m_socketsByConnectionId.remove(connectionId);
     m_lastTcpCatchUpCheck.remove(socket);
     m_lastTcpKeyframeRequest.remove(socket);

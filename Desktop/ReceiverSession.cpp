@@ -20,13 +20,24 @@ ReceiverSession::ReceiverSession(
     , m_deviceId(deviceId)
     , m_deviceName(deviceName)
     , m_connectionId(connectionId)
-    , m_decoder(new VideoDecoder(this))
+    , m_decoder(new VideoDecoder())
     , m_renderer(new VideoRenderer())
     , m_inputHandler(new InputHandler(this))
     , m_audioDecoder(new AudioDecoder(this))
     , m_audioPlayer(new AudioPlayer(this))
     , m_window(new VideoWindow(m_renderer, m_inputHandler, ownerWindow))
 {
+    m_decoder->moveToThread(&m_decoderThread);
+    connect(
+        &m_decoderThread,
+        &QThread::finished,
+        m_decoder,
+        &QObject::deleteLater
+    );
+    m_decoderThread.setObjectName("ExtendCast video decoder");
+    m_decoderThread.start(QThread::HighPriority);
+    m_playbackAcknowledgementTimer.start();
+
     m_window->bindToDevice(m_deviceId, m_deviceName);
     m_inputHandler->attach(m_renderer);
 
@@ -34,7 +45,8 @@ ReceiverSession::ReceiverSession(
         m_decoder,
         &VideoDecoder::frameDecoded,
         m_renderer,
-        &VideoRenderer::onFrameDecoded
+        &VideoRenderer::onFrameDecoded,
+        Qt::DirectConnection
     );
     connect(
         m_decoder,
@@ -50,6 +62,32 @@ ReceiverSession::ReceiverSession(
         this,
         [this]() {
             emit keyframeRequested(m_deviceId);
+        }
+    );
+    connect(
+        m_renderer,
+        &VideoRenderer::framePresented,
+        this,
+        [this](
+            quint64 streamId,
+            quint64 sequence,
+            quint64 presentationTimestampNanoseconds
+        ) {
+            if (m_playbackAcknowledgementTimer.elapsed() < 250) {
+                return;
+            }
+            m_playbackAcknowledgementTimer.restart();
+            InputEvent acknowledgement(
+                InputEventType::Command,
+                0,
+                0,
+                kPlaybackAcknowledgementKeyCode
+            );
+            acknowledgement.streamId = QString::number(streamId);
+            acknowledgement.sequence = QString::number(sequence);
+            acknowledgement.presentationTimestampNanoseconds =
+                QString::number(presentationTimestampNanoseconds);
+            emit inputEvent(m_deviceId, acknowledgement);
         }
     );
     connect(
@@ -94,6 +132,9 @@ ReceiverSession::ReceiverSession(
 }
 
 ReceiverSession::~ReceiverSession() {
+    m_decoderThread.quit();
+    m_decoderThread.wait();
+    m_decoder = nullptr;
     if (m_window) {
         m_window->hide();
         delete m_window;
@@ -109,7 +150,7 @@ void ReceiverSession::replaceConnection(
 ) {
     m_connectionId = connectionId;
     m_deviceName = deviceName;
-    m_decoder->reset();
+    resetVideoDecoder();
     m_window->bindToDevice(m_deviceId, m_deviceName);
 }
 
@@ -118,13 +159,23 @@ void ReceiverSession::show() {
 }
 
 void ReceiverSession::resetVideoDecoder() {
-    m_decoder->reset();
+    if (!m_decoder) return;
+    QMetaObject::invokeMethod(
+        m_decoder,
+        [decoder = m_decoder]() { decoder->reset(); },
+        Qt::QueuedConnection
+    );
 }
 
 void ReceiverSession::decodeVideo(
     const QByteArray& data
 ) {
-    m_decoder->decode(data);
+    if (!m_decoder) return;
+    QMetaObject::invokeMethod(
+        m_decoder,
+        [decoder = m_decoder, data]() { decoder->decode(data); },
+        Qt::QueuedConnection
+    );
 }
 
 void ReceiverSession::decodeAudio(const QByteArray& data) {

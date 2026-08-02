@@ -7,7 +7,7 @@
     <key>CFBundleExecutable</key>
     <string>BetterCastSender</string>
     <key>CFBundleIdentifier</key>
-    <string>com.extendcast.app</string>
+    <string>com.ruobin521.extendcast</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
