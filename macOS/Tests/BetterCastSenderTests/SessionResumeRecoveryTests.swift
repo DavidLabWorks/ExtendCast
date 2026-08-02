@@ -3,6 +3,26 @@ import XCTest
 
 @MainActor
 final class SessionResumeRecoveryTests: XCTestCase {
+    func testLockAllowsTheLoginTransitionToReachTheRemoteDisplay() {
+        let inactivePlan = NetworkClient.sessionSuspensionPlan(for: .inactive)
+        let lockedPlan = NetworkClient.sessionSuspensionPlan(for: .locked)
+
+        XCTAssertGreaterThan(inactivePlan.captureGracePeriod, 0)
+        XCTAssertTrue(inactivePlan.forceKeyframeBeforeStop)
+        XCTAssertGreaterThan(lockedPlan.captureGracePeriod, 0)
+        XCTAssertTrue(lockedPlan.forceKeyframeBeforeStop)
+    }
+
+    func testSleepStopsCaptureWithoutWaitingForAVisualTransition() {
+        XCTAssertEqual(
+            NetworkClient.sessionSuspensionPlan(for: .sleeping),
+            SessionSuspensionPlan(
+                captureGracePeriod: 0,
+                forceKeyframeBeforeStop: false
+            )
+        )
+    }
+
     func testLongLockDoesNotTimeOutReceiverConnection() {
         let now = Date()
 

@@ -4,6 +4,11 @@ enum SessionResumeRecoveryAction: Equatable {
     case restartCapture
 }
 
+struct SessionSuspensionPlan: Equatable {
+    let captureGracePeriod: TimeInterval
+    let forceKeyframeBeforeStop: Bool
+}
+
 enum VirtualDisplayRecoveryAction: Equatable {
     case reuse
     case recreate
@@ -16,6 +21,27 @@ enum SessionSuspensionReason: Hashable {
 }
 
 extension NetworkClient {
+    static func sessionSuspensionPlan(
+        for reason: SessionSuspensionReason
+    ) -> SessionSuspensionPlan {
+        switch reason {
+        case .inactive, .locked:
+            // Session resign-active arrives before the lock notification on
+            // many macOS versions. Keep capture alive just long enough for the
+            // LoginWindow transition to reach the remote display, then stop
+            // the pipeline so a long lock cannot accumulate media.
+            return SessionSuspensionPlan(
+                captureGracePeriod: 1.25,
+                forceKeyframeBeforeStop: true
+            )
+        case .sleeping:
+            return SessionSuspensionPlan(
+                captureGracePeriod: 0,
+                forceKeyframeBeforeStop: false
+            )
+        }
+    }
+
     static func sessionResumeRecoveryAction(
         usesVirtualDisplay _: Bool
     ) -> SessionResumeRecoveryAction {

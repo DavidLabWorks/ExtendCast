@@ -4478,6 +4478,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private var cachedNetworkInterfacesByName: [String: NWInterface] = [:]
     private var workspaceSessionObservers: [NSObjectProtocol] = []
     private var distributedSessionObservers: [NSObjectProtocol] = []
+    private var sessionSuspensionWorkItem: DispatchWorkItem?
     private var sessionRecoveryWorkItem: DispatchWorkItem?
     private var sessionRecoveryDeadline: Date?
     private var sessionRecoveryGeneration: UInt64 = 0
@@ -4635,6 +4636,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         discoveryRemovalWorkItems.values.forEach { $0.cancel() }
         browserRecoveryWorkItems.values.forEach { $0.cancel() }
         discoverySearchWorkItem?.cancel()
+        sessionSuspensionWorkItem?.cancel()
         sessionRecoveryWorkItem?.cancel()
         workspaceSessionObservers.forEach {
             NSWorkspace.shared.notificationCenter.removeObserver($0)
@@ -4728,13 +4730,41 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         sessionSuspensionReasons.insert(reason)
         sessionRecoveryGeneration &+= 1
         let generation = sessionRecoveryGeneration
+        sessionSuspensionWorkItem?.cancel()
+        sessionSuspensionWorkItem = nil
         sessionRecoveryWorkItem?.cancel()
         sessionRecoveryWorkItem = nil
         sessionRecoveryDeadline = nil
 
-        // Stop producing media immediately. Keeping capture alive while the
-        // screen is locked fills TCP with frames that cannot be made current
-        // again after unlock.
+        let plan = Self.sessionSuspensionPlan(for: reason)
+        if plan.forceKeyframeBeforeStop {
+            for pipeline in pipelines.values {
+                pipeline.videoEncoder?.forceKeyframe()
+            }
+        }
+
+        let work = DispatchWorkItem { [weak self] in
+            self?.stopCaptureForSuspendedSession(generation: generation)
+        }
+        sessionSuspensionWorkItem = work
+        if plan.captureGracePeriod == 0 {
+            work.perform()
+        } else {
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + plan.captureGracePeriod,
+                execute: work
+            )
+        }
+    }
+
+    private func stopCaptureForSuspendedSession(generation: UInt64) {
+        guard sessionRecoveryGeneration == generation,
+              !sessionSuspensionReasons.isEmpty else { return }
+        sessionSuspensionWorkItem = nil
+
+        // The bounded grace period above lets the macOS lock transition reach
+        // the receiver. Stop afterward so a long lock cannot fill transport or
+        // decoder queues with media that will be stale after unlock.
         let recorders = pipelines.compactMap { connectionId, pipeline in
             pipeline.screenRecorder.map { (connectionId, $0) }
         }
@@ -4763,6 +4793,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         sessionSuspensionReasons.subtract(reasons)
         guard sessionSuspensionReasons.isEmpty else { return }
 
+        sessionSuspensionWorkItem?.cancel()
+        sessionSuspensionWorkItem = nil
         let now = Date()
         for connectionId in pipelines.keys {
             pipelines[connectionId]?.lastHeartbeat = now
