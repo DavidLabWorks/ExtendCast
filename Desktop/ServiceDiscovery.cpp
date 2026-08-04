@@ -1,4 +1,5 @@
 #include "ServiceDiscovery.h"
+#include "HardwareDecodeSupport.h"
 #include "MainWindow.h"  // for LogManager
 #include "NetworkInterfaceDescription.h"
 #include "ReceiverRouteClassifier.h"
@@ -140,6 +141,8 @@ QByteArray ServiceDiscovery::buildAdvertisementTxtRecord() const {
         QByteArray("rv=1"),
         QByteArray("routes=")
             + QStringList(routeEndpoints.keys()).join(",").toUtf8(),
+        QByteArray("decode=")
+            + (hardwareH264DecodeAvailable() ? "hw" : "sw"),
     };
     for (auto endpoints = routeEndpoints.cbegin();
          endpoints != routeEndpoints.cend();
@@ -175,6 +178,10 @@ void ServiceDiscovery::startAdvertising(uint16_t tcpPort) {
     QByteArray svcName = svcStr.toUtf8();
     const QByteArray txtRecord = buildAdvertisementTxtRecord();
     m_cachedAdvertisementTxtRecord = txtRecord;
+    MDNS_LOG(
+        QString("mDNS: Advertising decode=%1")
+            .arg(hardwareH264DecodeAvailable() ? "hw" : "sw")
+    );
     DNSServiceErrorType err = DNSServiceRegister(
         &ref, 0, 0, svcName.constData(), "_bettercast._tcp",
         nullptr, nullptr, htons(tcpPort),
@@ -220,8 +227,11 @@ void ServiceDiscovery::startAdvertising(uint16_t tcpPort) {
     auto addrs = getLocalAddresses();
     QStringList ipStrs;
     for (const auto& a : addrs) ipStrs.append(a.toString());
-    MDNS_LOG(QString("mDNS: Advertising \"%1\" on port %2 — IPs: %3")
-             .arg(m_serviceName).arg(tcpPort).arg(ipStrs.join(", ")));
+    MDNS_LOG(QString("mDNS: Advertising \"%1\" on port %2 — IPs: %3 (decode=%4)")
+             .arg(m_serviceName)
+             .arg(tcpPort)
+             .arg(ipStrs.join(", "))
+             .arg(hardwareH264DecodeAvailable() ? "hw" : "sw"));
 }
 
 void ServiceDiscovery::stopAdvertising() {

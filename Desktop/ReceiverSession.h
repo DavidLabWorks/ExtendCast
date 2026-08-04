@@ -7,6 +7,7 @@
 #include <QThread>
 
 #include "InputEvent.h"
+#include "VideoDecodeQueue.h"
 
 class AudioDecoder;
 class AudioPlayer;
@@ -38,6 +39,8 @@ public:
     );
     void show();
     void resetVideoDecoder();
+    void noteCatchUpToBufferedKeyframe();
+    void noteCatchUpWaitingForKeyframe();
     void decodeVideo(const QByteArray& data);
     void decodeAudio(const QByteArray& data);
 
@@ -50,6 +53,8 @@ signals:
     void windowClosed(const QString& deviceId);
 
 private:
+    void requestKeyframeThrottled(const char* reason);
+
     QString m_deviceId;
     QString m_deviceName;
     QString m_connectionId;
@@ -61,4 +66,9 @@ private:
     VideoWindow* m_window = nullptr;
     QThread m_decoderThread;
     QElapsedTimer m_playbackAcknowledgementTimer;
+    QElapsedTimer m_keyframeRequestCooldown;
+    VideoDecodeQueue<QByteArray> m_videoDecodeQueue{
+        500'000'000,
+        30,
+    };
 };

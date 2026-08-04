@@ -53,6 +53,8 @@ signals:
         const QByteArray& data
     );
     void videoStreamResetRequired(const QString& deviceId);
+    void videoStreamCatchUpToKeyframe(const QString& deviceId);
+    void videoStreamCatchUpWaitingForKeyframe(const QString& deviceId);
     void statusChanged(const QString& status);
 
 public slots:
@@ -122,7 +124,7 @@ private:
     static constexpr uint64_t kMaximumBufferedVideoNanoseconds =
         500'000'000;
     static constexpr int kTcpCatchUpCheckIntervalMs = 100;
-    static constexpr int kTcpKeyframeRequestIntervalMs = 500;
+    static constexpr int kTcpKeyframeRequestIntervalMs = 2000;
 
     // UDP reassembly
     struct UdpFrameEntry {

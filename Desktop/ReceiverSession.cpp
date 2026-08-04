@@ -10,6 +10,10 @@
 
 #include <QSize>
 
+namespace {
+constexpr int kKeyframeRequestCooldownMs = 2000;
+}
+
 ReceiverSession::ReceiverSession(
     const QString& deviceId,
     const QString& deviceName,
@@ -37,6 +41,7 @@ ReceiverSession::ReceiverSession(
     m_decoderThread.setObjectName("ExtendCast video decoder");
     m_decoderThread.start(QThread::HighPriority);
     m_playbackAcknowledgementTimer.start();
+    m_keyframeRequestCooldown.invalidate();
 
     m_window->bindToDevice(m_deviceId, m_deviceName);
     m_inputHandler->attach(m_renderer);
@@ -61,8 +66,11 @@ ReceiverSession::ReceiverSession(
         &VideoDecoder::keyframeNeeded,
         this,
         [this]() {
-            emit keyframeRequested(m_deviceId);
-        }
+            if (m_videoDecodeQueue.waitForKeyframeAfterDecodeError()) {
+                requestKeyframeThrottled("decode error");
+            }
+        },
+        Qt::DirectConnection
     );
     connect(
         m_renderer,
@@ -159,7 +167,10 @@ void ReceiverSession::show() {
 }
 
 void ReceiverSession::resetVideoDecoder() {
-    if (!m_decoder) return;
+    m_videoDecodeQueue.clearForStreamReset();
+    if (!m_decoder) {
+        return;
+    }
     QMetaObject::invokeMethod(
         m_decoder,
         [decoder = m_decoder]() { decoder->reset(); },
@@ -167,13 +178,74 @@ void ReceiverSession::resetVideoDecoder() {
     );
 }
 
+void ReceiverSession::noteCatchUpToBufferedKeyframe() {
+    m_videoDecodeQueue.armFlushBeforeNextFrame();
+}
+
+void ReceiverSession::noteCatchUpWaitingForKeyframe() {
+    m_videoDecodeQueue.waitForRemoteKeyframe();
+}
+
+void ReceiverSession::requestKeyframeThrottled(const char* reason) {
+    if (m_keyframeRequestCooldown.isValid()
+        && m_keyframeRequestCooldown.elapsed() < kKeyframeRequestCooldownMs) {
+        return;
+    }
+    m_keyframeRequestCooldown.start();
+    LogManager::instance().log(
+        QString("Decoder: Requesting keyframe (%1)").arg(reason)
+    );
+    emit keyframeRequested(m_deviceId);
+}
+
 void ReceiverSession::decodeVideo(
     const QByteArray& data
 ) {
     if (!m_decoder) return;
+
+    video_packet::Header header;
+    if (!video_packet::parseHeader(
+            reinterpret_cast<const std::uint8_t*>(data.constData()),
+            static_cast<std::size_t>(data.size()),
+            header
+        )) {
+        return;
+    }
+
+    const auto result = m_videoDecodeQueue.enqueue(data, header);
+    if (result.discardedFrames > 0) {
+        LogManager::instance().log(
+            QString("Decoder: Discarded %1 queued frame(s) to catch up")
+                .arg(static_cast<qulonglong>(result.discardedFrames))
+        );
+    }
+    if (result.requestKeyframe) {
+        requestKeyframeThrottled("decode queue latency budget");
+    }
+    if (!result.scheduleDrain) {
+        return;
+    }
+
     QMetaObject::invokeMethod(
         m_decoder,
-        [decoder = m_decoder, data]() { decoder->decode(data); },
+        [
+            decoder = m_decoder,
+            queue = &m_videoDecodeQueue
+        ]() {
+            while (const auto item = queue->takeNext()) {
+                switch (item->resumeAction) {
+                case VideoDecodeResumeAction::Flush:
+                    decoder->flushForKeyframeResume();
+                    break;
+                case VideoDecodeResumeAction::HardReset:
+                    decoder->reset();
+                    break;
+                case VideoDecodeResumeAction::Continue:
+                    break;
+                }
+                decoder->decode(item->packet);
+            }
+        },
         Qt::QueuedConnection
     );
 }

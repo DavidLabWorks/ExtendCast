@@ -164,11 +164,9 @@ inline CatchUpDecision planTcpVideoCatchUp(
             || timestampReset);
     if (keyframeAdvancesPlayback) {
         decision.discardBytes = *newestStreamKeyframeOffset;
-        // The normal frame handler resets the decoder when the stream ID
-        // changes. Catch-up only needs to reset within the current stream,
-        // after skipping dependent frames to a newer keyframe.
-        decision.resetDecoder =
-            !bufferedStreamChanged && !currentStreamChanged;
+        // Skip to an in-band IDR without tearing the decoder down. Stream-ID
+        // changes are handled when the kept keyframe is decoded.
+        decision.resetDecoder = false;
         return decision;
     }
 

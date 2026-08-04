@@ -2983,6 +2983,7 @@ struct DiscoveredService: Identifiable {
     let advertisedRouteEndpoints: [
         ReceiverAdvertisedRoute: Set<String>
     ]
+    let hardwareDecodeCapable: Bool
 
     init(
         name: String,
@@ -2992,7 +2993,8 @@ struct DiscoveredService: Identifiable {
         advertisedRoutes: Set<ReceiverAdvertisedRoute>? = nil,
         advertisedRouteEndpoints: [
             ReceiverAdvertisedRoute: Set<String>
-        ] = [:]
+        ] = [:],
+        hardwareDecodeCapable: Bool = false
     ) {
         self.name = name
         self.endpoint = endpoint
@@ -3016,6 +3018,7 @@ struct DiscoveredService: Identifiable {
             }
         )
         self.advertisedRouteEndpoints = advertisedRouteEndpoints
+        self.hardwareDecodeCapable = hardwareDecodeCapable
     }
 
     var supportsEthernetConnection: Bool {
@@ -3056,7 +3059,8 @@ struct DiscoveredService: Identifiable {
             ).sorted { $0.name < $1.name },
             connectionEndpoints: mergedEndpoints,
             advertisedRoutes: advertisedRoutes.union(other.advertisedRoutes),
-            advertisedRouteEndpoints: mergedRouteEndpoints
+            advertisedRouteEndpoints: mergedRouteEndpoints,
+            hardwareDecodeCapable: hardwareDecodeCapable || other.hardwareDecodeCapable
         )
     }
 
@@ -3236,54 +3240,6 @@ enum BonjourReachabilityStateDecision: Equatable {
         @unknown default:
             return .wait
         }
-    }
-}
-
-private enum ConnectDiagnostics {
-    static let tag = "[DEBUG-CONNECT-7F3A]"
-
-    static func log(_ message: String) {
-        LogManager.shared.log("\(tag) \(message)")
-    }
-
-    static func stateSummary(_ state: NWConnection.State) -> String {
-        switch state {
-        case .setup:
-            return "setup"
-        case .preparing:
-            return "preparing"
-        case .ready:
-            return "ready"
-        case .waiting(let error):
-            return "waiting error=\(error)"
-        case .failed(let error):
-            return "failed error=\(error)"
-        case .cancelled:
-            return "cancelled"
-        @unknown default:
-            return "unknown"
-        }
-    }
-
-    static func pathSummary(_ path: NWPath?) -> String {
-        guard let path else { return "path=nil" }
-        let interfaces = path.availableInterfaces.map {
-            "\($0.name):\($0.type)"
-        }.joined(separator: ",")
-        return [
-            "status=\(path.status)",
-            "local=\(String(describing: path.localEndpoint))",
-            "remote=\(String(describing: path.remoteEndpoint))",
-            "interfaces=[\(interfaces)]",
-            "usesWiFi=\(path.usesInterfaceType(.wifi))",
-            "usesWired=\(path.usesInterfaceType(.wiredEthernet))",
-            "usesOther=\(path.usesInterfaceType(.other))",
-            "ipv4=\(path.supportsIPv4)",
-            "ipv6=\(path.supportsIPv6)",
-            "dns=\(path.supportsDNS)",
-            "expensive=\(path.isExpensive)",
-            "constrained=\(path.isConstrained)",
-        ].joined(separator: " ")
     }
 }
 
@@ -4047,6 +4003,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     func startBrowsing() {
+        ConnectDiagnostics.log("discovery reset and start")
         cancelBonjourReachabilityChecks()
         discoveryRemovalWorkItems.values.forEach { $0.cancel() }
         discoveryRemovalWorkItems.removeAll()
@@ -4076,6 +4033,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     private func startBrowser(protocolType: String) {
+        let browserStartedAt = Date()
         let serviceType: String
         let parameters: NWParameters
         serviceType = "_bettercast._tcp"
@@ -4087,6 +4045,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         // only when that receiver is connected.
         parameters.includePeerToPeer = true
         LogManager.shared.log("Sender: Browsing for \(serviceType)...")
+        ConnectDiagnostics.log(
+            "browser start protocol=\(protocolType) type=\(serviceType) includeP2P=true"
+        )
 
         let browser = NWBrowser(
             for: .bonjourWithTXTRecord(type: serviceType, domain: nil),
@@ -4096,6 +4057,14 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         browser.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
+                ConnectDiagnostics.log(
+                    String(
+                        format: "browser state protocol=%@ elapsed=%.3fs state=%@",
+                        protocolType,
+                        Date().timeIntervalSince(browserStartedAt),
+                        String(describing: state)
+                    )
+                )
                 switch state {
                 case .ready:
                     self?.status = "Browsing..."
@@ -4128,7 +4097,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                             },
                             advertisedRoutes: advertisement?.routes ?? [],
                             advertisedRouteEndpoints:
-                                advertisement?.routeEndpoints ?? [:]
+                                advertisement?.routeEndpoints ?? [:],
+                            hardwareDecodeCapable:
+                                advertisement?.decodeCapability
+                                .supportsHardwareDecode ?? false
                         )
                         if let existing = servicesByName[name] {
                             servicesByName[name] =
@@ -4143,6 +4115,25 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 if !servicesByName.isEmpty {
                     self.browserRecoveryAttempts[protocolType] = 0
                 }
+                let summary = servicesByName.values.sorted {
+                    $0.name.localizedCaseInsensitiveCompare($1.name)
+                        == .orderedAscending
+                }.map { service in
+                    let interfaces = service.discoveryInterfaces.map {
+                        "\($0.name):\($0.type)"
+                    }.joined(separator: ",")
+                    let endpoints = service.advertisedRouteEndpoints
+                        .sorted { $0.key.rawValue < $1.key.rawValue }
+                        .map {
+                            "\($0.key.rawValue)=\($0.value.sorted().joined(separator: ","))"
+                        }.joined(separator: ";")
+                    return "\(service.name){endpoint=\(service.endpoint) " +
+                        "interfaces=[\(interfaces)] routes=[\(endpoints)]}"
+                }.joined(separator: " | ")
+                ConnectDiagnostics.log(
+                    "browser results protocol=\(protocolType) count=\(servicesByName.count) " +
+                    "services=[\(summary)]"
+                )
                 self.updateDiscoveredServices(
                     Array(servicesByName.values),
                     for: protocolType
@@ -4262,13 +4253,18 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             let failureCount =
                 (bonjourReachabilityFailureCounts[name] ?? 0) + 1
             bonjourReachabilityFailureCounts[name] = failureCount
+            let retryDelay = Self.bonjourReachabilityRetryDelay(
+                consecutiveFailures: failureCount,
+                backgroundInterval:
+                    backgroundBonjourReachabilityRecheckInterval
+            )
+            ConnectDiagnostics.log(
+                "probe unavailable service=\(name) failures=\(failureCount) " +
+                "retryIn=\(retryDelay)s"
+            )
             scheduleBonjourReachabilityProbe(
                 for: name,
-                delayOverride: Self.bonjourReachabilityRetryDelay(
-                    consecutiveFailures: failureCount,
-                    backgroundInterval:
-                        backgroundBonjourReachabilityRecheckInterval
-                )
+                delayOverride: retryDelay
             )
         }
     }
@@ -4292,6 +4288,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             self.startBonjourReachabilityProbe(for: service)
         }
         bonjourReachabilityRecheckWorkItems[name] = recheck
+        ConnectDiagnostics.log(
+            "probe scheduled service=\(name) delay=\(recheckInterval)s " +
+            "focused=\(focusedBonjourServiceName == name)"
+        )
         DispatchQueue.main.asyncAfter(
             deadline: .now() + recheckInterval,
             execute: recheck
@@ -4462,6 +4462,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 continue
             }
             LogManager.shared.log("Sender: Auto-connecting to \(service.name)")
+            ConnectDiagnostics.log(
+                "auto-connect trigger service=\(service.name) endpoint=\(service.endpoint)"
+            )
             connect(to: service, autoConnectAttempt: true)
         }
     }
@@ -4590,6 +4593,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         // We can't monitor recursively in init easily, but we can start it.
         interfaceMonitor.pathUpdateHandler = { [weak self] path in
+            ConnectDiagnostics.log(
+                "interface monitor update \(ConnectDiagnostics.pathSummary(path))"
+            )
             let interfaces = path.availableInterfaces
             DispatchQueue.main.async { [weak self] in
                 self?.cachedNetworkInterfacesByName = Dictionary(
@@ -6147,6 +6153,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 LogManager.shared.log(
                     "Sender: Preferred \(selectedInterfacePreference.displayName) route to \(service.name) timed out — retrying via infrastructure"
                 )
+                ConnectDiagnostics.log(
+                    "fallback start originalId=\(connectionId.uuidString) " +
+                    "service=\(service.name) reason=watchdog " +
+                    "endpoint=\(infrastructureEndpoint) protocol=\(selectedConnectionType)"
+                )
                 self.connectUsingInfrastructureFallback(
                     serviceName: service.name,
                     endpoint: infrastructureEndpoint,
@@ -6235,6 +6246,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     let count = self.pipelines.count
                     self.status = "Connected to \(count) device(s)"
                     LogManager.shared.log("Sender: Connected to \(service.name) (Total: \(count), P2P: \(isP2P), typeByte: \(pipeline.supportsTypeByte))")
+                    ConnectDiagnostics.log(
+                        "connection admitted id=\(connectionId.uuidString) " +
+                        "service=\(service.name) route=\(self.connectionMethodName(for: pipeline))"
+                    )
 
                     // Start per-connection pipeline (each device gets its own display/encoder/recorder)
                     self.startPipeline(for: connectionId)
@@ -6256,6 +6271,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     if shouldFallbackToInfrastructure {
                         LogManager.shared.log(
                             "Sender: Preferred \(selectedInterfacePreference.displayName) route to \(service.name) failed — retrying via infrastructure"
+                        )
+                        ConnectDiagnostics.log(
+                            "fallback start originalId=\(connectionId.uuidString) " +
+                            "service=\(service.name) reason=failed error=\(error) " +
+                            "endpoint=\(infrastructureEndpoint) protocol=\(selectedConnectionType)"
                         )
                         self?.connectUsingInfrastructureFallback(
                             serviceName: service.name,
@@ -6693,6 +6713,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         let connection = NWConnection(to: service.endpoint, using: parameters)
         trackPendingConnection(connection, connectionID: connectionId)
+        let connectionStartedAt = Date()
+        ConnectDiagnostics.log(
+            "unrestricted connection start id=\(connectionId.uuidString) " +
+            "service=\(service.name) endpoint=\(service.endpoint) " +
+            "forceTCP=\(forceTCP) auto=\(autoConnectAttempt) watchdog=10.0s"
+        )
 
         let timeoutWork = DispatchWorkItem { [weak self, weak connection] in
             guard let self, let connection,
@@ -6704,6 +6730,15 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 receiverKey: pendingKey
             )
             connection.cancel()
+            ConnectDiagnostics.log(
+                String(
+                    format: "unrestricted connection watchdog id=%@ service=%@ elapsed=%.3fs %@",
+                    connectionId.uuidString,
+                    service.name,
+                    Date().timeIntervalSince(connectionStartedAt),
+                    ConnectDiagnostics.pathSummary(connection.currentPath)
+                )
+            )
             LogManager.shared.log(
                 "Sender: Connection to \(service.name) timed out after 10 seconds"
             )
@@ -6715,6 +6750,16 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         connection.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
+                ConnectDiagnostics.log(
+                    String(
+                        format: "unrestricted connection state id=%@ service=%@ elapsed=%.3fs state=%@ %@",
+                        connectionId.uuidString,
+                        service.name,
+                        Date().timeIntervalSince(connectionStartedAt),
+                        ConnectDiagnostics.stateSummary(state),
+                        ConnectDiagnostics.pathSummary(connection.currentPath)
+                    )
+                )
                 switch state {
                 case .ready:
                     timeoutWork.cancel()
@@ -6775,6 +6820,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     let count = self.pipelines.count
                     self.status = "Connected to \(count) device(s)"
                     LogManager.shared.log("Sender: Connected to \(service.name) (Total: \(count), P2P: \(isP2P), typeByte: \(pipeline.supportsTypeByte))")
+                    ConnectDiagnostics.log(
+                        "unrestricted connection admitted id=\(connectionId.uuidString) " +
+                        "service=\(service.name) route=\(self.connectionMethodName(for: pipeline))"
+                    )
 
                     self.startPipeline(for: connectionId)
 
@@ -7383,12 +7432,36 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
 
+    private func presentationEnvelope(
+        for connectionId: UUID
+    ) -> PresentationCapacity.Envelope {
+        let pipeline = pipelines[connectionId]
+        let settings = pipeline?.settings ?? currentReceiverSettings()
+        let serviceName = pipeline?.service.name ?? "unknown"
+        let width = pipeline?.reportedScreenWidth.flatMap { $0 > 0 ? $0 : nil }
+            ?? settings.resolutionWidth
+        let height = pipeline?.reportedScreenHeight.flatMap { $0 > 0 ? $0 : nil }
+            ?? settings.resolutionHeight
+        return PresentationCapacity.bind(
+            width: width,
+            height: height,
+            fps: settings.fps,
+            retinaEnabled: settings.retinaEnabled,
+            serviceName: serviceName,
+            isP2P: pipeline?.isP2P ?? false,
+            isLoopback: pipeline?.isLoopback ?? false,
+            hardwareDecode: pipeline?.service.hardwareDecodeCapable ?? false
+        )
+    }
+
     private func virtualDisplayResolution(for connectionId: UUID) -> VirtualDisplayManager.Resolution {
         let pipeline = pipelines[connectionId]
         let settings = pipeline?.settings ?? currentReceiverSettings()
         let serviceName = pipeline?.service.name ?? "unknown"
-        let width = pipeline?.reportedScreenWidth.flatMap { $0 > 0 ? $0 : nil } ?? settings.resolutionWidth
-        let height = pipeline?.reportedScreenHeight.flatMap { $0 > 0 ? $0 : nil } ?? settings.resolutionHeight
+        let width = pipeline?.reportedScreenWidth.flatMap { $0 > 0 ? $0 : nil }
+            ?? settings.resolutionWidth
+        let height = pipeline?.reportedScreenHeight.flatMap { $0 > 0 ? $0 : nil }
+            ?? settings.resolutionHeight
         // High physical PPI can make macOS retain a 2x backing scale even when
         // CGVirtualDisplaySettings.hiDPI is disabled. Advertise standard DPI for
         // non-Retina modes so the requested 1x logical mode is selected.
@@ -7409,7 +7482,20 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         guard let pipelineSettings = pipelines[connectionId]?.settings else { return }
 
         let serviceName = pipelines[connectionId]?.service.name ?? "unknown"
+        let pipelineStartedAt = Date()
+        let capacity = presentationEnvelope(for: connectionId)
         LogManager.shared.log("Sender: Starting pipeline for \(serviceName)...")
+        if capacity.appliedLimit {
+            LogManager.shared.log("Sender: Stream \(capacity.detail) for \(serviceName)")
+        }
+        ConnectDiagnostics.log(
+            "pipeline start id=\(connectionId.uuidString) service=\(serviceName) " +
+            "virtualDisplay=\(pipelineSettings.useVirtualDisplay) " +
+            "resolution=\(pipelineSettings.resolutionWidth)x\(pipelineSettings.resolutionHeight) " +
+            "retina=\(pipelineSettings.retinaEnabled) fps=\(pipelineSettings.fps) " +
+            "streamCapacity=\(capacity.width)x\(capacity.height)@\(capacity.fps) " +
+            "capacityLimited=\(capacity.appliedLimit)"
+        )
 
         var targetDisplayID: CGDirectDisplayID? = nil
 
@@ -7421,8 +7507,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                let displayID = displayManager.displayID {
                 targetDisplayID = displayID
                 LogManager.shared.log("Sender: Reusing virtual display for \(serviceName) with ID \(displayID)")
+                ConnectDiagnostics.log(
+                    "virtual display reused id=\(connectionId.uuidString) " +
+                    "service=\(serviceName) displayId=\(displayID)"
+                )
             } else {
                 LogManager.shared.log("Sender: Creating virtual display for \(serviceName)...")
+                let displayCreationStartedAt = Date()
                 // Keep one stable macOS display identity per density mode.
                 // This prevents macOS from restoring a cached 1x/2x mode from
                 // the other setting while preserving layout within each mode.
@@ -7440,8 +7531,25 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     targetDisplayID = displayID
                     pipelines[connectionId]?.virtualDisplayManager = displayManager
                     LogManager.shared.log("Sender: Virtual display created for \(serviceName) with ID \(displayID)")
+                    ConnectDiagnostics.log(
+                        String(
+                            format: "virtual display ready id=%@ service=%@ elapsed=%.3fs displayId=%u",
+                            connectionId.uuidString,
+                            serviceName,
+                            Date().timeIntervalSince(displayCreationStartedAt),
+                            displayID
+                        )
+                    )
                     LogManager.shared.log("Sender: Go to System Settings > Displays to arrange it")
                 } else {
+                    ConnectDiagnostics.log(
+                        String(
+                            format: "virtual display failed id=%@ service=%@ elapsed=%.3fs",
+                            connectionId.uuidString,
+                            serviceName,
+                            Date().timeIntervalSince(displayCreationStartedAt)
+                        )
+                    )
                     LogManager.shared.log(
                         "Sender: Failed to create virtual display for \(serviceName); " +
                         "pipeline stopped to avoid streaming the main screen"
@@ -7461,6 +7569,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         let selectedBounds = CGDisplayBounds(displayID)
                         InputHandler.shared.updateDisplayBounds(bounds: selectedBounds, for: connectionId)
                         LogManager.shared.log("Sender: Virtual display for \(serviceName) bounds: \(selectedBounds) (attempt \(attempt))")
+                        ConnectDiagnostics.log(
+                            "virtual display bounds id=\(connectionId.uuidString) " +
+                            "service=\(serviceName) attempt=\(attempt) bounds=\(selectedBounds)"
+                        )
                         displayManager?.logCurrentMode()
                         self.updateConnectedDisplays()
                     } else if attempt < 10 {
@@ -7476,6 +7588,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         )
                         InputHandler.shared.updateDisplayBounds(bounds: fallbackBounds, for: connectionId)
                         LogManager.shared.log("Sender: Virtual display bounds unavailable after retries, using fallback: \(fallbackBounds)")
+                        ConnectDiagnostics.log(
+                            "virtual display bounds fallback id=\(connectionId.uuidString) " +
+                            "service=\(serviceName) bounds=\(fallbackBounds)"
+                        )
                     }
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -7486,18 +7602,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             LogManager.shared.log("Sender: Using main screen (mirroring mode) for \(serviceName)")
         }
 
-        // Calculate Physical Capture Resolution
-        // Use reported screen dimensions if available (already in pixels)
-        let captureWidth: Int
-        let captureHeight: Int
-        if let rw = pipelines[connectionId]?.reportedScreenWidth,
-           let rh = pipelines[connectionId]?.reportedScreenHeight, rw > 0 && rh > 0 {
-            captureWidth = rw
-            captureHeight = rh
-        } else {
-            captureWidth = pipelineSettings.resolutionWidth
-            captureHeight = pipelineSettings.resolutionHeight
-        }
+        // Capture/encode at presentation capacity — never oversell soft-decode receivers.
+        let captureWidth = capacity.width
+        let captureHeight = capacity.height
 
         // Adaptive quality: P2P gets full, loopback (ADB) gets medium-high, infrastructure gets capped
         let isP2P = pipelines[connectionId]?.isP2P ?? false
@@ -7535,8 +7642,14 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             LogManager.shared.log("Sender: Infrastructure mode — \(fps) FPS / \(bitrate / 1_000_000) Mbps / KF every 2s for \(serviceName)")
         }
 
-        fps = pipelineSettings.fps
-        LogManager.shared.log("Sender: Frame rate override \(fps) FPS (user setting)")
+        fps = capacity.fps
+        if capacity.appliedLimit {
+            LogManager.shared.log(
+                "Sender: Capacity-limited frame rate \(fps) FPS for \(serviceName)"
+            )
+        } else {
+            LogManager.shared.log("Sender: Frame rate override \(fps) FPS (user setting)")
+        }
 
         let hasReportedDims = pipelines[connectionId]?.reportedScreenWidth != nil
         let qualityName = StreamQuality(rawValue: pipelineSettings.qualityRawValue)?.name
@@ -7579,6 +7692,16 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         )
         recorder.captureAudio = audioEnabled
         recorder.audioEncoder = audioEnc
+        recorder.onFirstVideoFrame = {
+            ConnectDiagnostics.log(
+                String(
+                    format: "first captured frame id=%@ service=%@ pipelineElapsed=%.3fs",
+                    connectionId.uuidString,
+                    serviceName,
+                    Date().timeIntervalSince(pipelineStartedAt)
+                )
+            )
+        }
         recorder.onUnexpectedStop = { [weak self, weak recorder] in
             DispatchQueue.main.async {
                 guard let self, let recorder,
@@ -7592,6 +7715,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             }
         }
         pipelines[connectionId]?.screenRecorder = recorder
+        ConnectDiagnostics.log(
+            "capture start requested id=\(connectionId.uuidString) service=\(serviceName) " +
+            "displayId=\(String(describing: targetDisplayID))"
+        )
 
         Task { @MainActor [weak self, weak recorder] in
             guard let recorder else { return }
@@ -7610,6 +7737,11 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         succeeded: Bool
     ) {
         guard pipelines[connectionId]?.screenRecorder === recorder else { return }
+        let serviceName = pipelines[connectionId]?.service.name ?? "unknown"
+        ConnectDiagnostics.log(
+            "capture start result id=\(connectionId.uuidString) " +
+            "service=\(serviceName) succeeded=\(succeeded)"
+        )
         if succeeded {
             pipelines[connectionId]?.captureRecoveryAttempts = 0
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self, weak recorder] in
@@ -7619,6 +7751,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                       !recorder.hasProducedVideoFrame else { return }
                 LogManager.shared.log(
                     "Sender: Capture started but produced no video frame; rebuilding pipeline"
+                )
+                ConnectDiagnostics.log(
+                    "first frame watchdog id=\(connectionId.uuidString) " +
+                    "service=\(serviceName) elapsed=2.0s"
                 )
                 self.handleCaptureStartResult(
                     connectionId: connectionId,
@@ -7685,6 +7821,14 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     ) {
         guard let pipeline = pipelines[connectionId] else { return }
         let data = frame.wirePayload
+
+        if frame.sequence == 0 {
+            ConnectDiagnostics.log(
+                "first encoded frame id=\(connectionId.uuidString) " +
+                "service=\(pipeline.service.name) stream=\(frame.streamID) " +
+                "bytes=\(data.count) keyframe=\(frame.isKeyframe)"
+            )
+        }
 
         encodedFrameCount += 1
         if encodedFrameCount <= 3 || encodedFrameCount % 300 == 0 {

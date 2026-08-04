@@ -88,6 +88,35 @@ final class DiscoveryBehaviorTests: XCTestCase {
         )
     }
 
+    func testReceiverAdvertisementParsesHardwareDecodeCapability() {
+        let hwMetadata = NWBrowser.Result.Metadata.bonjour(
+            NWTXTRecord([
+                "rv": "1",
+                "routes": "wifi",
+                "decode": "hw",
+            ])
+        )
+        XCTAssertEqual(
+            ReceiverAdvertisement.parse(hwMetadata)?.decodeCapability,
+            .hardware
+        )
+        XCTAssertTrue(
+            ReceiverAdvertisement.parse(hwMetadata)?
+                .decodeCapability.supportsHardwareDecode == true
+        )
+
+        let legacyMetadata = NWBrowser.Result.Metadata.bonjour(
+            NWTXTRecord([
+                "rv": "1",
+                "routes": "wifi",
+            ])
+        )
+        XCTAssertEqual(
+            ReceiverAdvertisement.parse(legacyMetadata)?.decodeCapability,
+            .software
+        )
+    }
+
     func testAdvertisedThunderboltEndpointDoesNotDependOnARPCache() {
         let receiver = DiscoveredService(
             name: "Dang-Surface (Windows)",

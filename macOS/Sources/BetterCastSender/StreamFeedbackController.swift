@@ -3,6 +3,9 @@ import Foundation
 /// Keeps capture bounded by the receiver's real presentation progress. Frames
 /// rejected here have not entered VideoToolbox, so the H.264 reference chain
 /// remains intact.
+///
+/// Lag may only lower the admission rate. Raising it requires a sustained
+/// low-lag window so presentation jitter cannot oscillate target FPS.
 final class StreamFeedbackController {
     var onTargetFPSChanged: ((Int) -> Void)?
     private let lock = NSLock()
@@ -59,11 +62,11 @@ final class StreamFeedbackController {
 
             let previousTarget = currentTargetFPS
             let lag = latestEncodedTimestamp - timestampNanoseconds
-            if lag >= 400_000_000 {
-                currentTargetFPS = min(maximumFPS, 30)
-                recoveryStartedNanoseconds = nil
-            } else if lag >= 180_000_000 {
-                currentTargetFPS = min(maximumFPS, 45)
+            let floorFromLag = Self.floorFPS(forLagNanoseconds: lag, maximumFPS: maximumFPS)
+
+            // Downgrade immediately when lag demands a lower floor.
+            if floorFromLag < currentTargetFPS {
+                currentTargetFPS = floorFromLag
                 recoveryStartedNanoseconds = nil
             } else if lag <= 80_000_000 && currentTargetFPS < maximumFPS {
                 if let recoveryStartedNanoseconds,
@@ -73,7 +76,7 @@ final class StreamFeedbackController {
                 } else if recoveryStartedNanoseconds == nil {
                     recoveryStartedNanoseconds = nowNanoseconds
                 }
-            } else {
+            } else if lag > 80_000_000 {
                 recoveryStartedNanoseconds = nil
             }
             return currentTargetFPS == previousTarget ? nil : currentTargetFPS
@@ -94,6 +97,25 @@ final class StreamFeedbackController {
             nextAdmissionNanoseconds = nowNanoseconds + interval
             return true
         }
+    }
+
+    private static func floorFPS(
+        forLagNanoseconds lag: UInt64,
+        maximumFPS: Int
+    ) -> Int {
+        if lag >= 1_500_000_000 {
+            return min(maximumFPS, 10)
+        }
+        if lag >= 800_000_000 {
+            return min(maximumFPS, 15)
+        }
+        if lag >= 400_000_000 {
+            return min(maximumFPS, 30)
+        }
+        if lag >= 180_000_000 {
+            return min(maximumFPS, 45)
+        }
+        return maximumFPS
     }
 }
 

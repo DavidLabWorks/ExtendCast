@@ -337,9 +337,11 @@ void NetworkListener::catchUpStaleTcpVideo(
                 ))
                 .arg(action)
         );
-    }
-    if (decision.resetDecoder) {
-        emit videoStreamResetRequired(deviceId);
+        if (decision.requestKeyframe) {
+            emit videoStreamCatchUpWaitingForKeyframe(deviceId);
+        } else {
+            emit videoStreamCatchUpToKeyframe(deviceId);
+        }
     }
 
     if (!decision.requestKeyframe) {

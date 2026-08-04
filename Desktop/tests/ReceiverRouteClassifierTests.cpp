@@ -6,7 +6,7 @@
 int main() {
     assert(preferredBufferedVideoNanosecondsFor(
         ReceiverAdvertisedRoute::thunderbolt
-    ) == 150'000'000);
+    ) == 300'000'000);
     assert(preferredBufferedVideoNanosecondsFor(
         ReceiverAdvertisedRoute::ethernet
     ) == 200'000'000);

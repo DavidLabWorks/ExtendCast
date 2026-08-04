@@ -214,7 +214,7 @@ int main() {
         );
 
         assert(decision.discardBytes == preferredKeyframeOffset);
-        assert(decision.resetDecoder);
+        assert(!decision.resetDecoder);
         assert(!decision.requestKeyframe);
     }
 
@@ -235,7 +235,7 @@ int main() {
         );
 
         assert(decision.discardBytes == liveKeyframeOffset);
-        assert(decision.resetDecoder);
+        assert(!decision.resetDecoder);
         assert(!decision.requestKeyframe);
     }
 
@@ -294,7 +294,7 @@ int main() {
         );
 
         assert(decision.discardBytes == resetKeyframeOffset);
-        assert(decision.resetDecoder);
+        assert(!decision.resetDecoder);
         assert(!decision.requestKeyframe);
     }
 

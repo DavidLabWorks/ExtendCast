@@ -18,7 +18,7 @@ inline std::uint64_t preferredBufferedVideoNanosecondsFor(
 ) {
     switch (route) {
     case ReceiverAdvertisedRoute::thunderbolt:
-        return 150'000'000;
+        return 300'000'000;
     case ReceiverAdvertisedRoute::ethernet:
         return 200'000'000;
     case ReceiverAdvertisedRoute::wifi:

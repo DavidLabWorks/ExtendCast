@@ -112,6 +112,7 @@ set(SOURCES
     NetworkInterfaceDescription.cpp
     NetworkListener.cpp
     VideoDecoder.cpp
+    HardwareDecodeSupport.cpp
     VideoRenderer.cpp
     VideoWindow.cpp
     ReceiverSession.cpp
@@ -128,8 +129,10 @@ set(HEADERS
     NetworkInterfaceDescription.h
     NetworkListener.h
     VideoDecoder.h
+    HardwareDecodeSupport.h
     DecodedVideoFrame.h
     LatestValueMailbox.h
+    VideoDecodeQueue.h
     VideoRenderer.h
     VideoWindow.h
     ReceiverSession.h
@@ -230,6 +233,12 @@ if(BUILD_TESTING)
         tests/LatestValueMailboxTests.cpp
         LatestValueMailbox.h
     )
+    add_executable(
+        VideoDecodeQueueTests
+        tests/VideoDecodeQueueTests.cpp
+        VideoDecodeQueue.h
+        VideoPacket.h
+    )
     add_test(
         NAME InboundSessionRegistryTests
         COMMAND InboundSessionRegistryTests
@@ -253,6 +262,10 @@ if(BUILD_TESTING)
     add_test(
         NAME LatestValueMailboxTests
         COMMAND LatestValueMailboxTests
+    )
+    add_test(
+        NAME VideoDecodeQueueTests
+        COMMAND VideoDecodeQueueTests
     )
 endif()
 
@@ -302,6 +315,8 @@ if(WIN32)
         ws2_32
         shell32
         iphlpapi
+        d3d11
+        dxgi
     )
     set_target_properties(BetterCastReceiver PROPERTIES
         OUTPUT_NAME ExtendCast

@@ -205,6 +205,26 @@ struct LogView: View {
                 .controlSize(.small)
                 .keyboardShortcut("c", modifiers: [.command, .shift])
 
+                Menu {
+                    Button("Copy Connection Log") {
+                        let pasteboard = NSPasteboard.general
+                        pasteboard.clearContents()
+                        pasteboard.setString(
+                            ConnectDiagnostics.persistedContents,
+                            forType: .string
+                        )
+                    }
+                    Button("Show in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting(
+                            [ConnectDiagnostics.fileURL]
+                        )
+                    }
+                } label: {
+                    Label("Connection Log", systemImage: "network")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+
                 Button {
                     let text = logManager.logs.joined(separator: "\n")
                     let pasteboard = NSPasteboard.general
@@ -218,6 +238,7 @@ struct LogView: View {
 
                 Button {
                     logManager.logs.removeAll()
+                    ConnectDiagnostics.clearPersistedLog()
                 } label: {
                     Label("Clear", systemImage: "trash")
                 }
@@ -271,6 +292,10 @@ struct LogView: View {
         ].joined(separator: ", ")
 
         let recentLogs = logManager.logs.suffix(30).joined(separator: "\n")
+        let recentConnectionDiagnostics = ConnectDiagnostics.persistedContents
+            .split(separator: "\n")
+            .suffix(80)
+            .joined(separator: "\n")
 
         let body = """
         **Describe the issue:**
@@ -288,6 +313,14 @@ struct LogView: View {
 
         ```
         \(recentLogs)
+        ```
+
+        </details>
+
+        <details><summary>Connection Diagnostics</summary>
+
+        ```
+        \(recentConnectionDiagnostics)
         ```
 
         </details>

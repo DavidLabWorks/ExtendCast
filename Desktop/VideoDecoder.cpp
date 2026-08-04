@@ -1,4 +1,5 @@
 #include "VideoDecoder.h"
+#include "HardwareDecodeSupport.h"
 #include "MainWindow.h"  // for LogManager
 #include "VideoPacket.h"
 #include <QDebug>
@@ -7,8 +8,29 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/pixfmt.h>
 }
+
+namespace {
+
+enum AVPixelFormat selectHardwarePixelFormat(
+    AVCodecContext* context,
+    const enum AVPixelFormat* pixelFormats
+) {
+    Q_UNUSED(context);
+    for (const enum AVPixelFormat* candidate = pixelFormats;
+         candidate && *candidate != AV_PIX_FMT_NONE;
+         ++candidate) {
+        if (*candidate == AV_PIX_FMT_D3D11) {
+            return *candidate;
+        }
+    }
+    return AV_PIX_FMT_NONE;
+}
+
+}  // namespace
 
 VideoDecoder::VideoDecoder(QObject* parent)
     : QObject(parent)
@@ -17,6 +39,10 @@ VideoDecoder::VideoDecoder(QObject* parent)
 
 VideoDecoder::~VideoDecoder() {
     destroyDecoder();
+    if (m_hwDeviceCtx) {
+        av_buffer_unref(&m_hwDeviceCtx);
+        m_hwDeviceCtx = nullptr;
+    }
 }
 
 void VideoDecoder::decode(const QByteArray& data) {
@@ -115,18 +141,53 @@ void VideoDecoder::decode(const QByteArray& data) {
     }
 }
 
-bool VideoDecoder::initDecoder(const uint8_t* sps, int spsLen, const uint8_t* pps, int ppsLen) {
-    // Build extradata in AVCC format for FFmpeg
-    // Format: [1 byte version][1 byte profile][1 byte compat][1 byte level]
-    //         [1 byte NALU length size - 1][1 byte num SPS | 0xE0]
-    //         [2 byte SPS length][SPS data]
-    //         [1 byte num PPS][2 byte PPS length][PPS data]
+bool VideoDecoder::ensureHardwareDevice() {
+#ifdef _WIN32
+    if (m_hwDeviceCtx) {
+        return true;
+    }
+    if (!hardwareH264DecodeAvailable()) {
+        return false;
+    }
+    const int ret = av_hwdevice_ctx_create(
+        &m_hwDeviceCtx,
+        AV_HWDEVICE_TYPE_D3D11VA,
+        nullptr,
+        nullptr,
+        0
+    );
+    if (ret < 0 || !m_hwDeviceCtx) {
+        LogManager::instance().log(
+            QString("Decoder: D3D11VA device create failed (%1)").arg(ret)
+        );
+        m_hwDeviceCtx = nullptr;
+        return false;
+    }
+    return true;
+#else
+    Q_UNUSED(this);
+    return false;
+#endif
+}
 
-    if (spsLen < 4) return false;
+bool VideoDecoder::openCodecContext(
+    const uint8_t* sps,
+    int spsLen,
+    const uint8_t* pps,
+    int ppsLen,
+    bool preferHardware
+) {
+    if (spsLen < 4) {
+        return false;
+    }
 
     int extradataSize = 6 + 2 + spsLen + 1 + 2 + ppsLen;
-    uint8_t* extradata = static_cast<uint8_t*>(av_malloc(extradataSize + AV_INPUT_BUFFER_PADDING_SIZE));
-    if (!extradata) return false;
+    uint8_t* extradata = static_cast<uint8_t*>(
+        av_malloc(extradataSize + AV_INPUT_BUFFER_PADDING_SIZE)
+    );
+    if (!extradata) {
+        return false;
+    }
     memset(extradata, 0, extradataSize + AV_INPUT_BUFFER_PADDING_SIZE);
 
     int idx = 0;
@@ -152,12 +213,6 @@ bool VideoDecoder::initDecoder(const uint8_t* sps, int spsLen, const uint8_t* pp
         return false;
     }
 
-    // If we already have a context, check for dimension change
-    if (m_codecCtx) {
-        // We'll destroy and recreate — dimension change detected via SPS
-        destroyDecoder();
-    }
-
     m_codecCtx = avcodec_alloc_context3(codec);
     if (!m_codecCtx) {
         av_free(extradata);
@@ -166,29 +221,77 @@ bool VideoDecoder::initDecoder(const uint8_t* sps, int spsLen, const uint8_t* pp
 
     m_codecCtx->extradata = extradata;
     m_codecCtx->extradata_size = extradataSize;
-
-    // Low latency settings with error resilience
     m_codecCtx->flags |= AV_CODEC_FLAG_LOW_DELAY;
     m_codecCtx->flags2 |= AV_CODEC_FLAG2_FAST;
-    m_codecCtx->thread_count = 2;
-    m_codecCtx->thread_type = FF_THREAD_SLICE;
-    m_codecCtx->skip_loop_filter = AVDISCARD_NONREF;
-
-    // Error concealment — show best-effort frames instead of artifacts
-    m_codecCtx->err_recognition = 0;  // Don't reject frames with errors
+    m_codecCtx->err_recognition = 0;
     m_codecCtx->error_concealment = FF_EC_GUESS_MVS | FF_EC_DEBLOCK;
 
+    m_usingHardware = false;
+    if (preferHardware && ensureHardwareDevice()) {
+        m_codecCtx->hw_device_ctx = av_buffer_ref(m_hwDeviceCtx);
+        if (!m_codecCtx->hw_device_ctx) {
+            avcodec_free_context(&m_codecCtx);
+            return false;
+        }
+        m_codecCtx->get_format = selectHardwarePixelFormat;
+        m_codecCtx->thread_count = 1;
+        m_usingHardware = true;
+    } else {
+        m_codecCtx->thread_count = 2;
+        m_codecCtx->thread_type = FF_THREAD_SLICE;
+        m_codecCtx->skip_loop_filter = AVDISCARD_NONREF;
+    }
+
     if (avcodec_open2(m_codecCtx, codec, nullptr) < 0) {
-        qWarning() << "Failed to open H.264 decoder";
+        qWarning() << "Failed to open H.264 decoder"
+                   << (preferHardware ? "(hardware)" : "(software)");
         avcodec_free_context(&m_codecCtx);
+        m_usingHardware = false;
         return false;
     }
 
     m_frame = av_frame_alloc();
+    m_transferFrame = av_frame_alloc();
     m_packet = av_packet_alloc();
+    if (!m_frame || !m_transferFrame || !m_packet) {
+        destroyDecoder();
+        return false;
+    }
 
-    qDebug() << "H.264 decoder initialized";
     return true;
+}
+
+bool VideoDecoder::initDecoder(const uint8_t* sps, int spsLen, const uint8_t* pps, int ppsLen) {
+    if (m_codecCtx) {
+        destroyDecoder();
+    }
+
+    if (openCodecContext(sps, spsLen, pps, ppsLen, /*preferHardware=*/true)) {
+        LogManager::instance().log(
+            m_usingHardware
+                ? "Decoder: H.264 D3D11VA hardware decode enabled"
+                : "Decoder: H.264 software decode enabled"
+        );
+        return true;
+    }
+
+    if (openCodecContext(sps, spsLen, pps, ppsLen, /*preferHardware=*/false)) {
+        LogManager::instance().log(
+            "Decoder: H.264 software decode enabled (hardware unavailable)"
+        );
+        return true;
+    }
+
+    LogManager::instance().log("Decoder: failed to initialize H.264 decoder");
+    return false;
+}
+
+void VideoDecoder::flushForKeyframeResume() {
+    if (!m_codecCtx) {
+        return;
+    }
+    avcodec_flush_buffers(m_codecCtx);
+    LogManager::instance().log("Decoder: flush for keyframe resume");
 }
 
 void VideoDecoder::reset() {
@@ -205,6 +308,10 @@ void VideoDecoder::destroyDecoder() {
         av_frame_free(&m_frame);
         m_frame = nullptr;
     }
+    if (m_transferFrame) {
+        av_frame_free(&m_transferFrame);
+        m_transferFrame = nullptr;
+    }
     if (m_packet) {
         av_packet_free(&m_packet);
         m_packet = nullptr;
@@ -213,6 +320,7 @@ void VideoDecoder::destroyDecoder() {
         avcodec_free_context(&m_codecCtx);
         m_codecCtx = nullptr;
     }
+    m_usingHardware = false;
     m_currentWidth = 0;
     m_currentHeight = 0;
 }
@@ -302,31 +410,51 @@ void VideoDecoder::decodeNalus(
             break;
         }
 
-        m_outputCount++;
-        if (m_outputCount <= 3 || m_outputCount % 300 == 0) {
-            LogManager::instance().log(QString("Decoder: decoded frame #%1 — %2x%3 format=%4")
-                .arg(m_outputCount).arg(m_frame->width).arg(m_frame->height).arg(m_frame->format));
+        AVFrame* usable = m_frame;
+        if (m_frame->format == AV_PIX_FMT_D3D11) {
+            av_frame_unref(m_transferFrame);
+            if (av_hwframe_transfer_data(m_transferFrame, m_frame, 0) < 0) {
+                if (m_outputCount <= 5) {
+                    LogManager::instance().log(
+                        "Decoder: hwframe transfer failed, requesting keyframe"
+                    );
+                }
+                emit keyframeNeeded();
+                continue;
+            }
+            usable = m_transferFrame;
         }
 
-        // Check for dimension change (orientation switch)
-        if (m_frame->width != m_currentWidth || m_frame->height != m_currentHeight) {
-            m_currentWidth = m_frame->width;
-            m_currentHeight = m_frame->height;
+        m_outputCount++;
+        if (m_outputCount <= 3 || m_outputCount % 300 == 0) {
+            LogManager::instance().log(
+                QString("Decoder: decoded frame #%1 — %2x%3 format=%4 hw=%5")
+                    .arg(m_outputCount)
+                    .arg(usable->width)
+                    .arg(usable->height)
+                    .arg(usable->format)
+                    .arg(m_usingHardware ? "yes" : "no")
+            );
+        }
+
+        if (usable->width != m_currentWidth || usable->height != m_currentHeight) {
+            m_currentWidth = usable->width;
+            m_currentHeight = usable->height;
             LogManager::instance().log(QString("Decoder: dimensions changed to %1x%2")
                 .arg(m_currentWidth).arg(m_currentHeight));
             emit dimensionsChanged(m_currentWidth, m_currentHeight);
         }
 
         DecodedVideoFrame decoded = metadata;
-        decoded.width = m_frame->width;
-        decoded.height = m_frame->height;
+        decoded.width = usable->width;
+        decoded.height = usable->height;
         decoded.colorParameters = video_color::parametersFor(
-            m_frame->color_range == AVCOL_RANGE_JPEG
-                || m_frame->format == AV_PIX_FMT_YUVJ420P
+            usable->color_range == AVCOL_RANGE_JPEG
+                || usable->format == AV_PIX_FMT_YUVJ420P
                 ? video_color::Range::full
                 : video_color::Range::unspecified,
-            m_frame->colorspace == AVCOL_SPC_SMPTE170M
-                || m_frame->colorspace == AVCOL_SPC_BT470BG
+            usable->colorspace == AVCOL_SPC_SMPTE170M
+                || usable->colorspace == AVCOL_SPC_BT470BG
                 ? video_color::Matrix::bt601
                 : video_color::Matrix::bt709
         );
@@ -336,27 +464,27 @@ void VideoDecoder::decodeNalus(
         for (int row = 0; row < decoded.height; ++row) {
             memcpy(
                 decoded.yPlane.data() + row * decoded.width,
-                m_frame->data[0] + row * m_frame->linesize[0],
+                usable->data[0] + row * usable->linesize[0],
                 decoded.width
             );
         }
         const int chromaHeight = decoded.height / 2;
-        if (m_frame->format == AV_PIX_FMT_NV12) {
+        if (usable->format == AV_PIX_FMT_NV12) {
             for (int row = 0; row < chromaHeight; ++row) {
                 memcpy(
                     decoded.uvPlane.data() + row * decoded.width,
-                    m_frame->data[1] + row * m_frame->linesize[1],
+                    usable->data[1] + row * usable->linesize[1],
                     decoded.width
                 );
             }
-        } else if (m_frame->format == AV_PIX_FMT_YUV420P
-                   || m_frame->format == AV_PIX_FMT_YUVJ420P) {
+        } else if (usable->format == AV_PIX_FMT_YUV420P
+                   || usable->format == AV_PIX_FMT_YUVJ420P) {
             const int chromaWidth = decoded.width / 2;
             for (int row = 0; row < chromaHeight; ++row) {
                 const uint8_t* u =
-                    m_frame->data[1] + row * m_frame->linesize[1];
+                    usable->data[1] + row * usable->linesize[1];
                 const uint8_t* v =
-                    m_frame->data[2] + row * m_frame->linesize[2];
+                    usable->data[2] + row * usable->linesize[2];
                 char* destination =
                     decoded.uvPlane.data() + row * decoded.width;
                 for (int column = 0; column < chromaWidth; ++column) {
@@ -367,7 +495,7 @@ void VideoDecoder::decodeNalus(
         } else {
             LogManager::instance().log(
                 QString("Decoder: unsupported output format %1")
-                    .arg(m_frame->format)
+                    .arg(usable->format)
             );
             continue;
         }

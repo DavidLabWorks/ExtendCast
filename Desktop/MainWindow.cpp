@@ -834,6 +834,26 @@ MainWindow::MainWindow(QWidget* parent)
             }
         }
     );
+    connect(
+        m_network,
+        &NetworkListener::videoStreamCatchUpToKeyframe,
+        this,
+        [this](const QString& deviceId) {
+            if (auto* session = m_receiverSessions.value(deviceId)) {
+                session->noteCatchUpToBufferedKeyframe();
+            }
+        }
+    );
+    connect(
+        m_network,
+        &NetworkListener::videoStreamCatchUpWaitingForKeyframe,
+        this,
+        [this](const QString& deviceId) {
+            if (auto* session = m_receiverSessions.value(deviceId)) {
+                session->noteCatchUpWaitingForKeyframe();
+            }
+        }
+    );
     connect(m_network, &NetworkListener::statusChanged,
             this, &MainWindow::onStatusChanged);
     connect(

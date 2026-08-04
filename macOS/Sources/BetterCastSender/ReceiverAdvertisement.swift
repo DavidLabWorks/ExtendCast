@@ -7,24 +7,37 @@ enum ReceiverAdvertisedRoute: String, CaseIterable, Hashable {
     case peerToPeer = "p2p"
 }
 
+enum ReceiverDecodeCapability: String, Hashable {
+    case hardware = "hw"
+    case software = "sw"
+
+    var supportsHardwareDecode: Bool {
+        self == .hardware
+    }
+}
+
 struct ReceiverAdvertisement {
     static let protocolVersion = "1"
 
     let routes: Set<ReceiverAdvertisedRoute>
     let routeEndpoints: [ReceiverAdvertisedRoute: Set<String>]
+    let decodeCapability: ReceiverDecodeCapability
 
     init(
         routes: Set<ReceiverAdvertisedRoute>,
-        routeEndpoints: [ReceiverAdvertisedRoute: Set<String>] = [:]
+        routeEndpoints: [ReceiverAdvertisedRoute: Set<String>] = [:],
+        decodeCapability: ReceiverDecodeCapability = .software
     ) {
         self.routes = routes
         self.routeEndpoints = routeEndpoints
+        self.decodeCapability = decodeCapability
     }
 
     var txtRecord: NWTXTRecord {
         var entries = [
             "rv": Self.protocolVersion,
             "routes": routes.map(\.rawValue).sorted().joined(separator: ","),
+            "decode": decodeCapability.rawValue,
         ]
         for (route, endpoints) in routeEndpoints where !endpoints.isEmpty {
             entries["ep_\(route.rawValue)"] = endpoints.sorted().joined(
@@ -55,9 +68,13 @@ struct ReceiverAdvertisement {
                 endpointList.split(separator: ",").map(String.init)
             )
         }
+        let decodeCapability =
+            record["decode"].flatMap(ReceiverDecodeCapability.init(rawValue:))
+            ?? .software
         return ReceiverAdvertisement(
             routes: routes,
-            routeEndpoints: routeEndpoints
+            routeEndpoints: routeEndpoints,
+            decodeCapability: decodeCapability
         )
     }
 

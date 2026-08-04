@@ -10,6 +10,7 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     var audioEncoder: AudioEncoder?
     var captureAudio: Bool = false
     var onUnexpectedStop: (() -> Void)?
+    var onFirstVideoFrame: (() -> Void)?
 
     private var width: Int
     private var height: Int
@@ -31,10 +32,15 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         frameStateLock.unlock()
     }
 
-    private func markVideoFrameProduced() {
+    private func markVideoFrameProduced() -> (() -> Void)? {
         frameStateLock.lock()
+        let firstFrameHandler = producedVideoFrame ? nil : onFirstVideoFrame
         producedVideoFrame = true
+        if firstFrameHandler != nil {
+            onFirstVideoFrame = nil
+        }
         frameStateLock.unlock()
+        return firstFrameHandler
     }
 
     init(videoEncoder: VideoEncoder, targetDisplayID: CGDirectDisplayID? = nil, width: Int = 1920, height: Int = 1080, captureFPS: Int32 = 120, frameAdmissionController: StreamFeedbackController) {
@@ -155,7 +161,7 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         switch type {
         case .screen:
-            markVideoFrameProduced()
+            markVideoFrameProduced()?()
             guard frameAdmissionController.shouldEncodeFrame() else { return }
             frameCount += 1
             if frameCount % 300 == 0 {
