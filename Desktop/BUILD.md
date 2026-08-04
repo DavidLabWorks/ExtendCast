@@ -79,8 +79,9 @@ cmake --build .
 main.cpp            → App entry point, OpenGL setup
 MainWindow          → Qt window with connect UI + video display
 NetworkListener     → TCP/UDP networking (same protocol as Swift receiver)
-VideoDecoder        → FFmpeg H.264 decode (hardware accelerated when available)
-VideoRenderer       → OpenGL YUV→RGB rendering with aspect-ratio letterboxing
+VideoDecoder       → FFmpeg H.264 decode (D3D11VA when available)
+D3D11VideoPresenter → Zero-copy NV12 present on Windows (GPU blit, no CPU round-trip)
+VideoRenderer       → OpenGL YUV→RGB rendering fallback with aspect-ratio letterboxing
 InputHandler        → Mouse/keyboard capture → normalized coordinates → JSON
 ServiceDiscovery    → mDNS advertising (Bonjour on Windows, Avahi on Linux)
 InputEvent          → Data model matching Swift InputEvent exactly

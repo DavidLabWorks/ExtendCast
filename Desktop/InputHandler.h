@@ -4,7 +4,7 @@
 #include <QSize>
 #include "InputEvent.h"
 
-class VideoRenderer;
+class QWidget;
 
 // Captures mouse/keyboard events from the video widget and converts
 // them to normalized InputEvent objects for sending to the Mac sender.
@@ -14,8 +14,8 @@ class InputHandler : public QObject {
 public:
     explicit InputHandler(QObject* parent = nullptr);
 
-    // Install event filter on the renderer widget
-    void attach(VideoRenderer* renderer);
+    // Install event filter on the video surface widget
+    void attach(QWidget* videoSurface);
 
     // Set the video content size for accurate coordinate normalization
     void setContentSize(QSize size);
@@ -32,6 +32,6 @@ private:
     struct NormalizedPoint { double x; double y; bool valid; };
     NormalizedPoint normalize(double widgetX, double widgetY) const;
 
-    VideoRenderer* m_renderer = nullptr;
+    QWidget* m_videoSurface = nullptr;
     QSize m_contentSize{1920, 1080};
 };

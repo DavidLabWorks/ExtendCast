@@ -6,6 +6,11 @@
 #include <QtEndian>
 #include <cstring>
 
+#ifdef _WIN32
+#include "D3D11SharedDevice.h"
+#include <d3d11.h>
+#endif
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
@@ -145,6 +150,13 @@ bool VideoDecoder::ensureHardwareDevice() {
 #ifdef _WIN32
     if (m_hwDeviceCtx) {
         return true;
+    }
+    auto& shared = D3D11SharedDevice::instance();
+    if (shared.ensureCreated() && shared.ffmpegHwDeviceCtx()) {
+        m_hwDeviceCtx = av_buffer_ref(shared.ffmpegHwDeviceCtx());
+        if (m_hwDeviceCtx) {
+            return true;
+        }
     }
     if (!hardwareH264DecodeAvailable()) {
         return false;
@@ -412,6 +424,76 @@ void VideoDecoder::decodeNalus(
 
         AVFrame* usable = m_frame;
         if (m_frame->format == AV_PIX_FMT_D3D11) {
+#ifdef _WIN32
+            if (m_zeroCopyPresent && m_usingHardware) {
+                AVFrame* anchored = av_frame_alloc();
+                if (!anchored || av_frame_ref(anchored, m_frame) < 0) {
+                    if (anchored) {
+                        av_frame_free(&anchored);
+                    }
+                    if (m_outputCount <= 5) {
+                        LogManager::instance().log(
+                            "Decoder: failed to anchor hardware frame"
+                        );
+                    }
+                    continue;
+                }
+
+                auto* texture = reinterpret_cast<ID3D11Texture2D*>(anchored->data[0]);
+                const int textureIndex =
+                    static_cast<int>(reinterpret_cast<intptr_t>(anchored->data[1]));
+                if (!texture) {
+                    av_frame_free(&anchored);
+                    continue;
+                }
+
+                m_outputCount++;
+                if (m_outputCount <= 3 || m_outputCount % 300 == 0) {
+                    LogManager::instance().log(
+                        QString("Decoder: decoded frame #%1 — %2x%3 format=d3d11 hw=yes zero-copy")
+                            .arg(m_outputCount)
+                            .arg(anchored->width)
+                            .arg(anchored->height)
+                    );
+                }
+
+                if (anchored->width != m_currentWidth
+                    || anchored->height != m_currentHeight) {
+                    m_currentWidth = anchored->width;
+                    m_currentHeight = anchored->height;
+                    LogManager::instance().log(
+                        QString("Decoder: dimensions changed to %1x%2")
+                            .arg(m_currentWidth)
+                            .arg(m_currentHeight)
+                    );
+                    emit dimensionsChanged(m_currentWidth, m_currentHeight);
+                }
+
+                HardwareVideoFrame hardware;
+                hardware.anchor.reset(anchored, [](AVFrame* frame) {
+                    av_frame_free(&frame);
+                });
+                hardware.texture = texture;
+                hardware.textureIndex = textureIndex;
+                hardware.width = anchored->width;
+                hardware.height = anchored->height;
+                hardware.streamId = metadata.streamId;
+                hardware.sequence = metadata.sequence;
+                hardware.presentationTimestampNanoseconds =
+                    metadata.presentationTimestampNanoseconds;
+                hardware.colorParameters = video_color::parametersFor(
+                    anchored->color_range == AVCOL_RANGE_JPEG
+                        ? video_color::Range::full
+                        : video_color::Range::unspecified,
+                    anchored->colorspace == AVCOL_SPC_SMPTE170M
+                        || anchored->colorspace == AVCOL_SPC_BT470BG
+                        ? video_color::Matrix::bt601
+                        : video_color::Matrix::bt709
+                );
+                emit hardwareFrameDecoded(hardware);
+                continue;
+            }
+#endif
             av_frame_unref(m_transferFrame);
             if (av_hwframe_transfer_data(m_transferFrame, m_frame, 0) < 0) {
                 if (m_outputCount <= 5) {

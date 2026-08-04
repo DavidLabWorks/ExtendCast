@@ -122,6 +122,13 @@ set(SOURCES
     AudioPlayer.cpp
 )
 
+if(WIN32)
+    list(APPEND SOURCES
+        D3D11SharedDevice.cpp
+        D3D11VideoPresenter.cpp
+    )
+endif()
+
 set(HEADERS
     MainWindow.h
     InboundCompatibilityEndpoint.h
@@ -130,6 +137,7 @@ set(HEADERS
     NetworkListener.h
     VideoDecoder.h
     HardwareDecodeSupport.h
+    HardwareVideoFrame.h
     DecodedVideoFrame.h
     LatestValueMailbox.h
     VideoDecodeQueue.h
@@ -144,6 +152,13 @@ set(HEADERS
     AudioDecoder.h
     AudioPlayer.h
 )
+
+if(WIN32)
+    list(APPEND HEADERS
+        D3D11SharedDevice.h
+        D3D11VideoPresenter.h
+    )
+endif()
 
 if(ENABLE_ANDROID_ADB)
     list(APPEND SOURCES AdbHelper.cpp)
@@ -317,6 +332,7 @@ if(WIN32)
         iphlpapi
         d3d11
         dxgi
+        d3dcompiler
     )
     set_target_properties(BetterCastReceiver PROPERTIES
         OUTPUT_NAME ExtendCast

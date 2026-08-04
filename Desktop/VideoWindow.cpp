@@ -1,5 +1,4 @@
 #include "VideoWindow.h"
-#include "VideoRenderer.h"
 #include "InputHandler.h"
 #include "MainWindow.h"  // for LogManager
 
@@ -8,6 +7,7 @@
 #include <QFrame>
 #include <QIcon>
 #include <QLabel>
+#include <QWidget>
 #include <QWindow>
 #include <functional>
 
@@ -16,9 +16,9 @@
 #include <windowsx.h>
 #endif
 
-VideoWindow::VideoWindow(VideoRenderer* renderer, InputHandler* inputHandler, QWidget* parent)
+VideoWindow::VideoWindow(QWidget* videoSurface, InputHandler* inputHandler, QWidget* parent)
     : QMainWindow(nullptr)
-    , m_renderer(renderer)
+    , m_videoSurface(videoSurface)
     , m_inputHandler(inputHandler)
     , m_ownerWindow(parent)
 {
@@ -46,7 +46,7 @@ VideoWindow::VideoWindow(VideoRenderer* renderer, InputHandler* inputHandler, QW
     layout->setSpacing(0);
 
     setupTitleBar(layout);
-    layout->addWidget(m_renderer, 1);
+    layout->addWidget(m_videoSurface, 1);
 
     setCentralWidget(central);
 
@@ -115,16 +115,16 @@ void VideoWindow::updateWindowControlStates() {
 }
 
 VideoWindow::~VideoWindow() {
-    // Don't delete the renderer — it's owned by MainWindow
-    if (m_renderer) {
-        m_renderer->setParent(nullptr);
+    // Don't delete the video surface — owned by ReceiverSession
+    if (m_videoSurface) {
+        m_videoSurface->setParent(nullptr);
     }
 }
 
 void VideoWindow::showForVideo() {
     if (isVisible()) {
-        if (m_renderer) {
-            m_renderer->show();
+        if (m_videoSurface) {
+            m_videoSurface->show();
         }
         raise();
         activateWindow();
@@ -163,8 +163,8 @@ void VideoWindow::showForVideo() {
     }
 
     resize(winW, winH);
-    if (m_renderer) {
-        m_renderer->show();
+    if (m_videoSurface) {
+        m_videoSurface->show();
     }
     show();
     LogManager::instance().log("Video window opened");

@@ -5,6 +5,7 @@
 #include <QSize>
 
 #include "DecodedVideoFrame.h"
+#include "HardwareVideoFrame.h"
 
 // Forward declarations for FFmpeg types
 struct AVBufferRef;
@@ -26,9 +27,12 @@ public:
     void reset();
 
     bool usingHardwareDecode() const { return m_usingHardware; }
+    /// When true on Windows, emit GPU frames instead of CPU NV12 copies.
+    void setZeroCopyPresent(bool enabled) { m_zeroCopyPresent = enabled; }
 
 signals:
     void frameDecoded(const DecodedVideoFrame& frame);
+    void hardwareFrameDecoded(const HardwareVideoFrame& frame);
     void dimensionsChanged(int width, int height);
     void keyframeNeeded();  // Emitted on decode errors — receiver should request IDR from sender
 
@@ -56,6 +60,7 @@ private:
     AVFrame* m_transferFrame = nullptr;
     AVPacket* m_packet = nullptr;
     bool m_usingHardware = false;
+    bool m_zeroCopyPresent = false;
 
     // Cached SPS/PPS (from current packet scan)
     QByteArray m_sps;

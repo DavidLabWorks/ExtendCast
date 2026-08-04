@@ -15,14 +15,14 @@
 class QEvent;
 class QFrame;
 class QLabel;
-class VideoRenderer;
+class QWidget;
 class InputHandler;
 
 class VideoWindow : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit VideoWindow(VideoRenderer* renderer, InputHandler* inputHandler, QWidget* parent = nullptr);
+    explicit VideoWindow(QWidget* videoSurface, InputHandler* inputHandler, QWidget* parent = nullptr);
     ~VideoWindow();
 
     void showForVideo();
@@ -48,7 +48,7 @@ private:
     void toggleFullscreen();
     void updateFullscreenButton();
 
-    VideoRenderer* m_renderer = nullptr;
+    QWidget* m_videoSurface = nullptr;
     InputHandler* m_inputHandler = nullptr;
     QWidget* m_ownerWindow = nullptr;
     QFrame* m_titleBar = nullptr;

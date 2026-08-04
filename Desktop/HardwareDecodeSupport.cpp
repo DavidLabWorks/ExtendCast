@@ -1,5 +1,9 @@
 #include "HardwareDecodeSupport.h"
 
+#ifdef _WIN32
+#include "D3D11SharedDevice.h"
+#endif
+
 extern "C" {
 #include <libavutil/hwcontext.h>
 }
@@ -7,6 +11,9 @@ extern "C" {
 bool hardwareH264DecodeAvailable() {
 #ifdef _WIN32
     static const bool available = []() {
+        if (D3D11SharedDevice::instance().ensureCreated()) {
+            return true;
+        }
         AVBufferRef* device = nullptr;
         const int ret = av_hwdevice_ctx_create(
             &device,

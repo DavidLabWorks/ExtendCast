@@ -16,6 +16,10 @@ class MainWindow;
 class VideoDecoder;
 class VideoRenderer;
 class VideoWindow;
+class QWidget;
+#ifdef _WIN32
+class D3D11VideoPresenter;
+#endif
 
 class ReceiverSession : public QObject {
     Q_OBJECT
@@ -60,6 +64,10 @@ private:
     QString m_connectionId;
     VideoDecoder* m_decoder = nullptr;
     VideoRenderer* m_renderer = nullptr;
+#ifdef _WIN32
+    D3D11VideoPresenter* m_d3dPresenter = nullptr;
+#endif
+    QWidget* m_videoSurface = nullptr;
     InputHandler* m_inputHandler = nullptr;
     AudioDecoder* m_audioDecoder = nullptr;
     AudioPlayer* m_audioPlayer = nullptr;

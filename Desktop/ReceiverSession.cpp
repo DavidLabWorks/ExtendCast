@@ -8,6 +8,10 @@
 #include "VideoRenderer.h"
 #include "VideoWindow.h"
 
+#ifdef _WIN32
+#include "D3D11SharedDevice.h"
+#endif
+
 #include <QSize>
 
 namespace {
@@ -29,8 +33,22 @@ ReceiverSession::ReceiverSession(
     , m_inputHandler(new InputHandler(this))
     , m_audioDecoder(new AudioDecoder(this))
     , m_audioPlayer(new AudioPlayer(this))
-    , m_window(new VideoWindow(m_renderer, m_inputHandler, ownerWindow))
 {
+    // Keep the proven OpenGL present path. Zero-copy D3D present remains in
+    // tree for a follow-up once the child-HWND swapchain path is validated;
+    // enabling it here caused black screens on Surface.
+    m_videoSurface = m_renderer;
+    m_decoder->setZeroCopyPresent(false);
+#ifdef _WIN32
+    if (D3D11SharedDevice::instance().ensureCreated()) {
+        LogManager::instance().log(
+            "Receiver: D3D11 decode available — presenting via OpenGL (zero-copy deferred)"
+        );
+    }
+#endif
+
+    m_window = new VideoWindow(m_videoSurface, m_inputHandler, ownerWindow);
+
     m_decoder->moveToThread(&m_decoderThread);
     connect(
         &m_decoderThread,
@@ -44,7 +62,42 @@ ReceiverSession::ReceiverSession(
     m_keyframeRequestCooldown.invalidate();
 
     m_window->bindToDevice(m_deviceId, m_deviceName);
-    m_inputHandler->attach(m_renderer);
+    m_inputHandler->attach(m_videoSurface);
+
+    auto onPresented = [this](
+        quint64 streamId,
+        quint64 sequence,
+        quint64 presentationTimestampNanoseconds
+    ) {
+        if (m_playbackAcknowledgementTimer.elapsed() < 250) {
+            return;
+        }
+        m_playbackAcknowledgementTimer.restart();
+        InputEvent acknowledgement(
+            InputEventType::Command,
+            0,
+            0,
+            kPlaybackAcknowledgementKeyCode
+        );
+        acknowledgement.streamId = QString::number(streamId);
+        acknowledgement.sequence = QString::number(sequence);
+        acknowledgement.presentationTimestampNanoseconds =
+            QString::number(presentationTimestampNanoseconds);
+        emit inputEvent(m_deviceId, acknowledgement);
+    };
+
+    auto onVideoSizeChanged = [this](QSize size) {
+        if (size.width() <= 0 || size.height() <= 0) {
+            return;
+        }
+        LogManager::instance().log(
+            QString("Video size for %1: %2x%3")
+                .arg(m_deviceName)
+                .arg(size.width())
+                .arg(size.height())
+        );
+        m_window->resizeToFitVideo(size.width(), size.height());
+    };
 
     connect(
         m_decoder,
@@ -53,6 +106,19 @@ ReceiverSession::ReceiverSession(
         &VideoRenderer::onFrameDecoded,
         Qt::DirectConnection
     );
+    connect(
+        m_renderer,
+        &VideoRenderer::framePresented,
+        this,
+        onPresented
+    );
+    connect(
+        m_renderer,
+        &VideoRenderer::videoSizeChanged,
+        this,
+        onVideoSizeChanged
+    );
+
     connect(
         m_decoder,
         &VideoDecoder::dimensionsChanged,
@@ -71,49 +137,6 @@ ReceiverSession::ReceiverSession(
             }
         },
         Qt::DirectConnection
-    );
-    connect(
-        m_renderer,
-        &VideoRenderer::framePresented,
-        this,
-        [this](
-            quint64 streamId,
-            quint64 sequence,
-            quint64 presentationTimestampNanoseconds
-        ) {
-            if (m_playbackAcknowledgementTimer.elapsed() < 250) {
-                return;
-            }
-            m_playbackAcknowledgementTimer.restart();
-            InputEvent acknowledgement(
-                InputEventType::Command,
-                0,
-                0,
-                kPlaybackAcknowledgementKeyCode
-            );
-            acknowledgement.streamId = QString::number(streamId);
-            acknowledgement.sequence = QString::number(sequence);
-            acknowledgement.presentationTimestampNanoseconds =
-                QString::number(presentationTimestampNanoseconds);
-            emit inputEvent(m_deviceId, acknowledgement);
-        }
-    );
-    connect(
-        m_renderer,
-        &VideoRenderer::videoSizeChanged,
-        this,
-        [this](QSize size) {
-            if (size.width() <= 0 || size.height() <= 0) {
-                return;
-            }
-            LogManager::instance().log(
-                QString("Video size for %1: %2x%3")
-                    .arg(m_deviceName)
-                    .arg(size.width())
-                    .arg(size.height())
-            );
-            m_window->resizeToFitVideo(size.width(), size.height());
-        }
     );
     connect(
         m_audioDecoder,
@@ -148,7 +171,11 @@ ReceiverSession::~ReceiverSession() {
         delete m_window;
         m_window = nullptr;
     }
-    delete m_renderer;
+    delete m_videoSurface;
+    m_videoSurface = nullptr;
+#ifdef _WIN32
+    m_d3dPresenter = nullptr;
+#endif
     m_renderer = nullptr;
 }
 

@@ -1,5 +1,4 @@
 #include "InputHandler.h"
-#include "VideoRenderer.h"
 
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -11,11 +10,11 @@ InputHandler::InputHandler(QObject* parent)
 {
 }
 
-void InputHandler::attach(VideoRenderer* renderer) {
-    m_renderer = renderer;
-    renderer->installEventFilter(this);
-    renderer->setMouseTracking(true);
-    renderer->setFocusPolicy(Qt::StrongFocus);
+void InputHandler::attach(QWidget* videoSurface) {
+    m_videoSurface = videoSurface;
+    videoSurface->installEventFilter(this);
+    videoSurface->setMouseTracking(true);
+    videoSurface->setFocusPolicy(Qt::StrongFocus);
 }
 
 void InputHandler::setContentSize(QSize size) {
@@ -23,10 +22,10 @@ void InputHandler::setContentSize(QSize size) {
 }
 
 InputHandler::NormalizedPoint InputHandler::normalize(double widgetX, double widgetY) const {
-    if (!m_renderer) return {0, 0, false};
+    if (!m_videoSurface) return {0, 0, false};
 
-    double viewW = m_renderer->width();
-    double viewH = m_renderer->height();
+    double viewW = m_videoSurface->width();
+    double viewH = m_videoSurface->height();
     double contentW = m_contentSize.width();
     double contentH = m_contentSize.height();
 
@@ -34,7 +33,7 @@ InputHandler::NormalizedPoint InputHandler::normalize(double widgetX, double wid
         return {0, 0, false};
     }
 
-    // Calculate aspect-ratio-correct video rect (matching VideoRenderer letterboxing)
+    // Calculate aspect-ratio-correct video rect (matching letterboxing)
     double widthRatio = viewW / contentW;
     double heightRatio = viewH / contentH;
     double scale = std::min(widthRatio, heightRatio);
