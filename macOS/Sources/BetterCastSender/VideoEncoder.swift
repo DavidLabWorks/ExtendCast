@@ -106,6 +106,23 @@ class VideoEncoder {
         VTCompressionSessionPrepareToEncodeFrames(session)
         LogManager.shared.log("VideoEncoder: Initialized (\(bitrate/1_000_000)Mbps, KF every \(keyframeIntervalSeconds)s)")
     }
+
+    /// Stops accepting frames and tears down the VT session before `self` can
+    /// be released. Required because the compression callback holds an
+    /// unretained pointer to this encoder.
+    func invalidate() {
+        guard let session = compressionSession else { return }
+        compressionSession = nil
+        VTCompressionSessionCompleteFrames(
+            session,
+            untilPresentationTimeStamp: .invalid
+        )
+        VTCompressionSessionInvalidate(session)
+    }
+
+    deinit {
+        invalidate()
+    }
     
     func forceKeyframe() {
         LogManager.shared.log("VideoEncoder: Keyframe Requested")

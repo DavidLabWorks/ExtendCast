@@ -8,6 +8,7 @@ class QWidget;
 
 // Captures mouse/keyboard events from the video widget and converts
 // them to normalized InputEvent objects for sending to the Mac sender.
+// Keyboard VK codes are translated to Mac CGKeyCodes before send.
 class InputHandler : public QObject {
     Q_OBJECT
 

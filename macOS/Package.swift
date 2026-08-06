@@ -32,6 +32,7 @@ let package = Package(
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("Network"),
                 .linkedFramework("CoreGraphics"),
+                .linkedFramework("ColorSync"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("ServiceManagement"),
                 .linkedFramework("SystemConfiguration")

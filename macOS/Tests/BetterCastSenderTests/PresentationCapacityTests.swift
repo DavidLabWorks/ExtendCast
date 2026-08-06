@@ -90,7 +90,7 @@ final class PresentationCapacityTests: XCTestCase {
         XCTAssertEqual(loopback.height, 1920)
     }
 
-    func testHardwareDecodeSkipsSoftDecodeLimit() {
+    func testHardwareDecodeWithoutZeroCopyKeepsUserClarityAndFPS() {
         let envelope = PresentationCapacity.bind(
             width: 2880,
             height: 1920,
@@ -105,6 +105,25 @@ final class PresentationCapacityTests: XCTestCase {
         XCTAssertEqual(envelope.height, 1920)
         XCTAssertEqual(envelope.fps, 60)
         XCTAssertTrue(envelope.retinaEnabled)
-        XCTAssertEqual(envelope.detail, "hardware-decode capacity")
+        XCTAssertEqual(envelope.detail, "hardware-decode software-present (user fps)")
+    }
+
+    func testHardwareDecodeWithZeroCopyKeepsFullCapacity() {
+        let envelope = PresentationCapacity.bind(
+            width: 2880,
+            height: 1920,
+            fps: 60,
+            retinaEnabled: true,
+            serviceName: "Dang-Surface (Windows)",
+            hardwareDecode: true,
+            zeroCopyPresent: true
+        )
+
+        XCTAssertFalse(envelope.appliedLimit)
+        XCTAssertEqual(envelope.width, 2880)
+        XCTAssertEqual(envelope.height, 1920)
+        XCTAssertEqual(envelope.fps, 60)
+        XCTAssertTrue(envelope.retinaEnabled)
+        XCTAssertEqual(envelope.detail, "hardware-decode zero-copy capacity")
     }
 }

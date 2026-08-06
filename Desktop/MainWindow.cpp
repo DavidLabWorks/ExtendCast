@@ -2232,10 +2232,23 @@ void MainWindow::onConnectionEstablished(
             session,
             &ReceiverSession::windowClosed,
             this,
-            [](const QString& closedDeviceId) {
+            [this](const QString& closedDeviceId) {
                 LogManager::instance().log(
                     "Video window closed by user [" + closedDeviceId.left(8) + "]"
                 );
+                if (auto* closed = m_receiverSessions.take(closedDeviceId)) {
+                    delete closed;
+                }
+                m_connectedSenders.remove(closedDeviceId);
+                refreshConnectedSendersCard();
+                if (m_receiverSessions.isEmpty() && m_recvStatusLabel) {
+                    m_recvStatusLabel->setText(
+                        QString("Listening on port %1").arg(m_receiverPort)
+                    );
+                    m_recvStatusLabel->setStyleSheet(
+                        "font-size: 13px; font-weight: bold; color: #d8d8d8;"
+                    );
+                }
             }
         );
         session->show();
@@ -2271,7 +2284,9 @@ void MainWindow::onConnectionEstablished(
     // Reset reconnect counter only after video actually starts flowing
     // (delayed so brief connect-then-disconnect during reconnect doesn't reset it)
     QTimer::singleShot(3000, this, [this, deviceId]() {
-        if (m_receiverSessions.contains(deviceId)) {
+        // Only clear the ADB reconnect budget after a sustained live link.
+        // Sessions are now kept across flaps, so presence alone is not enough.
+        if (m_connectedSenders.contains(deviceId)) {
             m_reconnectAttempts = 0;
         }
     });
@@ -2297,16 +2312,19 @@ void MainWindow::onConnectionLost(const QString& deviceId) {
     m_connectedSenders.remove(deviceId);
     refreshConnectedSendersCard();
 
-    if (auto* session = m_receiverSessions.take(deviceId)) {
+    // Keep the isolated window/session across Thunderbolt/Wi-Fi flaps.
+    // Destroying QOpenGLWidget + D3D11VA on every disconnect caused reconnect
+    // crashes on Surface; replaceConnection() resets decode for the new stream.
+    if (auto* session = m_receiverSessions.value(deviceId)) {
         LogManager::instance().log(
-            QString("Receiver: Closing isolated window %1 for %2")
+            QString("Receiver: Keeping window %1 for %2 after disconnect")
                 .arg(deviceId.left(8), session->deviceName())
         );
-        delete session;
+        session->resetVideoDecoder();
     }
 
 #ifdef ENABLE_ANDROID_ADB
-    if (m_adbHelper->wasAdbConnection() && m_receiverSessions.isEmpty()) {
+    if (m_adbHelper->wasAdbConnection() && m_connectedSenders.isEmpty()) {
         // Don't reset m_reconnectAttempts here — if the reconnect itself
         // succeeds briefly then disconnects, we'd loop forever.
         // The counter only resets after a sustained connection (3s in onConnectionEstablished).
@@ -2320,20 +2338,20 @@ void MainWindow::onConnectionLost(const QString& deviceId) {
         });
     } else
 #endif
-    if (m_receiverSessions.isEmpty()) {
+    if (m_connectedSenders.isEmpty()) {
         m_recvStatusLabel->setText("Connection lost — still listening on port 51820");
         m_recvStatusLabel->setStyleSheet("font-size: 15px; font-weight: bold; color: orange;");
         LogManager::instance().log("Connection lost [" + deviceId.left(8) + "]");
     } else {
         m_recvStatusLabel->setText(
             QString("Connected — %1 Receiving window(s)")
-                .arg(m_receiverSessions.size())
+                .arg(m_connectedSenders.size())
         );
         m_recvStatusLabel->setStyleSheet("font-size: 15px; font-weight: bold; color: #4caf50;");
         LogManager::instance().log(
             QString("Connection lost [%1]; %2 sender(s) remain")
                 .arg(deviceId.left(8))
-                .arg(m_receiverSessions.size())
+                .arg(m_connectedSenders.size())
         );
     }
 }

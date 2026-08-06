@@ -56,9 +56,8 @@ bool D3D11SharedDevice::ensureCreated() {
 
 bool D3D11SharedDevice::createDevice() {
     UINT flags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
-#if defined(_DEBUG)
-    flags |= D3D11_CREATE_DEVICE_DEBUG;
-#endif
+    // Avoid the debug layer in normal builds — missing D3D11SDKLayers.dll
+    // can make CreateDevice fail or crash on some Surface images.
     D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
     const HRESULT hr = D3D11CreateDevice(
         nullptr,

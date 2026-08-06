@@ -144,6 +144,17 @@ class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stopCaptureAndWait() async {
+        // Keep encoders alive until stop returns so VT/audio teardown cannot
+        // race a disconnect that invalidates them immediately afterwards.
+        let retainedVideoEncoder = videoEncoder
+        let retainedAudioEncoder = audioEncoder
+        videoEncoder = nil
+        audioEncoder = nil
+        defer {
+            _ = retainedVideoEncoder
+            _ = retainedAudioEncoder
+        }
+
         guard let activeStream = stream else { return }
         stream = nil
         do {

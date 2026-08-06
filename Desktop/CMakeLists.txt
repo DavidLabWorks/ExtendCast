@@ -147,6 +147,7 @@ set(HEADERS
     InboundSessionRegistry.h
     InputHandler.h
     InputEvent.h
+    WindowsToMacKeyCode.h
     ReceiverRouteClassifier.h
     ServiceDiscovery.h
     AudioDecoder.h
@@ -234,6 +235,11 @@ if(BUILD_TESTING)
         ReceiverRouteClassifier.h
     )
     add_executable(
+        WindowsToMacKeyCodeTests
+        tests/WindowsToMacKeyCodeTests.cpp
+        WindowsToMacKeyCode.h
+    )
+    add_executable(
         VideoPacketTests
         tests/VideoPacketTests.cpp
         VideoPacket.h
@@ -265,6 +271,10 @@ if(BUILD_TESTING)
     add_test(
         NAME ReceiverRouteClassifierTests
         COMMAND ReceiverRouteClassifierTests
+    )
+    add_test(
+        NAME WindowsToMacKeyCodeTests
+        COMMAND WindowsToMacKeyCodeTests
     )
     add_test(
         NAME VideoPacketTests

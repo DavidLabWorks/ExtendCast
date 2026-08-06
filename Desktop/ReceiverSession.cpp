@@ -50,12 +50,6 @@ ReceiverSession::ReceiverSession(
     m_window = new VideoWindow(m_videoSurface, m_inputHandler, ownerWindow);
 
     m_decoder->moveToThread(&m_decoderThread);
-    connect(
-        &m_decoderThread,
-        &QThread::finished,
-        m_decoder,
-        &QObject::deleteLater
-    );
     m_decoderThread.setObjectName("ExtendCast video decoder");
     m_decoderThread.start(QThread::HighPriority);
     m_playbackAcknowledgementTimer.start();
@@ -163,9 +157,33 @@ ReceiverSession::ReceiverSession(
 }
 
 ReceiverSession::~ReceiverSession() {
-    m_decoderThread.quit();
-    m_decoderThread.wait();
-    m_decoder = nullptr;
+    m_videoDecodeQueue.clearForStreamReset();
+
+    if (m_decoder) {
+        disconnect(m_decoder, nullptr, m_renderer, nullptr);
+        disconnect(m_decoder, nullptr, this, nullptr);
+    }
+    if (m_renderer) {
+        disconnect(m_renderer, nullptr, this, nullptr);
+    }
+
+    if (m_decoder && m_decoderThread.isRunning()) {
+        // Drain decoder GPU/GL-touching state on its thread before teardown.
+        QMetaObject::invokeMethod(
+            m_decoder,
+            [decoder = m_decoder]() { decoder->reset(); },
+            Qt::BlockingQueuedConnection
+        );
+        m_decoderThread.quit();
+        m_decoderThread.wait(5000);
+        m_decoder->moveToThread(QThread::currentThread());
+        delete m_decoder;
+        m_decoder = nullptr;
+    } else if (m_decoder) {
+        delete m_decoder;
+        m_decoder = nullptr;
+    }
+
     if (m_window) {
         m_window->hide();
         delete m_window;

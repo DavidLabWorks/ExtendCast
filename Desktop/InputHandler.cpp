@@ -1,4 +1,5 @@
 #include "InputHandler.h"
+#include "WindowsToMacKeyCode.h"
 
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -110,16 +111,17 @@ bool InputHandler::eventFilter(QObject* obj, QEvent* event) {
     }
     case QEvent::KeyPress: {
         auto* ke = static_cast<QKeyEvent*>(event);
-        // Send Qt native key code — sender will need a mapping table
-        // For now we send the Qt key code directly
-        emit inputEvent(InputEvent(InputEventType::KeyDown, 0, 0,
-                                   static_cast<uint16_t>(ke->nativeVirtualKey())));
+        // Wire protocol uses Mac CGKeyCodes (same as Mac receivers).
+        if (auto macKey = windowsVirtualKeyToMacKeyCode(ke->nativeVirtualKey())) {
+            emit inputEvent(InputEvent(InputEventType::KeyDown, 0, 0, *macKey));
+        }
         return false;
     }
     case QEvent::KeyRelease: {
         auto* ke = static_cast<QKeyEvent*>(event);
-        emit inputEvent(InputEvent(InputEventType::KeyUp, 0, 0,
-                                   static_cast<uint16_t>(ke->nativeVirtualKey())));
+        if (auto macKey = windowsVirtualKeyToMacKeyCode(ke->nativeVirtualKey())) {
+            emit inputEvent(InputEvent(InputEventType::KeyUp, 0, 0, *macKey));
+        }
         return false;
     }
     default:

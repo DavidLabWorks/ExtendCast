@@ -1,11 +1,14 @@
 #include "AudioDecoder.h"
 #include <QDebug>
+#include <cstring>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/frame.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/samplefmt.h>
+#include <libavutil/mem.h>
+#include <libavutil/error.h>
 }
 
 AudioDecoder::AudioDecoder(QObject* parent)
@@ -27,7 +30,24 @@ bool AudioDecoder::initDecoder() {
     m_codecCtx = avcodec_alloc_context3(codec);
     if (!m_codecCtx) return false;
 
-    // Let FFmpeg detect format from the stream
+    // Mac AudioEncoder sends raw AAC-LC frames (no ADTS). FFmpeg needs an
+    // AudioSpecificConfig (ASC) in extradata before it will accept those
+    // packets — otherwise avcodec_send_packet fails with Invalid data and
+    // we get silent playback. Match the sender's documented 48 kHz stereo.
+    static const uint8_t kAacLc48kStereoAsc[] = {0x11, 0x90};
+    const int ascSize = static_cast<int>(sizeof(kAacLc48kStereoAsc));
+    uint8_t* extradata = static_cast<uint8_t*>(
+        av_malloc(ascSize + AV_INPUT_BUFFER_PADDING_SIZE)
+    );
+    if (!extradata) {
+        avcodec_free_context(&m_codecCtx);
+        return false;
+    }
+    memset(extradata, 0, ascSize + AV_INPUT_BUFFER_PADDING_SIZE);
+    memcpy(extradata, kAacLc48kStereoAsc, ascSize);
+    m_codecCtx->extradata = extradata;
+    m_codecCtx->extradata_size = ascSize;
+
     if (avcodec_open2(m_codecCtx, codec, nullptr) < 0) {
         qWarning() << "AudioDecoder: Failed to open AAC decoder";
         avcodec_free_context(&m_codecCtx);
@@ -38,7 +58,7 @@ bool AudioDecoder::initDecoder() {
     m_packet = av_packet_alloc();
     m_initialized = true;
 
-    qDebug() << "AudioDecoder: AAC decoder initialized";
+    qDebug() << "AudioDecoder: AAC decoder initialized (ASC 48kHz stereo LC)";
     return true;
 }
 
@@ -59,7 +79,17 @@ void AudioDecoder::decode(const QByteArray& aacData) {
     m_packet->size = aacData.size();
 
     int ret = avcodec_send_packet(m_codecCtx, m_packet);
-    if (ret < 0) return;
+    if (ret < 0) {
+        static int sendFailures = 0;
+        if (sendFailures < 5) {
+            char errbuf[128];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            qWarning() << "AudioDecoder: avcodec_send_packet failed:" << errbuf
+                       << "size=" << aacData.size();
+            ++sendFailures;
+        }
+        return;
+    }
 
     while (ret >= 0) {
         ret = avcodec_receive_frame(m_codecCtx, m_frame);

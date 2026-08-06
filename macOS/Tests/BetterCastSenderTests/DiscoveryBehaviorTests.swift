@@ -1687,6 +1687,31 @@ final class DiscoveryBehaviorTests: XCTestCase {
         )
     }
 
+    func testBareBonjourServiceDoesNotBeatAdvertisedThunderboltHost() {
+        // Regression: matchesPreference=true used to return the Bonjour service
+        // name, which Network.framework then resolved via VPN/utun and timed out
+        // even though the Thunderbolt IP probe succeeded.
+        XCTAssertEqual(
+            NetworkClient.preferredConnectionEndpoint(
+                for: .thunderboltBridge,
+                resolvedRoute: nil,
+                discoveredEndpoint: .service(
+                    name: "Dang-Surface (Windows)",
+                    type: "_bettercast._tcp",
+                    domain: "local.",
+                    interface: nil
+                ),
+                advertisedThunderboltHost: "169.254.16.252",
+                thunderboltInterfaceName: "bridge0",
+                discoveredEndpointMatchesPreference: true
+            ),
+            .hostPort(
+                host: "169.254.16.252%bridge0",
+                port: 51820
+            )
+        )
+    }
+
     func testWiFiRouteIsNotMistakenForThunderboltWhenBridgeIsAvailable() {
         let wifiRoute = BonjourResolvedRoute(
             endpoint: .hostPort(host: "192.168.31.235", port: 51820),

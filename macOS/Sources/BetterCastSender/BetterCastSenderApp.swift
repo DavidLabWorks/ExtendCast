@@ -2362,6 +2362,7 @@ struct DeviceDetailView: View {
                     get: { display.audioEnabled },
                     set: { client.setAudioEnabled($0, for: display.id) }
                 ),
+                remoteInputEnabled: $client.remoteInputEnabled,
                 autoConnect: Binding(
                     get: { client.isAutoConnectEnabled(for: display.id) },
                     set: { client.setAutoConnectEnabled($0, for: display.id) }
@@ -2423,6 +2424,7 @@ struct DeviceDetailView: View {
 struct DeviceStreamSettingsSections: View {
     @ObservedObject var client: NetworkClient
     @Binding var audioStreaming: Bool
+    @Binding var remoteInputEnabled: Bool
     @Binding var autoConnect: Bool
     let availableConnectionModes: [NetworkInterfacePreference]
     let protocolDisabled: Bool
@@ -2514,6 +2516,13 @@ struct DeviceStreamSettingsSections: View {
                 HStack {
                     Toggle("Audio Streaming", isOn: $audioStreaming)
                     InfoTip(text: "Streams system audio to the receiver.")
+                }
+            }
+
+            Section("Control") {
+                HStack {
+                    Toggle("Receiver Input", isOn: $remoteInputEnabled)
+                    InfoTip(text: "Allow this receiver's keyboard, mouse, and scroll to control this Mac.")
                 }
             }
         }
@@ -2806,6 +2815,7 @@ struct DiscoveredDeviceView: View {
                 DeviceStreamSettingsSections(
                     client: client,
                     audioStreaming: $client.audioStreamingEnabled,
+                    remoteInputEnabled: $client.remoteInputEnabled,
                     autoConnect: Binding(
                         get: { client.isAutoConnectEnabled(for: service) },
                         set: { client.setAutoConnectEnabled($0, for: service) }
@@ -3672,6 +3682,10 @@ struct ReceiverSettings: Codable, Equatable {
     // Optional for backward compatibility with profiles saved before build 37.
     var connectionType: String?
     var interfacePreferenceRawValue: String?
+    // Optional for backward compatibility; nil means disabled.
+    var remoteInputEnabled: Bool?
+
+    var allowsRemoteInput: Bool { remoteInputEnabled ?? false }
 }
 
 // Per-connection pipeline: each device gets its own virtual display, screen capture, and encoder
@@ -3868,6 +3882,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     @Published var audioStreamingEnabled: Bool = true {
         didSet { persistSettings() }
     }
+    @Published var remoteInputEnabled: Bool = false {
+        didSet { persistSettings() }
+    }
     @Published var connectedDisplays: [ConnectedDisplayInfo] = [] // Per-device display info
 
     // Input event deduplication (receiver sends critical events 3x over UDP for reliability)
@@ -3886,6 +3903,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             recentEventIds.remove(old)
         }
         return false
+    }
+
+    private func allowsRemoteInput(for connectionId: UUID) -> Bool {
+        pipelines[connectionId]?.settings.allowsRemoteInput ?? false
     }
 
     // Fragmentation State
@@ -4127,8 +4148,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         .map {
                             "\($0.key.rawValue)=\($0.value.sorted().joined(separator: ","))"
                         }.joined(separator: ";")
+                    let decode = service.hardwareDecodeCapable ? "hw" : "sw"
                     return "\(service.name){endpoint=\(service.endpoint) " +
-                        "interfaces=[\(interfaces)] routes=[\(endpoints)]}"
+                        "interfaces=[\(interfaces)] routes=[\(endpoints)] decode=\(decode)}"
                 }.joined(separator: " | ")
                 ConnectDiagnostics.log(
                     "browser results protocol=\(protocolType) count=\(servicesByName.count) " +
@@ -4906,7 +4928,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             useVirtualDisplay: useVirtualDisplay,
             audioStreamingEnabled: audioStreamingEnabled,
             connectionType: interfacePreference.allowsUDP ? connectionType : "TCP",
-            interfacePreferenceRawValue: interfacePreference.rawValue
+            interfacePreferenceRawValue: interfacePreference.rawValue,
+            remoteInputEnabled: remoteInputEnabled
         )
     }
 
@@ -5046,6 +5069,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         selectedFPS = settings.fps == 30 ? 30 : 60
         useVirtualDisplay = settings.useVirtualDisplay
         audioStreamingEnabled = settings.audioStreamingEnabled
+        remoteInputEnabled = settings.allowsRemoteInput
         if let savedConnectionType = settings.connectionType,
            savedConnectionType == "TCP" || savedConnectionType == "UDP" {
             connectionType = savedConnectionType
@@ -5252,7 +5276,17 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     private func settings(for service: DiscoveredService) -> ReceiverSettings {
-        receiverProfiles[receiverProfileKey(for: service)] ?? currentReceiverSettings()
+        normalizedReceiverSettings(
+            receiverProfiles[receiverProfileKey(for: service)] ?? currentReceiverSettings()
+        )
+    }
+
+    private func normalizedReceiverSettings(_ settings: ReceiverSettings) -> ReceiverSettings {
+        var normalized = settings
+        if normalized.remoteInputEnabled == nil {
+            normalized.remoteInputEnabled = false
+        }
+        return normalized
     }
 
     private func persistReceiverProfiles() {
@@ -5264,7 +5298,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     private func saveSettings(_ settings: ReceiverSettings, for service: DiscoveredService) {
-        receiverProfiles[receiverProfileKey(for: service)] = settings
+        receiverProfiles[receiverProfileKey(for: service)] = normalizedReceiverSettings(settings)
         persistReceiverProfiles()
         LogManager.shared.log("Sender: Saved settings for \(service.name)")
     }
@@ -6293,6 +6327,20 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                     } else {
                         self?.status = "Connected to \(remaining) device(s)"
                     }
+                case .cancelled:
+                    timeoutWork.cancel()
+                    self?.finishPendingConnection(
+                        connectionID: connectionId,
+                        receiverKey: pendingKey
+                    )
+                    // Peer closed or we cancelled after already removing the
+                    // pipeline — removeConnection is idempotent.
+                    if self?.pipelines[connectionId] != nil {
+                        LogManager.shared.log(
+                            "Sender: Connection to \(service.name) cancelled"
+                        )
+                        self?.removeConnection(connectionId)
+                    }
                 case .waiting(let error):
                     self?.status = "Waiting... \(error.localizedDescription)"
                 default:
@@ -6985,7 +7033,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
               let editedSettings = editedSettings(for: connectionId) else {
             return false
         }
-        return pipeline.settings != editedSettings
+        return normalizedReceiverSettings(pipeline.settings)
+            != normalizedReceiverSettings(editedSettings)
     }
 
     func pendingSettingsRequireReconnect(for connectionId: UUID) -> Bool {
@@ -7117,20 +7166,18 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     func removeConnection(_ connectionId: UUID) {
-        guard let pipeline = pipelines[connectionId] else { return }
+        guard let pipeline = pipelines.removeValue(forKey: connectionId) else { return }
 
-        // Tear down this connection's pipeline
-        pipeline.screenRecorder?.stopCapture()
-        pipeline.virtualDisplayManager?.destroyDisplay()
-        pipeline.connection.cancel()
-        InputHandler.shared.removeDisplayBounds(for: connectionId)
-
-        pipelines.removeValue(forKey: connectionId)
+        // Immediate bookkeeping (see ConnectionTeardownPolicy.immediateSteps).
         connectionRegistry.removeActive(connectionID: connectionId)
         connectedServices.removeAll { $0.name == pipeline.service.name }
+        InputHandler.shared.removeDisplayBounds(for: connectionId)
+        pipeline.connection.cancel()
 
         let remaining = pipelines.count
-        LogManager.shared.log("Sender: Disconnected from \(pipeline.service.name). Remaining: \(remaining)")
+        LogManager.shared.log(
+            "Sender: Disconnecting from \(pipeline.service.name). Remaining: \(remaining)"
+        )
 
         if remaining == 0 {
             status = "Disconnected"
@@ -7139,24 +7186,48 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             status = "Connected to \(remaining) device(s)"
         }
         updateConnectedDisplays()
+
+        // Retain capture/encoder/display until SCStream has fully stopped.
+        // Destroying the virtual display first (old path) races VT callbacks
+        // and can crash the sender when the Windows receiver is force-quit.
+        let recorder = pipeline.screenRecorder
+        let videoEncoder = pipeline.videoEncoder
+        let displayManager = pipeline.virtualDisplayManager
+        let serviceName = pipeline.service.name
+
+        Task { @MainActor in
+            await recorder?.stopCaptureAndWait()
+            videoEncoder?.invalidate()
+            displayManager?.destroyDisplay()
+            LogManager.shared.log("Sender: Finished teardown for \(serviceName)")
+        }
     }
 
     func disconnect() {
         pendingConnectionsByID.values.forEach { $0.cancel() }
         pendingConnectionsByID.removeAll()
-        for (id, pipeline) in pipelines {
-            suppressAutoConnect(for: pipeline.service)
-            pipeline.screenRecorder?.stopCapture()
-            pipeline.virtualDisplayManager?.destroyDisplay()
-            pipeline.connection.cancel()
-            InputHandler.shared.removeDisplayBounds(for: id)
-        }
+
+        let teardown = Array(pipelines)
         pipelines.removeAll()
         connectionRegistry.removeAll()
         connectedServices.removeAll()
         connectedDisplays.removeAll()
         status = "Disconnected"
         heartbeatTimer?.invalidate()
+
+        for (id, pipeline) in teardown {
+            suppressAutoConnect(for: pipeline.service)
+            InputHandler.shared.removeDisplayBounds(for: id)
+            pipeline.connection.cancel()
+        }
+
+        Task { @MainActor in
+            for (_, pipeline) in teardown {
+                await pipeline.screenRecorder?.stopCaptureAndWait()
+                pipeline.videoEncoder?.invalidate()
+                pipeline.virtualDisplayManager?.destroyDisplay()
+            }
+        }
     }
 
     func disconnectService(_ service: DiscoveredService) {
@@ -7294,10 +7365,12 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] content, contentContext, isComplete, error in
             if let error = error {
-                // Fatal errors: connection is truly dead
+                // Fatal errors: connection is truly dead — tear down immediately
+                // instead of waiting for heartbeat timeout (Windows force-quit).
                 if case let NWError.posix(code) = error,
                    (code == .ECONNRESET || code == .ENOTCONN || code == .ECANCELED) {
                     LogManager.shared.log("Sender: Receive error (fatal): \(error)")
+                    self?.removeConnection(connectionId)
                     return
                 }
                 // Non-fatal (e.g. ENODATA/96): keep receiving, don't spam logs
@@ -7331,7 +7404,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                                         streamID: streamID,
                                         timestampNanoseconds: timestamp
                                     )
-                                } else if self?.isDuplicateEvent(event.eventId) == false {
+                                } else if self?.isDuplicateEvent(event.eventId) == false,
+                                          self?.allowsRemoteInput(for: connectionId) == true {
                                     InputHandler.shared.handle(event: event, for: connectionId)
                                 }
                             }
@@ -7383,7 +7457,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                                     streamID: streamID,
                                     timestampNanoseconds: timestamp
                                 )
-                            } else if self?.isDuplicateEvent(event.eventId) == false {
+                            } else if self?.isDuplicateEvent(event.eventId) == false,
+                                      self?.allowsRemoteInput(for: connectionId) == true {
                                 InputHandler.shared.handle(event: event, for: connectionId)
                             }
                         }

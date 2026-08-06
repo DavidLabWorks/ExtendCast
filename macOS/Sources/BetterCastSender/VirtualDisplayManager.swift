@@ -68,6 +68,12 @@ class VirtualDisplayManager {
             "HiDPI=\(hiDPI), descriptorPPI=\(ppi), serial=\(serialNum)"
         )
 
+        // Hot-plugging a virtual display can reshuffle physical monitor modes.
+        // Keep a snapshot so we can put Redmi / built-in panels back afterward.
+        let modeSession = PhysicalDisplayModeSession.shared
+        modeSession.cancelScheduledRestore()
+        modeSession.captureBeforeMutation(excluding: Set([displayID].compactMap { $0 }))
+
         // Call the Objective-C function
         guard let display = createVirtualDisplay(
             Int32(width),
@@ -79,6 +85,7 @@ class VirtualDisplayManager {
             Double(refreshRate)
         ) else {
             LogManager.shared.log("VirtualDisplayManager: Failed to create virtual display")
+            modeSession.scheduleFallbackRestore()
             return nil
         }
         
@@ -92,10 +99,17 @@ class VirtualDisplayManager {
         if let displayIDValue = (display as AnyObject).value(forKey: "displayID") as? UInt32 {
             self.displayID = displayIDValue
             LogManager.shared.log("VirtualDisplayManager: Created virtual display with ID \(displayIDValue)")
+            // Restore after mode selection settles (see selectRequestedMode).
+            // Fallback covers the case where bounds polling never runs.
+            modeSession.scheduleRestore(
+                excluding: [displayIDValue],
+                virtualDisplayID: displayIDValue
+            )
             return displayIDValue
         }
         
         LogManager.shared.log("VirtualDisplayManager: Created display but couldn't get ID")
+        modeSession.scheduleFallbackRestore()
         return nil
     }
 
@@ -145,10 +159,20 @@ class VirtualDisplayManager {
                 "\(requestedMode.width)x\(requestedMode.height), pixels=" +
                 "\(requestedMode.pixelWidth)x\(requestedMode.pixelHeight)"
             )
+            // Mode selection can reshuffle layout again — restore physical modes
+            // and put the virtual display back at its saved arrangement origin.
+            PhysicalDisplayModeSession.shared.scheduleRestore(
+                excluding: [displayID],
+                virtualDisplayID: displayID
+            )
             return true
         }
 
         LogManager.shared.log("VirtualDisplayManager: Failed to select requested mode (CGError \(result.rawValue))")
+        PhysicalDisplayModeSession.shared.scheduleRestore(
+            excluding: [displayID],
+            virtualDisplayID: displayID
+        )
         return false
     }
 
@@ -232,12 +256,19 @@ class VirtualDisplayManager {
     
     /// Destroys the currently active virtual display
     func destroyDisplay() {
+        let modeSession = PhysicalDisplayModeSession.shared
+        let excluded = Set([displayID].compactMap { $0 })
+        modeSession.captureBeforeMutation(excluding: excluded)
+
         activeDisplay = nil
         displayID = nil
         activeResolution = nil
         activeRefreshRate = nil
         didSelectRequestedMode = false
         LogManager.shared.log("VirtualDisplayManager: Destroyed virtual display")
+
+        // Recreate paths cancel this and restore after the new virtual display settles.
+        modeSession.scheduleFallbackRestore()
     }
     
     deinit {

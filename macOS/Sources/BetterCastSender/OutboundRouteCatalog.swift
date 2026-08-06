@@ -186,7 +186,14 @@ struct OutboundRouteCatalog {
                     ? nil
                     : cachedEndpoint
         if preference == .thunderboltBridge {
-            if discoveredEndpointMatchesPreference {
+            // Only keep a "matching" discovered endpoint when it is already a
+            // scoped Thunderbolt host/service. Bare Bonjour service names are
+            // resolved by Network.framework and can be hijacked onto VPN/utun.
+            if discoveredEndpointMatchesPreference,
+               isThunderboltScopedEndpoint(
+                discoveredEndpoint,
+                interfaceName: thunderboltInterfaceName
+               ) {
                 return discoveredEndpoint
             }
             if let thunderboltInterfaceName {
@@ -240,6 +247,33 @@ struct OutboundRouteCatalog {
             }
         }
         return verifiedEndpoint ?? discoveredEndpoint
+    }
+
+    /// True when the endpoint is already bound to a Thunderbolt bridge scope,
+    /// so Network.framework will not re-resolve it through VPN/proxy interfaces.
+    private static func isThunderboltScopedEndpoint(
+        _ endpoint: NWEndpoint,
+        interfaceName: String?
+    ) -> Bool {
+        let scope = interfaceName?.lowercased()
+        switch endpoint {
+        case .hostPort(let host, _):
+            let hostText = String(describing: host).lowercased()
+            if let scope {
+                return hostText.hasSuffix("%\(scope)")
+            }
+            return hostText.contains("%bridge")
+        case .service(_, _, _, let interface):
+            guard let interfaceName = interface?.name.lowercased() else {
+                return false
+            }
+            if let scope {
+                return interfaceName == scope
+            }
+            return interfaceName.hasPrefix("bridge")
+        default:
+            return false
+        }
     }
 
     private var activeLocalThunderboltInterfaceNames: Set<String> {
