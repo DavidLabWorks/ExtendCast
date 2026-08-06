@@ -1535,6 +1535,13 @@ struct DevicesView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                if !client.connectedDisplays.isEmpty || !availableServices.isEmpty {
+                    HStack {
+                        Spacer(minLength: 0)
+                        devicesRefreshControl
+                    }
+                }
+
                 if !client.connectedDisplays.isEmpty {
                     DashboardCard {
                         VStack(alignment: .leading, spacing: 12) {
@@ -1588,9 +1595,15 @@ struct DevicesView: View {
                         VStack(alignment: .leading, spacing: 12) {
                             PageSectionHeader(
                                 "Available",
-                                subtitle: "Receivers found on your local network"
+                                subtitle: client.isDiscoveringDevices
+                                    ? "Scanning local network…"
+                                    : "Receivers found on your local network"
                             ) {
-                                StatusPill(title: "\(availableServices.count) found", color: .secondary, systemImage: "dot.radiowaves.left.and.right")
+                                StatusPill(
+                                    title: "\(availableServices.count) found",
+                                    color: .secondary,
+                                    systemImage: "dot.radiowaves.left.and.right"
+                                )
                             }
 
                             ForEach(availableServices, id: \.name) { service in
@@ -1652,6 +1665,33 @@ struct DevicesView: View {
         }
         .navigationTitle("Devices")
         .appPageBackground()
+    }
+
+    @ViewBuilder
+    private var devicesRefreshControl: some View {
+        if client.isDiscoveringDevices {
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Scanning…")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Scanning for receivers")
+        } else {
+            Button {
+                client.startBrowsing()
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+                    .font(.system(size: 12, weight: .medium))
+                    .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("Scan for receivers on the local network")
+            .keyboardShortcut("r", modifiers: [.command])
+        }
     }
 
     private func deviceIcon(for name: String) -> String {

@@ -114,6 +114,12 @@ bool hwndClientSizePixels(HWND hwnd, int* outWidth, int* outHeight) {
     return true;
 }
 
+// DXGI Flip swapchains are unreliable with odd sizes (DPR-rounded client
+// rects like 2881x1801). Keep buffers even so Present cannot stall the UI.
+int evenDimension(int value) {
+    return value > 1 ? (value & ~1) : value;
+}
+
 LRESULT CALLBACK presentWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == WM_NCHITTEST) {
         // Let clicks fall through to the Qt placeholder / InputHandler beneath.
@@ -216,14 +222,16 @@ void D3D11VideoPresenter::showEvent(QShowEvent* event) {
     ensureSwapChain();
     ensurePipeline();
     // Re-assert z-order/geometry after Qt finishes native updates.
-    QTimer::singleShot(0, this, [this]() {
-        syncPresentHwndGeometry();
-    });
+    schedulePresentHwndResync();
 }
 
 void D3D11VideoPresenter::hideEvent(QHideEvent* event) {
     QWidget::hideEvent(event);
-    if (m_presentHwnd) {
+    if (isCoverFullscreenMode()) {
+        schedulePresentHwndResync();
+        return;
+    }
+    if (m_presentHwnd && IsWindow(reinterpret_cast<HWND>(m_presentHwnd))) {
         ShowWindow(reinterpret_cast<HWND>(m_presentHwnd), SW_HIDE);
     }
 }
@@ -236,51 +244,7 @@ void D3D11VideoPresenter::resizeEvent(QResizeEvent* event) {
     if (!syncPresentHwndGeometry()) {
         return;
     }
-    const HWND hwnd = reinterpret_cast<HWND>(m_presentHwnd);
-    int physW = 0;
-    int physH = 0;
-    if (!hwndClientSizePixels(hwnd, &physW, &physH)) {
-        return;
-    }
-    if (m_swapChain
-        && (physW != m_swapWidth || physH != m_swapHeight)
-        && physW > 0
-        && physH > 0) {
-        releaseCom(m_rtv);
-        releaseCom(m_backBuffer);
-        const HRESULT hr = m_swapChain->ResizeBuffers(
-            0,
-            static_cast<UINT>(physW),
-            static_cast<UINT>(physH),
-            DXGI_FORMAT_UNKNOWN,
-            0
-        );
-        if (SUCCEEDED(hr)
-            && SUCCEEDED(m_swapChain->GetBuffer(
-                   0,
-                   __uuidof(ID3D11Texture2D),
-                   reinterpret_cast<void**>(&m_backBuffer)
-               ))
-            && SUCCEEDED(m_device->CreateRenderTargetView(
-                   m_backBuffer,
-                   nullptr,
-                   &m_rtv
-               ))) {
-            m_swapWidth = physW;
-            m_swapHeight = physH;
-            LogManager::instance().log(
-                QString("D3D11: SwapChain resized to %1x%2 (popup overlay)")
-                    .arg(m_swapWidth)
-                    .arg(m_swapHeight)
-            );
-        } else {
-            LogManager::instance().log(
-                QString("D3D11: ResizeBuffers failed hr=0x%1")
-                    .arg(quint32(hr), 8, 16, QChar('0'))
-            );
-            releaseSwapChain();
-        }
-    }
+    resizeSwapChainToHwnd();
     if (m_updatePending.load() || m_texWidth > 0) {
         presentPendingFrame();
     }
@@ -292,8 +256,10 @@ void D3D11VideoPresenter::moveEvent(QMoveEvent* event) {
 }
 
 bool D3D11VideoPresenter::event(QEvent* event) {
-    if (event->type() == QEvent::ZOrderChange || event->type() == QEvent::ShowToParent) {
-        syncPresentHwndGeometry();
+    if (event->type() == QEvent::ZOrderChange
+        || event->type() == QEvent::ShowToParent
+        || event->type() == QEvent::ParentChange) {
+        schedulePresentHwndResync();
     }
     return QWidget::event(event);
 }
@@ -303,11 +269,22 @@ bool D3D11VideoPresenter::eventFilter(QObject* watched, QEvent* event) {
         switch (event->type()) {
         case QEvent::Move:
         case QEvent::Resize:
-        case QEvent::WindowStateChange:
             syncPresentHwndGeometry();
             break;
+        case QEvent::WindowStateChange:
+            // Fullscreen enter/exit often briefly hides/repositions the top-level
+            // HWND; a deferred resync re-shows the overlay and retargets Flip size.
+            schedulePresentHwndResync();
+            break;
+        case QEvent::Show:
+            schedulePresentHwndResync();
+            break;
         case QEvent::Hide:
-            if (m_presentHwnd) {
+            if (isCoverFullscreenMode()) {
+                schedulePresentHwndResync();
+                break;
+            }
+            if (m_presentHwnd && IsWindow(reinterpret_cast<HWND>(m_presentHwnd))) {
                 ShowWindow(reinterpret_cast<HWND>(m_presentHwnd), SW_HIDE);
             }
             break;
@@ -331,18 +308,35 @@ bool D3D11VideoPresenter::ensureDevice() {
     return m_device && m_context;
 }
 
-bool D3D11VideoPresenter::ensurePresentHwnd() {
-    if (m_presentHwnd) {
-        return true;
+bool D3D11VideoPresenter::isCoverFullscreenMode() const {
+    QWidget* top = window();
+    if (!top) {
+        return false;
     }
+    return top->isFullScreen() || top->property("extendCastFullscreen").toBool();
+}
+
+bool D3D11VideoPresenter::ensurePresentHwnd() {
     HWND owner = reinterpret_cast<HWND>(topLevelHwnd());
-    if (!owner) {
+    if (!owner || !IsWindow(owner)) {
         LogManager::instance().log("D3D11: no top-level HWND for present host");
         return false;
     }
+
+    if (m_presentHwnd) {
+        HWND existing = reinterpret_cast<HWND>(m_presentHwnd);
+        if (IsWindow(existing) && GetWindow(existing, GW_OWNER) == owner) {
+            return true;
+        }
+        LogManager::instance().log(
+            QString("D3D11: recreating present overlay (owner HWND changed)")
+        );
+        releaseSwapChain();
+        releasePresentHwnd();
+    }
+
     registerPresentClass();
     // Owned WS_POPUP sits outside Qt's redirected child tree (Present-ok-but-black).
-    // NOREDIRECTIONBITMAP: Flip-friendly. Transparent/noactivate: mouse+focus stay on Qt.
     const HWND hwnd = CreateWindowExW(
         WS_EX_NOREDIRECTIONBITMAP | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
             | WS_EX_TOOLWINDOW,
@@ -375,45 +369,207 @@ bool D3D11VideoPresenter::ensurePresentHwnd() {
 }
 
 bool D3D11VideoPresenter::syncPresentHwndGeometry() {
-    if (!m_presentHwnd) {
+    if (!ensurePresentHwnd()) {
         return false;
     }
     QWidget* top = window();
     HWND owner = reinterpret_cast<HWND>(topLevelHwnd());
     HWND hwnd = reinterpret_cast<HWND>(m_presentHwnd);
-    if (!top || !owner || !hwnd) {
+    if (!top || !owner || !hwnd || !IsWindow(hwnd)) {
         return false;
     }
 
-    // Map placeholder rect through the Qt top-level client area → screen pixels.
-    const qreal dpr = top->devicePixelRatioF();
-    const QPoint topLeft = mapTo(top, QPoint(0, 0));
-    POINT screenPt = {
-        qRound(topLeft.x() * dpr),
-        qRound(topLeft.y() * dpr)
-    };
-    if (!ClientToScreen(owner, &screenPt)) {
+    RECT ownerClient = {};
+    if (!GetClientRect(owner, &ownerClient)) {
         return false;
     }
-    const int w = qMax(1, qRound(width() * dpr));
-    const int h = qMax(1, qRound(height() * dpr));
+    const int ownerPw = ownerClient.right - ownerClient.left;
+    const int ownerPh = ownerClient.bottom - ownerClient.top;
+    if (ownerPw <= 0 || ownerPh <= 0) {
+        return false;
+    }
+
+    POINT screenPt = {};
+    int w = 0;
+    int h = 0;
+    const bool coverOwnerClient = isCoverFullscreenMode();
+
+    if (coverOwnerClient) {
+        screenPt = {0, 0};
+        if (!ClientToScreen(owner, &screenPt)) {
+            return false;
+        }
+        w = evenDimension(ownerPw);
+        h = evenDimension(ownerPh);
+    } else {
+        const int topW = top->width();
+        const int topH = top->height();
+        if (topW <= 0 || topH <= 0) {
+            return false;
+        }
+
+        const double scaleX = double(ownerPw) / double(topW);
+        const double scaleY = double(ownerPh) / double(topH);
+        const QPoint topLeft = mapTo(top, QPoint(0, 0));
+        screenPt = {
+            LONG(qRound(topLeft.x() * scaleX)),
+            LONG(qRound(topLeft.y() * scaleY))
+        };
+        if (!ClientToScreen(owner, &screenPt)) {
+            return false;
+        }
+        w = evenDimension(qMax(1, qRound(width() * scaleX)));
+        h = evenDimension(qMax(1, qRound(height() * scaleY)));
+
+        constexpr int kResizeGutter = 8;
+        if (w > kResizeGutter * 2 && h > kResizeGutter * 2) {
+            screenPt.x += kResizeGutter;
+            screenPt.y += kResizeGutter;
+            w = evenDimension(w - kResizeGutter * 2);
+            h = evenDimension(h - kResizeGutter * 2);
+        }
+    }
+
+    const bool showOverlay = top->isVisible() && !top->isMinimized();
+
+    RECT current = {};
+    const bool haveCurrent = GetWindowRect(hwnd, &current) != FALSE;
+    const bool geometryMatches = haveCurrent
+        && current.left == screenPt.x
+        && current.top == screenPt.y
+        && (current.right - current.left) == w
+        && (current.bottom - current.top) == h;
+    const bool visibilityMatches =
+        (IsWindowVisible(hwnd) != FALSE) == showOverlay;
+
+    // Fullscreen cover must stay TOPMOST so the opaque Qt host cannot occlude it.
+    const HWND insertAfter = coverOwnerClient ? HWND_TOPMOST : HWND_NOTOPMOST;
+    LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    const bool isTopmost = (exStyle & WS_EX_TOPMOST) != 0;
+    const bool topmostMatches = isTopmost == coverOwnerClient;
+
+    if (geometryMatches && visibilityMatches && topmostMatches) {
+        return true;
+    }
+
+    if (coverOwnerClient) {
+        LogManager::instance().log(
+            QString("D3D11: fullscreen overlay cover %1x%2 at %3,%4 topmost=1")
+                .arg(w)
+                .arg(h)
+                .arg(screenPt.x)
+                .arg(screenPt.y)
+        );
+    }
+
     SetWindowPos(
         hwnd,
-        HWND_TOP,
+        insertAfter,
         screenPt.x,
         screenPt.y,
         w,
         h,
-        SWP_NOACTIVATE | (isVisible() ? SWP_SHOWWINDOW : SWP_HIDEWINDOW)
+        SWP_NOACTIVATE | (showOverlay ? SWP_SHOWWINDOW : SWP_HIDEWINDOW)
     );
     return true;
+}
+
+bool D3D11VideoPresenter::resizeSwapChainToHwnd() {
+    if (!m_swapChain || !m_presentHwnd || !m_device) {
+        return false;
+    }
+    const HWND hwnd = reinterpret_cast<HWND>(m_presentHwnd);
+    int physW = 0;
+    int physH = 0;
+    if (!hwndClientSizePixels(hwnd, &physW, &physH)) {
+        return false;
+    }
+    physW = evenDimension(physW);
+    physH = evenDimension(physH);
+    if (physW <= 0 || physH <= 0) {
+        return false;
+    }
+    if (physW == m_swapWidth && physH == m_swapHeight) {
+        return true;
+    }
+
+    releaseCom(m_rtv);
+    releaseCom(m_backBuffer);
+    const HRESULT hr = m_swapChain->ResizeBuffers(
+        0,
+        static_cast<UINT>(physW),
+        static_cast<UINT>(physH),
+        DXGI_FORMAT_UNKNOWN,
+        0
+    );
+    if (SUCCEEDED(hr)
+        && SUCCEEDED(m_swapChain->GetBuffer(
+               0,
+               __uuidof(ID3D11Texture2D),
+               reinterpret_cast<void**>(&m_backBuffer)
+           ))
+        && SUCCEEDED(m_device->CreateRenderTargetView(
+               m_backBuffer,
+               nullptr,
+               &m_rtv
+           ))) {
+        m_swapWidth = physW;
+        m_swapHeight = physH;
+        LogManager::instance().log(
+            QString("D3D11: SwapChain resized to %1x%2 (popup overlay)")
+                .arg(m_swapWidth)
+                .arg(m_swapHeight)
+        );
+        return true;
+    }
+
+    LogManager::instance().log(
+        QString("D3D11: ResizeBuffers failed hr=0x%1")
+            .arg(quint32(hr), 8, 16, QChar('0'))
+    );
+    releaseSwapChain();
+    return false;
+}
+
+void D3D11VideoPresenter::schedulePresentHwndResync() {
+    if (m_resyncScheduled) {
+        return;
+    }
+    m_resyncScheduled = true;
+
+    auto resync = [this]() {
+        if (!syncPresentHwndGeometry()) {
+            return;
+        }
+        if (m_swapChain) {
+            resizeSwapChainToHwnd();
+        } else {
+            ensureSwapChain();
+        }
+        if (m_updatePending.load() || m_texWidth > 0) {
+            presentPendingFrame();
+        }
+    };
+
+    // Next event-loop tick: after Qt applies fullscreen geometry/style.
+    QTimer::singleShot(0, this, [this, resync]() {
+        resync();
+        // Some GPUs/DWM paths settle one frame later on fullscreen enter.
+        QTimer::singleShot(50, this, [this, resync]() {
+            m_resyncScheduled = false;
+            resync();
+        });
+    });
 }
 
 void D3D11VideoPresenter::releasePresentHwnd() {
     if (!m_presentHwnd) {
         return;
     }
-    DestroyWindow(reinterpret_cast<HWND>(m_presentHwnd));
+    HWND hwnd = reinterpret_cast<HWND>(m_presentHwnd);
+    if (IsWindow(hwnd)) {
+        DestroyWindow(hwnd);
+    }
     m_presentHwnd = nullptr;
 }
 
@@ -437,6 +593,12 @@ bool D3D11VideoPresenter::ensureSwapChain() {
     int physW = 0;
     int physH = 0;
     if (!hwndClientSizePixels(hwnd, &physW, &physH)) {
+        LogManager::instance().log("D3D11: present HWND has empty client rect");
+        return false;
+    }
+    physW = evenDimension(physW);
+    physH = evenDimension(physH);
+    if (physW <= 0 || physH <= 0) {
         LogManager::instance().log("D3D11: present HWND has empty client rect");
         return false;
     }
@@ -859,9 +1021,16 @@ void D3D11VideoPresenter::presentPendingFrame() {
     if (m_failed.load()) {
         return;
     }
+
+    // Keep the WS_POPUP overlay glued to the placeholder. Fullscreen transitions
+    // can hide the overlay (top-level Hide without a matching Show handler) or
+    // leave Flip buffers at the pre-fullscreen size — both read as a black screen.
+    syncPresentHwndGeometry();
+
     if (!ensureSwapChain() || !ensurePipeline()) {
         return;
     }
+    resizeSwapChainToHwnd();
 
     auto pending = m_pendingFrame.take();
     if (pending.has_value() && pending->isValid()) {
@@ -918,12 +1087,20 @@ void D3D11VideoPresenter::presentPendingFrame() {
         );
     }
 
-    if (m_texWidth <= 0 || !m_rtv) {
+    if (m_texWidth <= 0 || !m_rtv || !m_swapChain) {
         return;
     }
 
     drawLetterboxed();
-    const HRESULT presentHr = m_swapChain->Present(0, 0);
+    // Never block the Qt GUI thread on vsync / Flip queue — heartbeats and
+    // TCP drains live there. Fullscreen TOPMOST Flip Present(0,0) can stall
+    // long enough for the Mac sender's 15s heartbeat timeout to fire.
+    const HRESULT presentHr =
+        m_swapChain->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
+    if (presentHr == DXGI_ERROR_WAS_STILL_DRAWING) {
+        // Drop this vsync slot; keep the last composed frame on screen.
+        return;
+    }
     if (FAILED(presentHr)) {
         ++m_copyFailCount;
         LogManager::instance().log(
@@ -940,6 +1117,12 @@ void D3D11VideoPresenter::presentPendingFrame() {
             );
         }
     } else {
+        // OCCLUDED is a success-coded status — reassert z-order so a fullscreen
+        // Qt owner that briefly covered the overlay does not stay black.
+        // Throttle via schedulePresentHwndResync; do not SetWindowPos every frame.
+        if (presentHr == DXGI_STATUS_OCCLUDED) {
+            schedulePresentHwndResync();
+        }
         if (m_copyFailCount > 0 || !m_loggedFirstPresent) {
             LogManager::instance().log(
                 QString("D3D11: Present ok effect=%1 size=%2x%3")

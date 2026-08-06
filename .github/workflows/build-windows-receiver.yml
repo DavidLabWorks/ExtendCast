@@ -79,57 +79,21 @@ jobs:
         run: |
           cmake --build "$env:WINDOWS_BUILD_DIR" --config Release
 
-      - name: Package artifact
-        shell: pwsh
-        run: |
-          mkdir artifact
-
-          # Copy the exe
-          Copy-Item "$env:WINDOWS_BUILD_DIR/Release/ExtendCast.exe" "artifact/"
-
-          # Run windeployqt to bundle Qt DLLs
-          windeployqt --release --no-translations --no-system-d3d-compiler `
-            --no-opengl-sw "artifact/ExtendCast.exe"
-
-          # Copy FFmpeg DLLs used by the receiver.
-          Get-ChildItem "$env:WINDOWS_BUILD_DIR/Release/*.dll" | ForEach-Object {
-            Copy-Item $_.FullName "artifact/"
-          }
-
-          # Qt's media plugin brings an unrelated FFmpeg runtime. Receiver audio
-          # uses QAudioSink directly, so keep the smaller receiver-only payload.
-          $unused = @(
-            "artifact/multimedia/ffmpegmediaplugin.dll",
-            "artifact/avcodec-60.dll",
-            "artifact/avformat-60.dll",
-            "artifact/avutil-58.dll",
-            "artifact/swresample-4.dll",
-            "artifact/swscale-7.dll"
-          )
-          foreach ($path in $unused) {
-            Remove-Item $path -Force -ErrorAction SilentlyContinue
-          }
-
-          # Copy app icon for runtime (embedded via Qt resource, but also keep as fallback)
-          Copy-Item "Desktop/appicon.ico" "artifact/" -ErrorAction SilentlyContinue
-
       - name: Install NSIS
         shell: pwsh
         run: |
-          # Use portable NSIS ZIP from nsis.sourceforge.io (no installer needed)
+          # Use portable NSIS ZIP (no installer needed)
           $nsisVersion = "3.10"
           $nsisUrl = "https://github.com/nicehash/NSIS/releases/download/v${nsisVersion}/nsis-${nsisVersion}.zip"
           try {
             Invoke-WebRequest -Uri $nsisUrl -OutFile "nsis.zip"
           } catch {
-            # Fallback: try winget
             Write-Host "GitHub download failed, trying winget..."
             winget install NSIS.NSIS --accept-source-agreements --accept-package-agreements --silent
           }
 
           if (Test-Path "nsis.zip") {
             Expand-Archive -Path "nsis.zip" -DestinationPath "C:/nsis"
-            # Find the extracted folder (may be nsis-3.10/)
             $nsisDir = Get-ChildItem "C:/nsis" -Directory | Select-Object -First 1
             if ($nsisDir) {
               echo "$($nsisDir.FullName)" >> $env:GITHUB_PATH
@@ -141,20 +105,16 @@ jobs:
             echo "C:\Program Files (x86)\NSIS" >> $env:GITHUB_PATH
           }
 
-      - name: Build installer
+      - name: Package portable + installer
         shell: pwsh
         run: |
-          cd Desktop
-
-          # Copy artifact next to installer.nsi
-          # (NSIS references files relative to the .nsi script)
-          Copy-Item -Recurse "${{ github.workspace }}/artifact" "artifact"
-
-          # Build the installer
-          makensis /INPUTCHARSET UTF8 /DPRODUCT_VERSION="${{ steps.version.outputs.version }}" installer.nsi
-
-          # Move installer to workspace root
-          Move-Item "ExtendCast-Setup-*.exe" "${{ github.workspace }}/"
+          # Single packaging entry point — always bundles VC++ CRT + vc_redist.x64.exe
+          & "${{ github.workspace }}/Desktop/package-windows.ps1" `
+            -BuildDir "$env:WINDOWS_BUILD_DIR" `
+            -OutDir "${{ github.workspace }}/artifact" `
+            -QtBin "$env:Qt6_DIR/bin" `
+            -Installer `
+            -InstallerOut "${{ github.workspace }}/ExtendCast-Setup-${{ steps.version.outputs.version }}.exe"
 
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4

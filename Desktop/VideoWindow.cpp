@@ -12,8 +12,19 @@
 #include <functional>
 
 #ifdef _WIN32
+#include <dwmapi.h>
 #include <windows.h>
 #include <windowsx.h>
+
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
+#ifndef DWMWCP_ROUND
+#define DWMWCP_ROUND 2
+#endif
+#ifndef DWMWA_BORDER_COLOR
+#define DWMWA_BORDER_COLOR 34
+#endif
 #endif
 
 VideoWindow::VideoWindow(QWidget* videoSurface, InputHandler* inputHandler, QWidget* parent)
@@ -26,9 +37,18 @@ VideoWindow::VideoWindow(QWidget* videoSurface, InputHandler* inputHandler, QWid
     setAttribute(Qt::WA_DeleteOnClose, false);
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
     setStyleSheet(R"(
-        QMainWindow { background-color: black; }
-        QWidget#videoRoot { background-color: black; border: 1px solid #303030; }
-        QFrame#videoTitleBar { background-color: #151515; border: none; }
+        QMainWindow { background-color: #202020; }
+        QWidget#videoRoot {
+            background-color: #202020;
+            border: 1px solid #323232;
+            border-radius: 8px;
+        }
+        QFrame#videoTitleBar {
+            background-color: #151515;
+            border: none;
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+        }
         QLabel#videoTitleText { color: #a8a8a8; font-size: 13px; font-weight: 500; }
         QPushButton#videoWindowButton { background: transparent; border: none; color: #c8c8c8; font-family: "Segoe MDL2 Assets"; font-size: 10px; padding: 0; margin: 0; }
         QPushButton#videoWindowButton:hover { background-color: rgba(255, 255, 255, 0.12); color: #ffffff; }
@@ -49,7 +69,6 @@ VideoWindow::VideoWindow(QWidget* videoSurface, InputHandler* inputHandler, QWid
     layout->addWidget(m_videoSurface, 1);
 
     setCentralWidget(central);
-
 }
 
 void VideoWindow::setupTitleBar(QVBoxLayout* layout) {
@@ -121,6 +140,34 @@ VideoWindow::~VideoWindow() {
     }
 }
 
+void VideoWindow::applyWindowChrome() {
+#ifdef _WIN32
+    HWND hwnd = reinterpret_cast<HWND>(winId());
+    if (!hwnd) {
+        return;
+    }
+
+    // Allow Aero snap / edge resize on a frameless window.
+    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    SetWindowLongPtrW(
+        hwnd,
+        GWL_STYLE,
+        style | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_CAPTION
+    );
+
+    // Match Windows 11 rounded corners used by the main window.
+    const DWORD corner = DWMWCP_ROUND;
+    DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_WINDOW_CORNER_PREFERENCE,
+        &corner,
+        sizeof(corner)
+    );
+    const COLORREF border = RGB(0x32, 0x32, 0x32);
+    DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, sizeof(border));
+#endif
+}
+
 void VideoWindow::showForVideo() {
     if (isVisible()) {
         if (m_videoSurface) {
@@ -167,6 +214,9 @@ void VideoWindow::showForVideo() {
         m_videoSurface->show();
     }
     show();
+    applyWindowChrome();
+    m_normalGeometry = geometry();
+    m_hasNormalGeometry = true;
     LogManager::instance().log("Video window opened");
 }
 
@@ -192,7 +242,7 @@ void VideoWindow::resizeToFitVideo(int videoWidth, int videoHeight) {
     QSize newSize(videoWidth, videoHeight);
     if (newSize == m_lastVideoSize) return;
     m_lastVideoSize = newSize;
-    if (isFullScreen() || isMaximized()) {
+    if (isImmersiveFullscreen() || isMaximized()) {
         return;
     }
 
@@ -248,6 +298,10 @@ bool VideoWindow::eventFilter(QObject* watched, QEvent* event) {
 
         if (event->type() == QEvent::MouseButtonPress) {
             auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            // Never start a window drag from the control buttons themselves.
+            if (qobject_cast<QPushButton*>(watched)) {
+                return false;
+            }
             if (mouseEvent->button() == Qt::LeftButton && windowHandle()) {
                 windowHandle()->startSystemMove();
                 return true;
@@ -270,14 +324,40 @@ bool VideoWindow::nativeEvent(const QByteArray& eventType, void* message, qintpt
 #ifdef _WIN32
     Q_UNUSED(eventType);
     MSG* msg = static_cast<MSG*>(message);
-    if (msg && msg->message == WM_NCHITTEST) {
+    if (!msg) {
+        return QMainWindow::nativeEvent(eventType, message, result);
+    }
+
+    // Keep the custom frame flush — WS_THICKFRAME is only for resize/snap behavior.
+    if (msg->message == WM_NCCALCSIZE && msg->wParam == TRUE) {
+        *result = 0;
+        return true;
+    }
+
+    if (msg->message == WM_NCHITTEST) {
         const LONG x = GET_X_LPARAM(msg->lParam);
         const LONG y = GET_Y_LPARAM(msg->lParam);
+        // Match MainWindow: Qt maps WM_NCHITTEST screen coords for us. Do not
+        // divide by DPR — that shifts the hit box on fractional scales (e.g. 175%).
         const QPoint localPos = mapFromGlobal(QPoint(x, y));
-        const int resizeMargin = isMaximized() || isFullScreen() ? 0 : 6;
         const int w = width();
         const int h = height();
 
+        // Title-bar buttons must win over resize/caption hit-testing. Otherwise the
+        // top resize margin steals the upper pixels of the fullscreen button:
+        // hover flickers and clicks never land.
+        if (QWidget* child = childAt(localPos)) {
+            QWidget* button = child;
+            while (button && button != this) {
+                if (qobject_cast<QPushButton*>(button)) {
+                    *result = HTCLIENT;
+                    return true;
+                }
+                button = button->parentWidget();
+            }
+        }
+
+        const int resizeMargin = isMaximized() || isImmersiveFullscreen() ? 0 : 8;
         const bool left = localPos.x() >= 0 && localPos.x() < resizeMargin;
         const bool right = localPos.x() <= w && localPos.x() >= w - resizeMargin;
         const bool top = localPos.y() >= 0 && localPos.y() < resizeMargin;
@@ -293,8 +373,7 @@ bool VideoWindow::nativeEvent(const QByteArray& eventType, void* message, qintpt
         if (bottom) { *result = HTBOTTOM; return true; }
 
         const int titleHeight = m_titleBar && m_titleBar->isVisible() ? m_titleBar->height() : 0;
-        const bool overWindowButtons = localPos.x() >= w - 184 && localPos.y() >= 0 && localPos.y() < titleHeight;
-        if (!overWindowButtons && localPos.y() >= 0 && localPos.y() < titleHeight) {
+        if (titleHeight > 0 && localPos.y() >= 0 && localPos.y() < titleHeight) {
             *result = HTCAPTION;
             return true;
         }
@@ -313,7 +392,7 @@ void VideoWindow::keyPressEvent(QKeyEvent* event) {
         return;
     }
     if (event->key() == Qt::Key_Escape) {
-        if (isFullScreen()) {
+        if (isImmersiveFullscreen()) {
             toggleFullscreen();
             return;
         }
@@ -331,7 +410,9 @@ void VideoWindow::resizeEvent(QResizeEvent* event) {
 }
 
 void VideoWindow::closeEvent(QCloseEvent* event) {
-    if (isFullScreen()) {
+    if (m_immersiveFullscreen) {
+        exitImmersiveFullscreen();
+    } else if (isFullScreen()) {
         showNormal();
     }
     if (m_titleBar) {
@@ -344,19 +425,101 @@ void VideoWindow::closeEvent(QCloseEvent* event) {
     QMainWindow::closeEvent(event);
 }
 
-void VideoWindow::toggleFullscreen() {
+bool VideoWindow::isImmersiveFullscreen() const {
+    return m_immersiveFullscreen || isFullScreen();
+}
+
+void VideoWindow::enterImmersiveFullscreen() {
+    if (m_immersiveFullscreen) {
+        return;
+    }
+    if (!isMaximized()) {
+        m_normalGeometry = geometry();
+        m_hasNormalGeometry = true;
+    }
+    if (m_titleBar) {
+        m_titleBar->hide();
+    }
+
+    QScreen* targetScreen = windowHandle() ? windowHandle()->screen() : nullptr;
+    if (!targetScreen) {
+        targetScreen = QApplication::screenAt(geometry().center());
+    }
+    if (!targetScreen) {
+        targetScreen = QApplication::primaryScreen();
+    }
+
+    // Borderless cover of the monitor — avoid Qt showFullScreen(), which puts the
+    // host into an exclusive fullscreen path that can hide the D3D owned overlay
+    // (Present ok / swapchain full size, but screen stays black).
+    m_immersiveFullscreen = true;
+    setProperty("extendCastFullscreen", true);
+    if (targetScreen) {
+        setGeometry(targetScreen->geometry());
+    }
+    show();
+    raise();
+    activateWindow();
+
+    updateWindowControlStates();
+    if (m_videoSurface) {
+        m_videoSurface->updateGeometry();
+        m_videoSurface->update();
+    }
+
+    LogManager::instance().log(
+        QString("Entered fullscreen (F11 or Escape to exit) geometry=%1x%2")
+            .arg(width())
+            .arg(height())
+    );
+}
+
+void VideoWindow::exitImmersiveFullscreen() {
+    if (!m_immersiveFullscreen && !isFullScreen()) {
+        return;
+    }
+
+    m_immersiveFullscreen = false;
+    setProperty("extendCastFullscreen", false);
+    if (m_titleBar) {
+        m_titleBar->show();
+    }
     if (isFullScreen()) {
-        if (m_titleBar) m_titleBar->show();
         showNormal();
-        if (m_fullscreenButton) m_fullscreenButton->show();
-        updateWindowControlStates();
-        updateFullscreenButton();
-        LogManager::instance().log("Exited fullscreen");
+    }
+
+    if (m_hasNormalGeometry && m_normalGeometry.isValid()) {
+        setGeometry(m_normalGeometry);
     } else {
-        if (m_titleBar) m_titleBar->hide();
-        showFullScreen();
-        updateWindowControlStates();
-        LogManager::instance().log("Entered fullscreen (F11 or Escape to exit)");
+        QScreen* screen = windowHandle() ? windowHandle()->screen() : nullptr;
+        if (!screen) {
+            screen = QApplication::primaryScreen();
+        }
+        if (screen) {
+            const QRect available = screen->availableGeometry();
+            QRect restored(available.center().x() - 480, available.center().y() - 270, 960, 540);
+            setGeometry(restored.intersected(available).isEmpty() ? available : restored);
+        }
+    }
+
+    applyWindowChrome();
+    if (m_fullscreenButton) {
+        m_fullscreenButton->show();
+    }
+    updateWindowControlStates();
+    updateFullscreenButton();
+    if (m_videoSurface) {
+        m_videoSurface->updateGeometry();
+        m_videoSurface->update();
+    }
+    LogManager::instance().log("Exited fullscreen");
+}
+
+void VideoWindow::toggleFullscreen() {
+    if (isImmersiveFullscreen()) {
+        exitImmersiveFullscreen();
+    } else {
+        enterImmersiveFullscreen();
     }
 }
 

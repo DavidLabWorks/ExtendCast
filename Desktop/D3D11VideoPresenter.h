@@ -66,6 +66,9 @@ private:
     bool ensureDevice();
     bool ensurePresentHwnd();
     bool syncPresentHwndGeometry();
+    bool isCoverFullscreenMode() const;
+    bool resizeSwapChainToHwnd();
+    void schedulePresentHwndResync();
     void releasePresentHwnd();
     void installWindowTracker();
     void removeWindowTracker();
@@ -85,6 +88,7 @@ private:
 
     void* m_presentHwnd = nullptr;
     QWidget* m_trackedWindow = nullptr;
+    bool m_resyncScheduled = false;
 
     IDXGISwapChain1* m_swapChain = nullptr;
     ID3D11Texture2D* m_backBuffer = nullptr;

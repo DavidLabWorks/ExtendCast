@@ -47,6 +47,10 @@ private:
     void updateWindowControlStates();
     void toggleFullscreen();
     void updateFullscreenButton();
+    void applyWindowChrome();
+    bool isImmersiveFullscreen() const;
+    void enterImmersiveFullscreen();
+    void exitImmersiveFullscreen();
 
     QWidget* m_videoSurface = nullptr;
     InputHandler* m_inputHandler = nullptr;
@@ -57,4 +61,7 @@ private:
     QPushButton* m_fullscreenButton = nullptr;
     QSize m_lastVideoSize;
     QString m_deviceId;
+    QRect m_normalGeometry;
+    bool m_hasNormalGeometry = false;
+    bool m_immersiveFullscreen = false;
 };

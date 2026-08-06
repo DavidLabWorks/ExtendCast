@@ -94,7 +94,8 @@ Section "ExtendCast (required)" SecCore
     ; Create uninstaller
     WriteUninstaller "$INSTDIR\uninstall.exe"
 
-    ; Install Microsoft Visual C++ runtime when bundled by windeployqt.
+    ; Install Microsoft Visual C++ runtime (always bundled by package-windows.ps1).
+    ; CRT DLLs are also copied next to ExtendCast.exe as a fallback.
     IfFileExists "$INSTDIR\vc_redist.x64.exe" 0 skip_vc_redist
     DetailPrint "Installing Microsoft Visual C++ Runtime..."
     nsExec::ExecToLog '"$INSTDIR\vc_redist.x64.exe" /install /quiet /norestart'

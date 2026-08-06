@@ -50,6 +50,30 @@ cmake -S . -B $buildDir `
 cmake --build $buildDir --config Release
 ```
 
+### Windows package (portable + installer)
+
+Always use `package-windows.ps1` after a Release build. It **requires** bundling the
+MSVC CRT (`VCRUNTIME140.dll`, etc.) and `vc_redist.x64.exe` — packaging fails if
+they cannot be found.
+
+```powershell
+# Portable folder only
+.\package-windows.ps1 `
+  -BuildDir "D:/Temp/ExtendCast/windows-build" `
+  -OutDir "D:/ExtendCast/Windows-x64" `
+  -QtBin "C:/Qt/6.7.0/msvc2019_64/bin"
+
+# Portable + NSIS installer
+.\package-windows.ps1 `
+  -BuildDir "D:/Temp/ExtendCast/windows-build" `
+  -OutDir "D:/ExtendCast/Windows-x64" `
+  -QtBin "C:/Qt/6.7.0/msvc2019_64/bin" `
+  -Installer `
+  -InstallerOut "D:/ExtendCast/ExtendCast-Setup-1.0.0.exe"
+```
+
+Needs NSIS (`makensis`) on PATH when using `-Installer`.
+
 ### Linux
 ```bash
 mkdir build && cd build

@@ -343,6 +343,7 @@ if(WIN32)
         d3d11
         dxgi
         d3dcompiler
+        dwmapi
     )
     set_target_properties(BetterCastReceiver PROPERTIES
         OUTPUT_NAME ExtendCast
