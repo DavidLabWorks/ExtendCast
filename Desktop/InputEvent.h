@@ -24,6 +24,7 @@ enum class InputEventType : int {
 constexpr uint16_t kHeartbeatKeyCode = 888;
 constexpr uint16_t kIDRRequestKeyCode = 999;
 constexpr uint16_t kPlaybackAcknowledgementKeyCode = 666;
+constexpr uint16_t kScreenInfoKeyCode = 777;
 
 struct InputEvent {
     InputEventType type;

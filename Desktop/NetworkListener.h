@@ -121,10 +121,12 @@ private:
     static constexpr uint32_t kMaxPacketSize = 8 * 1024 * 1024;   // 8MB per frame max
     static constexpr int kMaxBufferSize = 32 * 1024 * 1024;       // 32MB buffer limit
     static constexpr int kMaxTcpPacketsPerDrain = 4;
+    // Soft-present (OpenGL) can briefly exceed 500ms under thermal load; give
+    // the decoder a wider resume window before IDR storms start.
     static constexpr uint64_t kMaximumBufferedVideoNanoseconds =
-        500'000'000;
+        800'000'000;
     static constexpr int kTcpCatchUpCheckIntervalMs = 100;
-    static constexpr int kTcpKeyframeRequestIntervalMs = 2000;
+    static constexpr int kTcpKeyframeRequestIntervalMs = 5000;
 
     // UDP reassembly
     struct UdpFrameEntry {

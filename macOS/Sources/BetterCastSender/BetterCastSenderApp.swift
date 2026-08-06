@@ -2368,7 +2368,13 @@ struct DeviceDetailView: View {
                     set: { client.setAutoConnectEnabled($0, for: display.id) }
                 ),
                 availableConnectionModes: client.availableConnectionModes(for: display.id),
-                protocolDisabled: client.isProtocolLocked(for: display.id)
+                protocolDisabled: client.isProtocolLocked(for: display.id),
+                deviceNativeWidth: display.deviceNativeWidth,
+                deviceNativeHeight: display.deviceNativeHeight,
+                deviceNativePPI: display.deviceNativePPI,
+                onAddDeviceResolution: {
+                    client.addDeviceNativeResolutionAsCustom(for: display.id)
+                }
             )
 
             Section("Arrangement") {
@@ -2428,6 +2434,28 @@ struct DeviceStreamSettingsSections: View {
     @Binding var autoConnect: Bool
     let availableConnectionModes: [NetworkInterfacePreference]
     let protocolDisabled: Bool
+    let deviceNativeWidth: Int?
+    let deviceNativeHeight: Int?
+    let deviceNativePPI: Int?
+    let onAddDeviceResolution: () -> Void
+
+    private var normalizedDeviceSize: (width: Int, height: Int)? {
+        guard let deviceNativeWidth, let deviceNativeHeight else { return nil }
+        return DeviceNativeResolution.normalizedPixelSize(
+            width: deviceNativeWidth,
+            height: deviceNativeHeight
+        )
+    }
+
+    private var deviceResolutionExists: Bool {
+        guard let size = normalizedDeviceSize else { return false }
+        let available = client.availableResolutions.map { ($0.width, $0.height) }
+        return DeviceNativeResolution.matchesAvailableResolution(
+            width: size.width,
+            height: size.height,
+            available: available
+        )
+    }
 
     var body: some View {
         Group {
@@ -2466,6 +2494,39 @@ struct DeviceStreamSettingsSections: View {
                 Text(client.interfacePreference.protocolDescription)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            Section("Device") {
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Native Resolution")
+                        if let size = normalizedDeviceSize {
+                            let ppi = deviceNativePPI ?? DeviceNativeResolution.fallbackPPI
+                            Text("\(DeviceNativeResolution.displayLabel(width: size.width, height: size.height)) · \(ppi) PPI")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("Waiting for device report…")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    InfoTip(text: "The receiver's built-in panel size. Separate from virtual-display Dimensions below.")
+
+                    Spacer()
+
+                    Button {
+                        onAddDeviceResolution()
+                    } label: {
+                        Text(deviceResolutionExists ? "Already Added" : "Add Dimensions")
+                    }
+                    .disabled(normalizedDeviceSize == nil || deviceResolutionExists)
+                    .help(
+                        deviceResolutionExists
+                            ? "This resolution already exists in Dimensions."
+                            : "Add the device panel size as a custom Dimensions preset (PPI auto-derived)."
+                    )
+                }
             }
 
             Section("Display") {
@@ -2821,7 +2882,13 @@ struct DiscoveredDeviceView: View {
                         set: { client.setAutoConnectEnabled($0, for: service) }
                     ),
                     availableConnectionModes: client.availableConnectionModes(for: service),
-                    protocolDisabled: isManualConnection
+                    protocolDisabled: isManualConnection,
+                    deviceNativeWidth: client.deviceNativeWidth(for: service),
+                    deviceNativeHeight: client.deviceNativeHeight(for: service),
+                    deviceNativePPI: client.deviceNativePPI(for: service),
+                    onAddDeviceResolution: {
+                        client.addDeviceNativeResolutionAsCustom(for: service)
+                    }
                 )
         }
         .formStyle(.grouped)
@@ -2935,6 +3002,9 @@ struct ConnectedDisplayInfo: Identifiable {
     let displayBounds: CGRect
     var audioEnabled: Bool
     var cgDisplayID: CGDirectDisplayID? = nil
+    var deviceNativeWidth: Int? = nil
+    var deviceNativeHeight: Int? = nil
+    var deviceNativePPI: Int? = nil
 
     var deviceListSubtitle: String {
         "\(resolution) · \(connectionMethod)"
@@ -3684,6 +3754,10 @@ struct ReceiverSettings: Codable, Equatable {
     var interfacePreferenceRawValue: String?
     // Optional for backward compatibility; nil means disabled.
     var remoteInputEnabled: Bool?
+    // Receiver-reported native panel pixels (device info, not Dimensions).
+    var deviceNativeWidth: Int?
+    var deviceNativeHeight: Int?
+    var deviceNativePPI: Int?
 
     var allowsRemoteInput: Bool { remoteInputEnabled ?? false }
 }
@@ -4929,7 +5003,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             audioStreamingEnabled: audioStreamingEnabled,
             connectionType: interfacePreference.allowsUDP ? connectionType : "TCP",
             interfacePreferenceRawValue: interfacePreference.rawValue,
-            remoteInputEnabled: remoteInputEnabled
+            remoteInputEnabled: remoteInputEnabled,
+            deviceNativeWidth: nil,
+            deviceNativeHeight: nil,
+            deviceNativePPI: nil
         )
     }
 
@@ -5048,6 +5125,82 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         if selectedResolution == resolution {
             selectedResolution = fallback
         }
+    }
+
+    func deviceNativeWidth(for service: DiscoveredService) -> Int? {
+        settings(for: service).deviceNativeWidth
+    }
+
+    func deviceNativeHeight(for service: DiscoveredService) -> Int? {
+        settings(for: service).deviceNativeHeight
+    }
+
+    func deviceNativePPI(for service: DiscoveredService) -> Int? {
+        settings(for: service).deviceNativePPI
+    }
+
+    @discardableResult
+    func addDeviceNativeResolutionAsCustom(for connectionId: UUID) -> Bool {
+        guard let pipeline = pipelines[connectionId] else { return false }
+        let width = pipeline.reportedScreenWidth ?? pipeline.settings.deviceNativeWidth
+        let height = pipeline.reportedScreenHeight ?? pipeline.settings.deviceNativeHeight
+        let ppi = pipeline.settings.deviceNativePPI
+        return addDeviceNativeResolutionAsCustom(width: width, height: height, ppi: ppi)
+    }
+
+    @discardableResult
+    func addDeviceNativeResolutionAsCustom(for service: DiscoveredService) -> Bool {
+        let settings = settings(for: service)
+        return addDeviceNativeResolutionAsCustom(
+            width: settings.deviceNativeWidth,
+            height: settings.deviceNativeHeight,
+            ppi: settings.deviceNativePPI
+        )
+    }
+
+    @discardableResult
+    private func addDeviceNativeResolutionAsCustom(
+        width: Int?,
+        height: Int?,
+        ppi: Int?
+    ) -> Bool {
+        guard let width,
+              let height,
+              let size = DeviceNativeResolution.normalizedPixelSize(
+                width: width,
+                height: height
+              ) else {
+            return false
+        }
+        let available = availableResolutions.map { ($0.width, $0.height) }
+        if DeviceNativeResolution.matchesAvailableResolution(
+            width: size.width,
+            height: size.height,
+            available: available
+        ) {
+            return false
+        }
+
+        let resolvedPPI = DeviceNativeResolution.clampedPPI(
+            ppi ?? DeviceNativeResolution.fallbackPPI
+        )
+        saveCustomResolution(
+            nil,
+            width: size.width,
+            height: size.height,
+            ppi: resolvedPPI,
+            label: "Device"
+        )
+        if let added = availableResolutions.first(where: {
+            $0.width == size.width && $0.height == size.height
+        }) {
+            selectedResolution = added
+            useVirtualDisplay = true
+        }
+        LogManager.shared.log(
+            "Sender: Added device resolution \(size.width)x\(size.height) @ \(resolvedPPI) PPI"
+        )
+        return true
     }
 
     private func applyReceiverSettings(_ settings: ReceiverSettings) {
@@ -7019,12 +7172,17 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     }
 
     private func editedSettings(for connectionId: UUID) -> ReceiverSettings? {
-        guard pipelines[connectionId] != nil else { return nil }
+        guard let pipeline = pipelines[connectionId] else { return nil }
 
         var settings = currentReceiverSettings()
         settings.audioStreamingEnabled =
             connectedDisplays.first(where: { $0.id == connectionId })?.audioEnabled
             ?? settings.audioStreamingEnabled
+        settings.deviceNativeWidth =
+            pipeline.reportedScreenWidth ?? pipeline.settings.deviceNativeWidth
+        settings.deviceNativeHeight =
+            pipeline.reportedScreenHeight ?? pipeline.settings.deviceNativeHeight
+        settings.deviceNativePPI = pipeline.settings.deviceNativePPI
         return settings
     }
 
@@ -7320,6 +7478,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         connectedDisplays = pipelines.map { (id, pipeline) in
             let bounds = InputHandler.shared.getDisplayBounds(for: id)
             let res = bounds.width > 0 ? "\(Int(bounds.width))x\(Int(bounds.height))" : "Initializing..."
+            let nativeWidth = pipeline.reportedScreenWidth ?? pipeline.settings.deviceNativeWidth
+            let nativeHeight = pipeline.reportedScreenHeight ?? pipeline.settings.deviceNativeHeight
             return ConnectedDisplayInfo(
                 id: id,
                 name: pipeline.service.name,
@@ -7328,7 +7488,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 displayBounds: bounds,
                 audioEnabled: connectedDisplays.first(where: { $0.id == id })?.audioEnabled
                     ?? pipeline.settings.audioStreamingEnabled,
-                cgDisplayID: pipeline.virtualDisplayManager?.displayID
+                cgDisplayID: pipeline.virtualDisplayManager?.displayID,
+                deviceNativeWidth: nativeWidth,
+                deviceNativeHeight: nativeHeight,
+                deviceNativePPI: pipeline.settings.deviceNativePPI
             )
         }
         refreshBonjourReachabilityProbeScheduling()
@@ -7395,8 +7558,14 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                                 } else if event.type == .command && event.keyCode == 999 {
                                     self?.pipelines[connectionId]?.videoEncoder?.forceKeyframe()
                                 } else if event.type == .command && event.keyCode == 777 {
-                                    // Screen info from receiver: deltaX=width, deltaY=height (pixels)
-                                    self?.handleScreenInfo(for: connectionId, width: Int(event.deltaX), height: Int(event.deltaY))
+                                    // Screen info: deltaX/Y = pixels, x/y = physical mm
+                                    self?.handleScreenInfo(
+                                        for: connectionId,
+                                        width: Int(event.deltaX),
+                                        height: Int(event.deltaY),
+                                        physicalWidthMM: event.x > 1 ? event.x : nil,
+                                        physicalHeightMM: event.y > 1 ? event.y : nil
+                                    )
                                 } else if event.type == .command && event.keyCode == 666,
                                           let streamID = event.streamID.flatMap(UInt64.init),
                                           let timestamp = event.presentationTimestampNanoseconds.flatMap(UInt64.init) {
@@ -7449,7 +7618,13 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                             } else if event.type == .command && event.keyCode == 999 {
                                 self?.pipelines[connectionId]?.videoEncoder?.forceKeyframe()
                             } else if event.type == .command && event.keyCode == 777 {
-                                self?.handleScreenInfo(for: connectionId, width: Int(event.deltaX), height: Int(event.deltaY))
+                                self?.handleScreenInfo(
+                                    for: connectionId,
+                                    width: Int(event.deltaX),
+                                    height: Int(event.deltaY),
+                                    physicalWidthMM: event.x > 1 ? event.x : nil,
+                                    physicalHeightMM: event.y > 1 ? event.y : nil
+                                )
                             } else if event.type == .command && event.keyCode == 666,
                                       let streamID = event.streamID.flatMap(UInt64.init),
                                       let timestamp = event.presentationTimestampNanoseconds.flatMap(UInt64.init) {
@@ -7469,29 +7644,69 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
 
-    // Handle screen info from iOS receiver (command 777)
-    // Receiver reports its native screen dimensions so we can match the aspect ratio
-    private func handleScreenInfo(for connectionId: UUID, width: Int, height: Int) {
-        guard width > 0 && height > 0 else { return }
+    // Handle screen info from receivers (command 777).
+    // deltaX/Y = native pixels; optional x/y = physical size in millimetres for PPI.
+    private func handleScreenInfo(
+        for connectionId: UUID,
+        width: Int,
+        height: Int,
+        physicalWidthMM: Double? = nil,
+        physicalHeightMM: Double? = nil
+    ) {
+        guard let normalized = DeviceNativeResolution.normalizedPixelSize(
+            width: width,
+            height: height
+        ) else { return }
         guard let pipeline = pipelines[connectionId] else { return }
 
         let serviceName = pipeline.service.name
-
-        // Command 777 is sent by iOS/Mac Swift receivers to report screen dimensions.
-        // These receivers now support type-byte framing (auto-detect), so keep supportsTypeByte = true.
-        LogManager.shared.log("Sender: Screen info (command 777) from \(serviceName)")
+        let ppi = DeviceNativeResolution.suggestedPPI(
+            pixelWidth: normalized.width,
+            pixelHeight: normalized.height,
+            physicalWidthMM: physicalWidthMM,
+            physicalHeightMM: physicalHeightMM
+        )
 
         let oldW = pipeline.reportedScreenWidth
         let oldH = pipeline.reportedScreenHeight
+        let oldPPI = pipeline.settings.deviceNativePPI
+        if oldW == normalized.width,
+           oldH == normalized.height,
+           oldPPI == ppi {
+            return
+        }
 
-        // Skip if dimensions haven't changed
-        if oldW == width && oldH == height { return }
+        pipelines[connectionId]?.reportedScreenWidth = normalized.width
+        pipelines[connectionId]?.reportedScreenHeight = normalized.height
+        pipelines[connectionId]?.settings.deviceNativeWidth = normalized.width
+        pipelines[connectionId]?.settings.deviceNativeHeight = normalized.height
+        pipelines[connectionId]?.settings.deviceNativePPI = ppi
 
-        pipelines[connectionId]?.reportedScreenWidth = width
-        pipelines[connectionId]?.reportedScreenHeight = height
-        LogManager.shared.log("Sender: Screen info from \(serviceName): \(width)x\(height)")
+        if var profile = receiverProfiles[receiverProfileKey(for: pipeline.service)] {
+            profile.deviceNativeWidth = normalized.width
+            profile.deviceNativeHeight = normalized.height
+            profile.deviceNativePPI = ppi
+            saveSettings(profile, for: pipeline.service)
+        } else {
+            var settings = pipeline.settings
+            settings.deviceNativeWidth = normalized.width
+            settings.deviceNativeHeight = normalized.height
+            settings.deviceNativePPI = ppi
+            saveSettings(settings, for: pipeline.service)
+        }
 
-        // Restart pipeline with new dimensions
+        LogManager.shared.log(
+            "Sender: Screen info from \(serviceName): \(normalized.width)x\(normalized.height) @ \(ppi) PPI"
+        )
+        updateConnectedDisplays()
+        objectWillChange.send()
+
+        // iOS/Mac receivers historically restart capture to match device aspect.
+        // Windows/Linux keep Dimensions as the virtual-display source of truth.
+        if PresentationCapacity.isDesktopSoftDecodeReceiver(serviceName) {
+            return
+        }
+
         stopPipeline(for: connectionId)
         startPipeline(for: connectionId)
     }
@@ -7507,19 +7722,34 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         }
     }
 
+    private func streamPixelSize(
+        for connectionId: UUID
+    ) -> (width: Int, height: Int) {
+        let pipeline = pipelines[connectionId]
+        let settings = pipeline?.settings ?? currentReceiverSettings()
+        let serviceName = pipeline?.service.name ?? "unknown"
+        // Desktop receivers: Dimensions picker owns the virtual display size.
+        // Phone/tablet receivers: prefer reported native panel size.
+        if PresentationCapacity.isDesktopSoftDecodeReceiver(serviceName) {
+            return (settings.resolutionWidth, settings.resolutionHeight)
+        }
+        let width = pipeline?.reportedScreenWidth.flatMap { $0 > 0 ? $0 : nil }
+            ?? settings.resolutionWidth
+        let height = pipeline?.reportedScreenHeight.flatMap { $0 > 0 ? $0 : nil }
+            ?? settings.resolutionHeight
+        return (width, height)
+    }
+
     private func presentationEnvelope(
         for connectionId: UUID
     ) -> PresentationCapacity.Envelope {
         let pipeline = pipelines[connectionId]
         let settings = pipeline?.settings ?? currentReceiverSettings()
         let serviceName = pipeline?.service.name ?? "unknown"
-        let width = pipeline?.reportedScreenWidth.flatMap { $0 > 0 ? $0 : nil }
-            ?? settings.resolutionWidth
-        let height = pipeline?.reportedScreenHeight.flatMap { $0 > 0 ? $0 : nil }
-            ?? settings.resolutionHeight
+        let size = streamPixelSize(for: connectionId)
         return PresentationCapacity.bind(
-            width: width,
-            height: height,
+            width: size.width,
+            height: size.height,
             fps: settings.fps,
             retinaEnabled: settings.retinaEnabled,
             serviceName: serviceName,
@@ -7533,10 +7763,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         let pipeline = pipelines[connectionId]
         let settings = pipeline?.settings ?? currentReceiverSettings()
         let serviceName = pipeline?.service.name ?? "unknown"
-        let width = pipeline?.reportedScreenWidth.flatMap { $0 > 0 ? $0 : nil }
-            ?? settings.resolutionWidth
-        let height = pipeline?.reportedScreenHeight.flatMap { $0 > 0 ? $0 : nil }
-            ?? settings.resolutionHeight
+        let size = streamPixelSize(for: connectionId)
         // High physical PPI can make macOS retain a 2x backing scale even when
         // CGVirtualDisplaySettings.hiDPI is disabled. Advertise standard DPI for
         // non-Retina modes so the requested 1x logical mode is selected.
@@ -7545,8 +7772,8 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             : min(settings.resolutionPPI, 110)
 
         return VirtualDisplayManager.Resolution(
-            width: width,
-            height: height,
+            width: size.width,
+            height: size.height,
             ppi: descriptorPPI,
             hiDPI: settings.retinaEnabled,
             name: "ExtendCast Display (\(serviceName))"

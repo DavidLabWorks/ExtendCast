@@ -105,7 +105,11 @@ private slots:
         quint16 peerPort,
         const QString& connectionMode
     );
+    void sendScreenInfoToSender(const QString& deviceId);
     void onConnectionLost(const QString& deviceId);
+    void cancelPendingSessionClose(const QString& deviceId);
+    void schedulePendingSessionClose(const QString& deviceId, int graceMs);
+    void closeReceiverSession(const QString& deviceId, const QString& reason);
     void onVideoDataReceived(
         const QString& deviceId,
         const QByteArray& data
@@ -250,6 +254,8 @@ private:
 
     // One isolated decode/render/window pipeline per sender device ID.
     QHash<QString, ReceiverSession*> m_receiverSessions;
+    // Brief TCP flaps keep the window; intentional Mac disconnect closes after grace.
+    QHash<QString, QTimer*> m_pendingSessionCloseTimers;
 
 #ifdef ENABLE_SENDER
     // Send page

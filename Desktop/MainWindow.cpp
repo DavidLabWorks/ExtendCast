@@ -2169,6 +2169,7 @@ void MainWindow::onConnectionEstablished(
     const QString& connectionMode
 ) {
     m_reconnectTimer->stop();
+    cancelPendingSessionClose(deviceId);
     LogManager::instance().log(
         QString("Connection established — %1 (%2) via %3 at %4:%5 "
                 "[connection %6]")
@@ -2186,6 +2187,10 @@ void MainWindow::onConnectionEstablished(
         peerPort,
     };
     refreshConnectedSendersCard();
+
+    // Report native panel pixels so the Mac can show Device Info / offer
+    // a matching custom Dimensions preset (command 777).
+    sendScreenInfoToSender(deviceId);
 
     ReceiverSession* session = m_receiverSessions.value(deviceId);
     if (session) {
@@ -2236,6 +2241,7 @@ void MainWindow::onConnectionEstablished(
                 LogManager::instance().log(
                     "Video window closed by user [" + closedDeviceId.left(8) + "]"
                 );
+                cancelPendingSessionClose(closedDeviceId);
                 if (auto* closed = m_receiverSessions.take(closedDeviceId)) {
                     delete closed;
                 }
@@ -2308,19 +2314,117 @@ void MainWindow::onConnectionEstablished(
 #endif
 }
 
+void MainWindow::sendScreenInfoToSender(const QString& deviceId) {
+    if (!m_network) {
+        return;
+    }
+    QScreen* screen = QApplication::primaryScreen();
+    if (!screen) {
+        return;
+    }
+    const qreal dpr = screen->devicePixelRatio();
+    const QSize logical = screen->size();
+    const int width = qMax(2, qRound(logical.width() * dpr));
+    const int height = qMax(2, qRound(logical.height() * dpr));
+    // physicalSize is in millimetres — used by the Mac to auto-derive PPI.
+    const QSizeF physicalMM = screen->physicalSize();
+    LogManager::instance().log(
+        QString("Receiver: Reporting screen info %1x%2 "
+                "(logical %3x%4 @ DPR %5, physical %6x%7 mm) to %8")
+            .arg(width)
+            .arg(height)
+            .arg(logical.width())
+            .arg(logical.height())
+            .arg(dpr, 0, 'f', 2)
+            .arg(physicalMM.width(), 0, 'f', 1)
+            .arg(physicalMM.height(), 0, 'f', 1)
+            .arg(deviceId.left(8))
+    );
+    // Command 777: deltaX/Y = native pixels, x/y = physical size in mm.
+    m_network->sendInputEvent(
+        deviceId,
+        InputEvent(
+            InputEventType::Command,
+            physicalMM.width(),
+            physicalMM.height(),
+            kScreenInfoKeyCode,
+            static_cast<double>(width),
+            static_cast<double>(height)
+        )
+    );
+}
+
+void MainWindow::cancelPendingSessionClose(const QString& deviceId) {
+    if (auto* timer = m_pendingSessionCloseTimers.take(deviceId)) {
+        timer->stop();
+        timer->deleteLater();
+    }
+}
+
+void MainWindow::closeReceiverSession(
+    const QString& deviceId,
+    const QString& reason
+) {
+    cancelPendingSessionClose(deviceId);
+    if (auto* session = m_receiverSessions.take(deviceId)) {
+        LogManager::instance().log(
+            QString("Receiver: Closing window %1 for %2 (%3)")
+                .arg(deviceId.left(8), session->deviceName(), reason)
+        );
+        session->deleteLater();
+    }
+}
+
+void MainWindow::schedulePendingSessionClose(
+    const QString& deviceId,
+    int graceMs
+) {
+    cancelPendingSessionClose(deviceId);
+    auto* timer = new QTimer(this);
+    timer->setSingleShot(true);
+    m_pendingSessionCloseTimers.insert(deviceId, timer);
+    connect(timer, &QTimer::timeout, this, [this, deviceId]() {
+        m_pendingSessionCloseTimers.remove(deviceId);
+        // Flap recovered — keep the window.
+        if (m_connectedSenders.contains(deviceId)) {
+            return;
+        }
+        closeReceiverSession(deviceId, "reconnect grace expired");
+        if (m_receiverSessions.isEmpty() && m_connectedSenders.isEmpty()
+            && m_recvStatusLabel) {
+            m_recvStatusLabel->setText(
+                QString("Listening on port %1").arg(m_receiverPort)
+            );
+            m_recvStatusLabel->setStyleSheet(
+                "font-size: 13px; font-weight: bold; color: #d8d8d8;"
+            );
+        }
+    });
+    timer->start(graceMs);
+    LogManager::instance().log(
+        QString("Receiver: Keeping window %1 for %2 ms pending reconnect")
+            .arg(deviceId.left(8))
+            .arg(graceMs)
+    );
+}
+
 void MainWindow::onConnectionLost(const QString& deviceId) {
     m_connectedSenders.remove(deviceId);
     refreshConnectedSendersCard();
 
-    // Keep the isolated window/session across Thunderbolt/Wi-Fi flaps.
-    // Destroying QOpenGLWidget + D3D11VA on every disconnect caused reconnect
-    // crashes on Surface; replaceConnection() resets decode for the new stream.
+    // Keep the window through brief Thunderbolt/Wi-Fi flaps. If the Mac
+    // stays gone past the grace period, close so we don't freeze on the
+    // last frame forever.
     if (auto* session = m_receiverSessions.value(deviceId)) {
-        LogManager::instance().log(
-            QString("Receiver: Keeping window %1 for %2 after disconnect")
-                .arg(deviceId.left(8), session->deviceName())
-        );
         session->resetVideoDecoder();
+        int graceMs = 3000;
+#ifdef ENABLE_ANDROID_ADB
+        // ADB reconnect starts after 2s and can take longer.
+        if (m_adbHelper->wasAdbConnection()) {
+            graceMs = 30000;
+        }
+#endif
+        schedulePendingSessionClose(deviceId, graceMs);
     }
 
 #ifdef ENABLE_ANDROID_ADB

@@ -151,17 +151,26 @@ public:
     /// arrive next — flush refs without destroying the codec.
     void armFlushBeforeNextFrame() {
         std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_waitingForKeyframe) {
+            // Remote-IDR wait already owns the next resume action.
+            return;
+        }
         m_flushBeforeNextFrame = true;
     }
 
     /// Network catch-up dropped the buffer and asked the sender for an IDR.
+    /// Idempotent while already waiting — repeated TCP catch-up ticks must not
+    /// re-arm flush thrash around every backlog probe.
     void waitForRemoteKeyframe() {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_pending.clear();
+        m_drainScheduled = false;
+        if (m_waitingForKeyframe) {
+            return;
+        }
         m_waitingForKeyframe = true;
         m_hardResetBeforeNextFrame = false;
         m_flushBeforeNextFrame = false;
-        m_drainScheduled = false;
     }
 
 private:
