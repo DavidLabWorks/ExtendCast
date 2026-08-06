@@ -9,6 +9,7 @@
 
 #include <QWidget>
 #include <QSize>
+#include <QString>
 
 #include <atomic>
 #include <cstdint>
@@ -54,13 +55,21 @@ public slots:
 
 protected:
     void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
-    void paintEvent(QPaintEvent* event) override;
-    bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
+    void moveEvent(QMoveEvent* event) override;
+    bool event(QEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
     QPaintEngine* paintEngine() const override { return nullptr; }
 
 private:
     bool ensureDevice();
+    bool ensurePresentHwnd();
+    bool syncPresentHwndGeometry();
+    void releasePresentHwnd();
+    void installWindowTracker();
+    void removeWindowTracker();
+    void* topLevelHwnd() const;
     bool ensureSwapChain();
     bool ensurePipeline();
     bool ensureDisplayTexture(int width, int height);
@@ -73,6 +82,9 @@ private:
 
     ID3D11Device* m_device = nullptr;
     ID3D11DeviceContext* m_context = nullptr;
+
+    void* m_presentHwnd = nullptr;
+    QWidget* m_trackedWindow = nullptr;
 
     IDXGISwapChain1* m_swapChain = nullptr;
     ID3D11Texture2D* m_backBuffer = nullptr;
@@ -104,4 +116,6 @@ private:
     std::atomic_bool m_updatePending{false};
     std::atomic_bool m_failed{false};
     int m_copyFailCount = 0;
+    bool m_loggedFirstPresent = false;
+    QString m_swapEffectLabel;
 };

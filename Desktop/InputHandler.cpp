@@ -12,6 +12,12 @@ InputHandler::InputHandler(QObject* parent)
 }
 
 void InputHandler::attach(QWidget* videoSurface) {
+    if (!videoSurface) {
+        return;
+    }
+    if (m_videoSurface && m_videoSurface != videoSurface) {
+        m_videoSurface->removeEventFilter(this);
+    }
     m_videoSurface = videoSurface;
     videoSurface->installEventFilter(this);
     videoSurface->setMouseTracking(true);

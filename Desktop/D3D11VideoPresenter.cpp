@@ -4,16 +4,25 @@
 #include "D3D11SharedDevice.h"
 #include "MainWindow.h"
 
+#include <QEvent>
+#include <QHideEvent>
+#include <QMoveEvent>
 #include <QResizeEvent>
 #include <QShowEvent>
-#include <QStackedWidget>
+#include <QTimer>
+#include <QWindow>
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi.h>
 #include <dxgi1_2.h>
+#include <windows.h>
 
 #include <cstring>
+
+#ifndef WS_EX_NOREDIRECTIONBITMAP
+#define WS_EX_NOREDIRECTIONBITMAP 0x00200000L
+#endif
 
 namespace {
 
@@ -22,7 +31,7 @@ struct Vertex {
 };
 
 struct Constants {
-    float viewport[4];       // offsetX, offsetY, scaleX, scaleY
+    float viewport[4];
     float rangeParameters[4];
     float matrixCoefficients[4];
 };
@@ -77,6 +86,8 @@ float4 main(PSInput input) : SV_TARGET {
 }
 )";
 
+constexpr wchar_t kPresentClassName[] = L"ExtendCastD3DPresentHost";
+
 template <typename T>
 void releaseCom(T*& ptr) {
     if (ptr) {
@@ -85,23 +96,101 @@ void releaseCom(T*& ptr) {
     }
 }
 
+bool hwndClientSizePixels(HWND hwnd, int* outWidth, int* outHeight) {
+    if (!hwnd || !outWidth || !outHeight) {
+        return false;
+    }
+    RECT client = {};
+    if (!GetClientRect(hwnd, &client)) {
+        return false;
+    }
+    const int width = client.right - client.left;
+    const int height = client.bottom - client.top;
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
+    *outWidth = width;
+    *outHeight = height;
+    return true;
+}
+
+LRESULT CALLBACK presentWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_NCHITTEST) {
+        // Let clicks fall through to the Qt placeholder / InputHandler beneath.
+        return HTTRANSPARENT;
+    }
+    if (msg == WM_ERASEBKGND) {
+        return 1;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+ATOM registerPresentClass() {
+    static ATOM atom = 0;
+    if (atom) {
+        return atom;
+    }
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = presentWndProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = kPresentClassName;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    atom = RegisterClassExW(&wc);
+    if (!atom) {
+        // Already registered in this process.
+        atom = 1;
+    }
+    return atom;
+}
+
 }  // namespace
 
 D3D11VideoPresenter::D3D11VideoPresenter(QWidget* parent)
     : QWidget(parent)
 {
-    setAttribute(Qt::WA_NativeWindow);
-    setAttribute(Qt::WA_PaintOnScreen);
-    setAttribute(Qt::WA_OpaquePaintEvent);
-    setAttribute(Qt::WA_NoSystemBackground);
+    // Placeholder only — DXGI targets an owned WS_POPUP overlay HWND.
+    setAttribute(Qt::WA_NativeWindow, false);
+    setAttribute(Qt::WA_OpaquePaintEvent, true);
+    setAttribute(Qt::WA_NoSystemBackground, true);
     setAutoFillBackground(false);
+    setStyleSheet(QStringLiteral("background-color: #000000;"));
     qRegisterMetaType<HardwareVideoFrame>("HardwareVideoFrame");
 }
 
 D3D11VideoPresenter::~D3D11VideoPresenter() {
+    removeWindowTracker();
     releaseDisplayTexture();
     releasePipeline();
     releaseSwapChain();
+    releasePresentHwnd();
+}
+
+void D3D11VideoPresenter::installWindowTracker() {
+    QWidget* top = window();
+    if (!top || top == m_trackedWindow) {
+        return;
+    }
+    removeWindowTracker();
+    m_trackedWindow = top;
+    m_trackedWindow->installEventFilter(this);
+}
+
+void D3D11VideoPresenter::removeWindowTracker() {
+    if (!m_trackedWindow) {
+        return;
+    }
+    m_trackedWindow->removeEventFilter(this);
+    m_trackedWindow = nullptr;
+}
+
+void* D3D11VideoPresenter::topLevelHwnd() const {
+    QWidget* top = window();
+    if (!top) {
+        return nullptr;
+    }
+    top->winId();
+    return reinterpret_cast<void*>(top->winId());
 }
 
 void D3D11VideoPresenter::onHardwareFrame(const HardwareVideoFrame& frame) {
@@ -118,23 +207,51 @@ void D3D11VideoPresenter::onHardwareFrame(const HardwareVideoFrame& frame) {
 
 void D3D11VideoPresenter::showEvent(QShowEvent* event) {
     QWidget::showEvent(event);
-    createWinId();
+    installWindowTracker();
+    if (!ensurePresentHwnd()) {
+        failPresent("failed to create present HWND");
+        return;
+    }
+    syncPresentHwndGeometry();
     ensureSwapChain();
     ensurePipeline();
+    // Re-assert z-order/geometry after Qt finishes native updates.
+    QTimer::singleShot(0, this, [this]() {
+        syncPresentHwndGeometry();
+    });
+}
+
+void D3D11VideoPresenter::hideEvent(QHideEvent* event) {
+    QWidget::hideEvent(event);
+    if (m_presentHwnd) {
+        ShowWindow(reinterpret_cast<HWND>(m_presentHwnd), SW_HIDE);
+    }
 }
 
 void D3D11VideoPresenter::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
+    if (!m_presentHwnd && isVisible()) {
+        ensurePresentHwnd();
+    }
+    if (!syncPresentHwndGeometry()) {
+        return;
+    }
+    const HWND hwnd = reinterpret_cast<HWND>(m_presentHwnd);
+    int physW = 0;
+    int physH = 0;
+    if (!hwndClientSizePixels(hwnd, &physW, &physH)) {
+        return;
+    }
     if (m_swapChain
-        && (width() != m_swapWidth || height() != m_swapHeight)
-        && width() > 0
-        && height() > 0) {
+        && (physW != m_swapWidth || physH != m_swapHeight)
+        && physW > 0
+        && physH > 0) {
         releaseCom(m_rtv);
         releaseCom(m_backBuffer);
         const HRESULT hr = m_swapChain->ResizeBuffers(
             0,
-            static_cast<UINT>(width()),
-            static_cast<UINT>(height()),
+            static_cast<UINT>(physW),
+            static_cast<UINT>(physH),
             DXGI_FORMAT_UNKNOWN,
             0
         );
@@ -149,9 +266,18 @@ void D3D11VideoPresenter::resizeEvent(QResizeEvent* event) {
                    nullptr,
                    &m_rtv
                ))) {
-            m_swapWidth = width();
-            m_swapHeight = height();
+            m_swapWidth = physW;
+            m_swapHeight = physH;
+            LogManager::instance().log(
+                QString("D3D11: SwapChain resized to %1x%2 (popup overlay)")
+                    .arg(m_swapWidth)
+                    .arg(m_swapHeight)
+            );
         } else {
+            LogManager::instance().log(
+                QString("D3D11: ResizeBuffers failed hr=0x%1")
+                    .arg(quint32(hr), 8, 16, QChar('0'))
+            );
             releaseSwapChain();
         }
     }
@@ -160,19 +286,36 @@ void D3D11VideoPresenter::resizeEvent(QResizeEvent* event) {
     }
 }
 
-void D3D11VideoPresenter::paintEvent(QPaintEvent*) {
-    presentPendingFrame();
+void D3D11VideoPresenter::moveEvent(QMoveEvent* event) {
+    QWidget::moveEvent(event);
+    syncPresentHwndGeometry();
 }
 
-bool D3D11VideoPresenter::nativeEvent(
-    const QByteArray& eventType,
-    void* message,
-    qintptr* result
-) {
-    Q_UNUSED(eventType);
-    Q_UNUSED(message);
-    Q_UNUSED(result);
-    return false;
+bool D3D11VideoPresenter::event(QEvent* event) {
+    if (event->type() == QEvent::ZOrderChange || event->type() == QEvent::ShowToParent) {
+        syncPresentHwndGeometry();
+    }
+    return QWidget::event(event);
+}
+
+bool D3D11VideoPresenter::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == m_trackedWindow) {
+        switch (event->type()) {
+        case QEvent::Move:
+        case QEvent::Resize:
+        case QEvent::WindowStateChange:
+            syncPresentHwndGeometry();
+            break;
+        case QEvent::Hide:
+            if (m_presentHwnd) {
+                ShowWindow(reinterpret_cast<HWND>(m_presentHwnd), SW_HIDE);
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 bool D3D11VideoPresenter::ensureDevice() {
@@ -188,6 +331,92 @@ bool D3D11VideoPresenter::ensureDevice() {
     return m_device && m_context;
 }
 
+bool D3D11VideoPresenter::ensurePresentHwnd() {
+    if (m_presentHwnd) {
+        return true;
+    }
+    HWND owner = reinterpret_cast<HWND>(topLevelHwnd());
+    if (!owner) {
+        LogManager::instance().log("D3D11: no top-level HWND for present host");
+        return false;
+    }
+    registerPresentClass();
+    // Owned WS_POPUP sits outside Qt's redirected child tree (Present-ok-but-black).
+    // NOREDIRECTIONBITMAP: Flip-friendly. Transparent/noactivate: mouse+focus stay on Qt.
+    const HWND hwnd = CreateWindowExW(
+        WS_EX_NOREDIRECTIONBITMAP | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
+            | WS_EX_TOOLWINDOW,
+        kPresentClassName,
+        L"ExtendCastPresent",
+        WS_POPUP,
+        0,
+        0,
+        1,
+        1,
+        owner,
+        nullptr,
+        GetModuleHandleW(nullptr),
+        nullptr
+    );
+    if (!hwnd) {
+        LogManager::instance().log(
+            QString("D3D11: CreateWindowEx present overlay failed err=%1")
+                .arg(quint32(GetLastError()))
+        );
+        return false;
+    }
+    m_presentHwnd = hwnd;
+    LogManager::instance().log(
+        QString("D3D11: popup present HWND=0x%1 owner=0x%2")
+            .arg(quintptr(hwnd), 0, 16)
+            .arg(quintptr(owner), 0, 16)
+    );
+    return true;
+}
+
+bool D3D11VideoPresenter::syncPresentHwndGeometry() {
+    if (!m_presentHwnd) {
+        return false;
+    }
+    QWidget* top = window();
+    HWND owner = reinterpret_cast<HWND>(topLevelHwnd());
+    HWND hwnd = reinterpret_cast<HWND>(m_presentHwnd);
+    if (!top || !owner || !hwnd) {
+        return false;
+    }
+
+    // Map placeholder rect through the Qt top-level client area → screen pixels.
+    const qreal dpr = top->devicePixelRatioF();
+    const QPoint topLeft = mapTo(top, QPoint(0, 0));
+    POINT screenPt = {
+        qRound(topLeft.x() * dpr),
+        qRound(topLeft.y() * dpr)
+    };
+    if (!ClientToScreen(owner, &screenPt)) {
+        return false;
+    }
+    const int w = qMax(1, qRound(width() * dpr));
+    const int h = qMax(1, qRound(height() * dpr));
+    SetWindowPos(
+        hwnd,
+        HWND_TOP,
+        screenPt.x,
+        screenPt.y,
+        w,
+        h,
+        SWP_NOACTIVATE | (isVisible() ? SWP_SHOWWINDOW : SWP_HIDEWINDOW)
+    );
+    return true;
+}
+
+void D3D11VideoPresenter::releasePresentHwnd() {
+    if (!m_presentHwnd) {
+        return;
+    }
+    DestroyWindow(reinterpret_cast<HWND>(m_presentHwnd));
+    m_presentHwnd = nullptr;
+}
+
 bool D3D11VideoPresenter::ensureSwapChain() {
     if (!ensureDevice()) {
         return false;
@@ -198,12 +427,35 @@ bool D3D11VideoPresenter::ensureSwapChain() {
     if (m_failed.load()) {
         return false;
     }
-
-    createWinId();
-    const WId wid = winId();
-    if (!wid || width() <= 0 || height() <= 0) {
+    if (!ensurePresentHwnd()) {
+        failPresent("present HWND unavailable");
         return false;
     }
+    syncPresentHwndGeometry();
+
+    const HWND hwnd = reinterpret_cast<HWND>(m_presentHwnd);
+    int physW = 0;
+    int physH = 0;
+    if (!hwndClientSizePixels(hwnd, &physW, &physH)) {
+        LogManager::instance().log("D3D11: present HWND has empty client rect");
+        return false;
+    }
+
+    const HWND owner = GetWindow(hwnd, GW_OWNER);
+    const LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+    LogManager::instance().log(
+        QString("D3D11: present host hwnd=0x%1 owner=0x%2 popup=%3 style=0x%4 "
+                "physical=%5x%6 placeholder=%7x%8 dpr=%9")
+            .arg(quintptr(hwnd), 0, 16)
+            .arg(quintptr(owner), 0, 16)
+            .arg((style & WS_POPUP) ? "yes" : "no")
+            .arg(quint32(style), 8, 16, QChar('0'))
+            .arg(physW)
+            .arg(physH)
+            .arg(width())
+            .arg(height())
+            .arg(devicePixelRatioF(), 0, 'f', 2)
+    );
 
     IDXGIDevice* dxgiDevice = nullptr;
     HRESULT hr = m_device->QueryInterface(
@@ -235,38 +487,56 @@ bool D3D11VideoPresenter::ensureSwapChain() {
         return false;
     }
 
-    // Flip-model swap chains are unreliable on Qt child HWNDs. Use the
-    // discard model which is the supported path for embedded windows.
-    DXGI_SWAP_CHAIN_DESC1 desc = {};
-    desc.Width = static_cast<UINT>(width());
-    desc.Height = static_cast<UINT>(height());
-    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    desc.SampleDesc.Count = 1;
-    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    desc.BufferCount = 2;
-    desc.Scaling = DXGI_SCALING_STRETCH;
-    desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-    desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    auto tryCreate = [&](DXGI_SWAP_EFFECT effect, UINT bufferCount, const char* label) {
+        releaseCom(m_swapChain);
+        DXGI_SWAP_CHAIN_DESC1 desc = {};
+        desc.Width = static_cast<UINT>(physW);
+        desc.Height = static_cast<UINT>(physH);
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        desc.BufferCount = bufferCount;
+        desc.Scaling = DXGI_SCALING_STRETCH;
+        desc.SwapEffect = effect;
+        desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
 
-    hr = factory->CreateSwapChainForHwnd(
-        m_device,
-        reinterpret_cast<HWND>(wid),
-        &desc,
-        nullptr,
-        nullptr,
-        &m_swapChain
-    );
-    if (FAILED(hr) || !m_swapChain) {
-        // Older path for hosts that reject CreateSwapChainForHwnd variants.
+        const HRESULT createHr = factory->CreateSwapChainForHwnd(
+            m_device,
+            hwnd,
+            &desc,
+            nullptr,
+            nullptr,
+            &m_swapChain
+        );
+        LogManager::instance().log(
+            QString("D3D11: CreateSwapChainForHwnd(%1) buffers=%2 size=%3x%4 hr=0x%5 chain=%6")
+                .arg(QLatin1String(label))
+                .arg(bufferCount)
+                .arg(physW)
+                .arg(physH)
+                .arg(quint32(createHr), 8, 16, QChar('0'))
+                .arg(m_swapChain ? "ok" : "null")
+        );
+        return SUCCEEDED(createHr) && m_swapChain != nullptr;
+    };
+
+    // Popup overlay HWND — Flip is preferred (no Qt redirected parent).
+    bool created = tryCreate(DXGI_SWAP_EFFECT_FLIP_DISCARD, 2, "FLIP_DISCARD");
+    QString swapLabel = QStringLiteral("FLIP_DISCARD");
+    if (!created) {
+        created = tryCreate(DXGI_SWAP_EFFECT_DISCARD, 2, "DISCARD");
+        swapLabel = QStringLiteral("DISCARD");
+    }
+    if (!created) {
         DXGI_SWAP_CHAIN_DESC legacy = {};
         legacy.BufferCount = 1;
-        legacy.BufferDesc.Width = desc.Width;
-        legacy.BufferDesc.Height = desc.Height;
+        legacy.BufferDesc.Width = static_cast<UINT>(physW);
+        legacy.BufferDesc.Height = static_cast<UINT>(physH);
         legacy.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         legacy.BufferDesc.RefreshRate.Numerator = 60;
         legacy.BufferDesc.RefreshRate.Denominator = 1;
         legacy.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        legacy.OutputWindow = reinterpret_cast<HWND>(wid);
+        legacy.OutputWindow = hwnd;
         legacy.SampleDesc.Count = 1;
         legacy.Windowed = TRUE;
         legacy.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
@@ -280,21 +550,24 @@ bool D3D11VideoPresenter::ensureSwapChain() {
             IDXGISwapChain* legacyChain = nullptr;
             hr = factory1->CreateSwapChain(m_device, &legacy, &legacyChain);
             factory1->Release();
+            LogManager::instance().log(
+                QString("D3D11: CreateSwapChain(legacy DISCARD) hr=0x%1")
+                    .arg(quint32(hr), 8, 16, QChar('0'))
+            );
             if (SUCCEEDED(hr) && legacyChain) {
                 hr = legacyChain->QueryInterface(
                     __uuidof(IDXGISwapChain1),
                     reinterpret_cast<void**>(&m_swapChain)
                 );
                 legacyChain->Release();
+                created = SUCCEEDED(hr) && m_swapChain != nullptr;
+                swapLabel = QStringLiteral("legacy-DISCARD");
             }
         }
     }
-    factory->MakeWindowAssociation(
-        reinterpret_cast<HWND>(wid),
-        DXGI_MWA_NO_ALT_ENTER
-    );
+    factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
     factory->Release();
-    if (FAILED(hr) || !m_swapChain) {
+    if (!created || !m_swapChain) {
         failPresent(
             QString("CreateSwapChain failed hr=0x%1")
                 .arg(quint32(hr), 8, 16, QChar('0'))
@@ -302,6 +575,7 @@ bool D3D11VideoPresenter::ensureSwapChain() {
         m_swapChain = nullptr;
         return false;
     }
+    m_swapEffectLabel = swapLabel;
 
     hr = m_swapChain->GetBuffer(
         0,
@@ -309,21 +583,30 @@ bool D3D11VideoPresenter::ensureSwapChain() {
         reinterpret_cast<void**>(&m_backBuffer)
     );
     if (FAILED(hr) || !m_backBuffer) {
-        failPresent("GetBuffer failed");
+        failPresent(
+            QString("GetBuffer failed hr=0x%1")
+                .arg(quint32(hr), 8, 16, QChar('0'))
+        );
         releaseSwapChain();
         return false;
     }
 
     hr = m_device->CreateRenderTargetView(m_backBuffer, nullptr, &m_rtv);
     if (FAILED(hr) || !m_rtv) {
-        failPresent("CreateRenderTargetView failed");
+        failPresent(
+            QString("CreateRenderTargetView failed hr=0x%1")
+                .arg(quint32(hr), 8, 16, QChar('0'))
+        );
         releaseSwapChain();
         return false;
     }
-    m_swapWidth = width();
-    m_swapHeight = height();
+    m_swapWidth = physW;
+    m_swapHeight = physH;
     LogManager::instance().log(
-        QString("D3D11: SwapChain ready %1x%2").arg(m_swapWidth).arg(m_swapHeight)
+        QString("D3D11: SwapChain ready %1x%2 effect=%3 host=popup-overlay")
+            .arg(m_swapWidth)
+            .arg(m_swapHeight)
+            .arg(m_swapEffectLabel)
     );
     return true;
 }
@@ -333,6 +616,8 @@ void D3D11VideoPresenter::failPresent(const QString& reason) {
         return;
     }
     LogManager::instance().log(QString("D3D11: Present failed — %1").arg(reason));
+    releaseSwapChain();
+    releasePresentHwnd();
     emit presentFailed(reason);
 }
 
@@ -342,6 +627,8 @@ void D3D11VideoPresenter::releaseSwapChain() {
     releaseCom(m_swapChain);
     m_swapWidth = 0;
     m_swapHeight = 0;
+    m_loggedFirstPresent = false;
+    m_swapEffectLabel.clear();
 }
 
 bool D3D11VideoPresenter::ensurePipeline() {
@@ -595,6 +882,18 @@ void D3D11VideoPresenter::presentPendingFrame() {
         box.right = static_cast<UINT>(pending->width);
         box.bottom = static_cast<UINT>(pending->height);
         box.back = 1;
+        if (!m_loggedFirstPresent) {
+            D3D11_TEXTURE2D_DESC srcDesc = {};
+            source->GetDesc(&srcDesc);
+            LogManager::instance().log(
+                QString("D3D11: copy hw frame %1x%2 array=%3/%4 fmt=0x%5 → NV12 display")
+                    .arg(pending->width)
+                    .arg(pending->height)
+                    .arg(pending->textureIndex)
+                    .arg(srcDesc.ArraySize)
+                    .arg(quint32(srcDesc.Format), 8, 16, QChar('0'))
+            );
+        }
         m_context->CopySubresourceRegion(
             m_displayTexture,
             0,
@@ -627,13 +926,29 @@ void D3D11VideoPresenter::presentPendingFrame() {
     const HRESULT presentHr = m_swapChain->Present(0, 0);
     if (FAILED(presentHr)) {
         ++m_copyFailCount;
+        LogManager::instance().log(
+            QString("D3D11: Present failed hr=0x%1 count=%2 effect=%3")
+                .arg(quint32(presentHr), 8, 16, QChar('0'))
+                .arg(m_copyFailCount)
+                .arg(m_swapEffectLabel)
+        );
         if (m_copyFailCount >= 3) {
             failPresent(
-                QString("Present hr=0x%1")
+                QString("Present hr=0x%1 effect=%2")
                     .arg(quint32(presentHr), 8, 16, QChar('0'))
+                    .arg(m_swapEffectLabel)
             );
         }
     } else {
+        if (m_copyFailCount > 0 || !m_loggedFirstPresent) {
+            LogManager::instance().log(
+                QString("D3D11: Present ok effect=%1 size=%2x%3")
+                    .arg(m_swapEffectLabel)
+                    .arg(m_swapWidth)
+                    .arg(m_swapHeight)
+            );
+            m_loggedFirstPresent = true;
+        }
         m_copyFailCount = 0;
     }
 }
@@ -644,8 +959,8 @@ void D3D11VideoPresenter::drawLetterboxed() {
     m_context->ClearRenderTargetView(m_rtv, clearColor);
 
     D3D11_VIEWPORT viewport = {};
-    viewport.Width = static_cast<float>(width());
-    viewport.Height = static_cast<float>(height());
+    viewport.Width = static_cast<float>(m_swapWidth);
+    viewport.Height = static_cast<float>(m_swapHeight);
     viewport.MinDepth = 0.0f;
     viewport.MaxDepth = 1.0f;
     m_context->RSSetViewports(1, &viewport);
@@ -655,7 +970,8 @@ void D3D11VideoPresenter::drawLetterboxed() {
     float scaleY = 1.0f;
     float offsetX = 0.0f;
     float offsetY = 0.0f;
-    const float widgetAspect = static_cast<float>(width()) / static_cast<float>(height());
+    const float widgetAspect =
+        static_cast<float>(m_swapWidth) / static_cast<float>(m_swapHeight);
     const float videoAspect =
         static_cast<float>(m_texWidth) / static_cast<float>(m_texHeight);
     if (videoAspect > widgetAspect) {

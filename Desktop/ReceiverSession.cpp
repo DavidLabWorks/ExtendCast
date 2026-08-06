@@ -10,9 +10,12 @@
 
 #ifdef _WIN32
 #include "D3D11SharedDevice.h"
+#include "D3D11VideoPresenter.h"
+#include "HardwareVideoFrame.h"
 #endif
 
 #include <QSize>
+#include <QStackedWidget>
 
 namespace {
 constexpr int kKeyframeRequestCooldownMs = 2000;
@@ -34,17 +37,35 @@ ReceiverSession::ReceiverSession(
     , m_audioDecoder(new AudioDecoder(this))
     , m_audioPlayer(new AudioPlayer(this))
 {
-    // Keep the proven OpenGL present path. Zero-copy D3D present remains in
-    // tree for a follow-up once the child-HWND swapchain path is validated;
-    // enabling it here caused black screens on Surface.
-    m_videoSurface = m_renderer;
-    m_decoder->setZeroCopyPresent(false);
+    m_presentStack = new QStackedWidget();
+    m_presentStack->addWidget(m_renderer);
+    m_videoSurface = m_presentStack;
+
 #ifdef _WIN32
-    if (D3D11SharedDevice::instance().ensureCreated()) {
+    qRegisterMetaType<HardwareVideoFrame>("HardwareVideoFrame");
+    const bool disableZeroCopy =
+        qEnvironmentVariableIsSet("EXTENDCAST_DISABLE_ZERO_COPY");
+    if (!disableZeroCopy && D3D11SharedDevice::instance().ensureCreated()) {
+        m_d3dPresenter = new D3D11VideoPresenter();
+        m_presentStack->addWidget(m_d3dPresenter);
+        m_presentStack->setCurrentWidget(m_d3dPresenter);
+        m_decoder->setZeroCopyPresent(true);
+        m_usingZeroCopyPresent = true;
         LogManager::instance().log(
-            "Receiver: D3D11 decode available — presenting via OpenGL (zero-copy deferred)"
+            "Receiver: Using D3D11 zero-copy presenter on popup overlay HWND "
+            "(set EXTENDCAST_DISABLE_ZERO_COPY=1 to force OpenGL)"
         );
+    } else if (D3D11SharedDevice::instance().ensureCreated()) {
+        LogManager::instance().log(
+            "Receiver: D3D11 decode available — presenting via OpenGL "
+            "(zero-copy disabled by env)"
+        );
+        m_decoder->setZeroCopyPresent(false);
+    } else {
+        m_decoder->setZeroCopyPresent(false);
     }
+#else
+    m_decoder->setZeroCopyPresent(false);
 #endif
 
     m_window = new VideoWindow(m_videoSurface, m_inputHandler, ownerWindow);
@@ -56,7 +77,6 @@ ReceiverSession::ReceiverSession(
     m_keyframeRequestCooldown.invalidate();
 
     m_window->bindToDevice(m_deviceId, m_deviceName);
-    m_inputHandler->attach(m_videoSurface);
 
     auto onPresented = [this](
         quint64 streamId,
@@ -93,13 +113,39 @@ ReceiverSession::ReceiverSession(
         m_window->resizeToFitVideo(size.width(), size.height());
     };
 
-    connect(
-        m_decoder,
-        &VideoDecoder::frameDecoded,
-        m_renderer,
-        &VideoRenderer::onFrameDecoded,
-        Qt::DirectConnection
-    );
+#ifdef _WIN32
+    if (m_usingZeroCopyPresent && m_d3dPresenter) {
+        connectZeroCopyPresentPath();
+        connect(
+            m_d3dPresenter,
+            &D3D11VideoPresenter::framePresented,
+            this,
+            onPresented
+        );
+        connect(
+            m_d3dPresenter,
+            &D3D11VideoPresenter::videoSizeChanged,
+            this,
+            onVideoSizeChanged
+        );
+        connect(
+            m_d3dPresenter,
+            &D3D11VideoPresenter::presentFailed,
+            this,
+            [this](const QString& reason) {
+                fallbackPresentToOpenGL(reason);
+            }
+        );
+        m_inputHandler->attach(m_d3dPresenter);
+    } else {
+        connectOpenGLPresentPath();
+        m_inputHandler->attach(m_renderer);
+    }
+#else
+    connectOpenGLPresentPath();
+    m_inputHandler->attach(m_renderer);
+#endif
+
     connect(
         m_renderer,
         &VideoRenderer::framePresented,
@@ -156,16 +202,88 @@ ReceiverSession::ReceiverSession(
     );
 }
 
+void ReceiverSession::connectOpenGLPresentPath() {
+    connect(
+        m_decoder,
+        &VideoDecoder::frameDecoded,
+        m_renderer,
+        &VideoRenderer::onFrameDecoded,
+        Qt::DirectConnection
+    );
+}
+
+#ifdef _WIN32
+void ReceiverSession::connectZeroCopyPresentPath() {
+    connect(
+        m_decoder,
+        &VideoDecoder::hardwareFrameDecoded,
+        m_d3dPresenter,
+        &D3D11VideoPresenter::onHardwareFrame,
+        Qt::QueuedConnection
+    );
+}
+
+void ReceiverSession::fallbackPresentToOpenGL(const QString& reason) {
+    if (!m_usingZeroCopyPresent) {
+        return;
+    }
+    m_usingZeroCopyPresent = false;
+    LogManager::instance().log(
+        QString("Receiver: Falling back to OpenGL present — %1").arg(reason)
+    );
+
+    if (m_d3dPresenter) {
+        disconnect(
+            m_decoder,
+            &VideoDecoder::hardwareFrameDecoded,
+            m_d3dPresenter,
+            &D3D11VideoPresenter::onHardwareFrame
+        );
+        disconnect(
+            m_d3dPresenter,
+            &D3D11VideoPresenter::presentFailed,
+            this,
+            nullptr
+        );
+    }
+
+    m_decoder->setZeroCopyPresent(false);
+    connectOpenGLPresentPath();
+    if (m_presentStack && m_renderer) {
+        m_presentStack->setCurrentWidget(m_renderer);
+    }
+    if (m_d3dPresenter) {
+        m_d3dPresenter->hide();
+    }
+    if (m_renderer) {
+        m_inputHandler->attach(m_renderer);
+    }
+
+    // Force a fresh IDR so the OpenGL path gets a clean access unit soon.
+    requestKeyframeThrottled("zero-copy present fallback");
+}
+#endif
+
 ReceiverSession::~ReceiverSession() {
     m_videoDecodeQueue.clearForStreamReset();
 
     if (m_decoder) {
         disconnect(m_decoder, nullptr, m_renderer, nullptr);
+#ifdef _WIN32
+        if (m_d3dPresenter) {
+            disconnect(m_decoder, nullptr, m_d3dPresenter, nullptr);
+        }
+#endif
         disconnect(m_decoder, nullptr, this, nullptr);
     }
     if (m_renderer) {
         disconnect(m_renderer, nullptr, this, nullptr);
     }
+#ifdef _WIN32
+    if (m_d3dPresenter) {
+        disconnect(m_d3dPresenter, nullptr, this, nullptr);
+    }
+#endif
 
     if (m_decoder && m_decoderThread.isRunning()) {
         // Drain decoder GPU/GL-touching state on its thread before teardown.
@@ -189,7 +307,9 @@ ReceiverSession::~ReceiverSession() {
         delete m_window;
         m_window = nullptr;
     }
-    delete m_videoSurface;
+    // Stack owns the renderer / optional D3D presenter widgets.
+    delete m_presentStack;
+    m_presentStack = nullptr;
     m_videoSurface = nullptr;
 #ifdef _WIN32
     m_d3dPresenter = nullptr;

@@ -17,6 +17,7 @@ class VideoDecoder;
 class VideoRenderer;
 class VideoWindow;
 class QWidget;
+class QStackedWidget;
 #ifdef _WIN32
 class D3D11VideoPresenter;
 #endif
@@ -58,6 +59,11 @@ signals:
 
 private:
     void requestKeyframeThrottled(const char* reason);
+    void connectOpenGLPresentPath();
+#ifdef _WIN32
+    void connectZeroCopyPresentPath();
+    void fallbackPresentToOpenGL(const QString& reason);
+#endif
 
     QString m_deviceId;
     QString m_deviceName;
@@ -66,7 +72,9 @@ private:
     VideoRenderer* m_renderer = nullptr;
 #ifdef _WIN32
     D3D11VideoPresenter* m_d3dPresenter = nullptr;
+    bool m_usingZeroCopyPresent = false;
 #endif
+    QStackedWidget* m_presentStack = nullptr;
     QWidget* m_videoSurface = nullptr;
     InputHandler* m_inputHandler = nullptr;
     AudioDecoder* m_audioDecoder = nullptr;
