@@ -26,6 +26,9 @@ struct CatchUpDecision {
     std::uint64_t bufferedDurationNanoseconds = 0;
     bool resetDecoder = false;
     bool requestKeyframe = false;
+    /// When set, receiver should re-anchor its live clock to this PTS so a
+    /// kept in-band IDR is not immediately treated as stale again.
+    std::optional<LivePosition> resumeLivePosition;
 };
 
 inline std::uint32_t readBigEndianUInt32(const std::uint8_t* data) {
@@ -82,6 +85,7 @@ inline CatchUpDecision planTcpVideoCatchUp(
     std::optional<Header> newestVideoHeader;
     std::optional<std::size_t> firstVideoPacketOffset;
     std::optional<std::size_t> newestStreamKeyframeOffset;
+    std::optional<Header> newestStreamKeyframeHeader;
 
     std::size_t packetOffset = 0;
     while (packetOffset + 4 <= tcpBufferSize) {
@@ -109,10 +113,12 @@ inline CatchUpDecision planTcpVideoCatchUp(
             if (newestVideoHeader.has_value()
                 && newestVideoHeader->streamId != header.streamId) {
                 newestStreamKeyframeOffset.reset();
+                newestStreamKeyframeHeader.reset();
             }
             newestVideoHeader = header;
             if (header.isKeyframe) {
                 newestStreamKeyframeOffset = packetOffset;
+                newestStreamKeyframeHeader = header;
             }
         }
 
@@ -156,26 +162,38 @@ inline CatchUpDecision planTcpVideoCatchUp(
         }
     }
 
+    const bool hardLimitExceeded =
+        !streamIsContinuous
+        || decision.bufferedDurationNanoseconds
+            > maximumBufferedDurationNanoseconds;
     const bool keyframeAdvancesPlayback =
         newestStreamKeyframeOffset.has_value()
         && (*newestStreamKeyframeOffset > *firstVideoPacketOffset
             || bufferedStreamChanged
             || currentStreamChanged
             || timestampReset);
-    if (keyframeAdvancesPlayback) {
+    // When live delay alone trips the hard limit, an already-buffered IDR is
+    // still a usable resume point — even if it is the oldest packet. Dropping
+    // it and requesting another IDR is what creates the evening catch-up spiral.
+    if (keyframeAdvancesPlayback
+        || (hardLimitExceeded && newestStreamKeyframeOffset.has_value())) {
         decision.discardBytes = *newestStreamKeyframeOffset;
         // Skip to an in-band IDR without tearing the decoder down. Stream-ID
         // changes are handled when the kept keyframe is decoded.
         decision.resetDecoder = false;
+        if (newestStreamKeyframeHeader.has_value()) {
+            decision.resumeLivePosition = LivePosition{
+                newestStreamKeyframeHeader->streamId,
+                newestStreamKeyframeHeader->presentationTimestampNanoseconds,
+            };
+        }
         return decision;
     }
 
     // A normal network burst may exceed the preferred latency budget before
     // it contains a newer keyframe. Keep decoding until the hard limit rather
     // than resetting a healthy stream during startup or routine batching.
-    if (streamIsContinuous
-        && decision.bufferedDurationNanoseconds
-            <= maximumBufferedDurationNanoseconds) {
+    if (!hardLimitExceeded) {
         return decision;
     }
 

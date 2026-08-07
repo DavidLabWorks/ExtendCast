@@ -13,6 +13,16 @@ enum ConnectionTeardownStep: Equatable {
     case destroyVirtualDisplay
 }
 
+/// Lock/sleep suspension must detach pipeline media synchronously before
+/// awaiting SCStream stop. Otherwise unlock can install a replacement
+/// encoder while the suspend path still holds (and later releases) the old
+/// one — VT's unretained callback then crashes in dealloc.
+enum SuspendedCaptureTeardownStep: Equatable {
+    case detachMediaFromPipeline
+    case stopCapture
+    case invalidateEncoder
+}
+
 enum ConnectionTeardownPolicy {
     /// Synchronous bookkeeping that can run immediately on the main queue.
     static let immediateSteps: [ConnectionTeardownStep] = [
@@ -32,4 +42,10 @@ enum ConnectionTeardownPolicy {
     static var fullOrderedSteps: [ConnectionTeardownStep] {
         immediateSteps + deferredSteps
     }
+
+    static let suspendedCaptureSteps: [SuspendedCaptureTeardownStep] = [
+        .detachMediaFromPipeline,
+        .stopCapture,
+        .invalidateEncoder,
+    ]
 }

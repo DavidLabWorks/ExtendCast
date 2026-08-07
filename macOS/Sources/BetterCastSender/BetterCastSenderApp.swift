@@ -4622,6 +4622,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private var sessionRecoveryDeadline: Date?
     private var sessionRecoveryGeneration: UInt64 = 0
     private var sessionSuspensionReasons: Set<SessionSuspensionReason> = []
+    /// In-flight SCStream / VT teardown from lock-sleep suspension. Resume
+    /// must await this before attaching a replacement encoder.
+    private var pipelineMediaTeardownTask: Task<Void, Never>?
 
     init(
         discoveryRemovalDelay: TimeInterval = 8.0,
@@ -4780,6 +4783,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         discoverySearchWorkItem?.cancel()
         sessionSuspensionWorkItem?.cancel()
         sessionRecoveryWorkItem?.cancel()
+        pipelineMediaTeardownTask?.cancel()
         workspaceSessionObservers.forEach {
             NSWorkspace.shared.notificationCenter.removeObserver($0)
         }
@@ -4904,27 +4908,46 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
               !sessionSuspensionReasons.isEmpty else { return }
         sessionSuspensionWorkItem = nil
 
-        // The bounded grace period above lets the macOS lock transition reach
-        // the receiver. Stop afterward so a long lock cannot fill transport or
-        // decoder queues with media that will be stale after unlock.
-        let recorders = pipelines.compactMap { connectionId, pipeline in
-            pipeline.screenRecorder.map { (connectionId, $0) }
-        }
-        Task { @MainActor [weak self] in
-            for (_, recorder) in recorders {
-                await recorder.stopCaptureAndWait()
-            }
-            guard let self,
-                  self.sessionRecoveryGeneration == generation,
-                  !self.sessionSuspensionReasons.isEmpty else { return }
-            for (connectionId, recorder) in recorders
-                where self.pipelines[connectionId]?.screenRecorder === recorder {
-                self.pipelines[connectionId]?.screenRecorder = nil
-                self.pipelines[connectionId]?.videoEncoder = nil
-                self.pipelines[connectionId]?.audioEncoder = nil
-                self.pipelines[connectionId]?.streamFeedbackController?.reset()
+        // Detach media from `pipelines` synchronously (see
+        // ConnectionTeardownPolicy.suspendedCaptureSteps) so unlock/resume
+        // cannot install a replacement encoder that this path later releases.
+        // VideoEncoder's VT callback holds an unretained pointer — invalidate
+        // while we still own a strong ref, matching removeConnection.
+        var detached: [(ScreenRecorder?, VideoEncoder?)] = []
+        for connectionId in Array(pipelines.keys) {
+            let media = detachPipelineMedia(for: connectionId)
+            if media.recorder != nil || media.videoEncoder != nil {
+                detached.append((media.recorder, media.videoEncoder))
             }
         }
+
+        pipelineMediaTeardownTask = Task { @MainActor in
+            for (recorder, videoEncoder) in detached {
+                await recorder?.stopCaptureAndWait()
+                videoEncoder?.invalidate()
+            }
+            _ = detached
+        }
+    }
+
+    /// Pull capture/encode objects out of a pipeline in one dictionary write.
+    private func detachPipelineMedia(for connectionId: UUID) -> (
+        recorder: ScreenRecorder?,
+        videoEncoder: VideoEncoder?,
+        audioEncoder: AudioEncoder?
+    ) {
+        guard var pipeline = pipelines[connectionId] else {
+            return (nil, nil, nil)
+        }
+        let recorder = pipeline.screenRecorder
+        let videoEncoder = pipeline.videoEncoder
+        let audioEncoder = pipeline.audioEncoder
+        pipeline.screenRecorder = nil
+        pipeline.videoEncoder = nil
+        pipeline.audioEncoder = nil
+        pipeline.streamFeedbackController?.reset()
+        pipelines[connectionId] = pipeline
+        return (recorder, videoEncoder, audioEncoder)
     }
 
     private func resumeSession(
@@ -4988,18 +5011,27 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             "\(connectionIds.count) display(s) while preserving virtual displays"
         )
 
-        let recorders = connectionIds.compactMap { connectionId in
-            pipelines[connectionId]?.screenRecorder.map { (connectionId, $0) }
-        }
         Task { @MainActor [weak self] in
             guard let self else { return }
 
-            // Await the real ScreenCaptureKit teardown instead of guessing with
-            // a fixed delay. A new encoder gives the receiver a new stream ID,
-            // and its first frame is forced to be an IDR keyframe.
-            for (_, recorder) in recorders {
-                await recorder.stopCaptureAndWait()
+            // Finish suspend-path VT teardown before attaching replacements.
+            await self.pipelineMediaTeardownTask?.value
+
+            guard self.sessionRecoveryGeneration == generation,
+                  self.sessionSuspensionReasons.isEmpty else { return }
+
+            var leftover: [(ScreenRecorder?, VideoEncoder?)] = []
+            for connectionId in connectionIds where self.pipelines[connectionId] != nil {
+                let media = self.detachPipelineMedia(for: connectionId)
+                if media.recorder != nil || media.videoEncoder != nil {
+                    leftover.append((media.recorder, media.videoEncoder))
+                }
             }
+            for (recorder, videoEncoder) in leftover {
+                await recorder?.stopCaptureAndWait()
+                videoEncoder?.invalidate()
+            }
+            _ = leftover
 
             guard self.sessionRecoveryGeneration == generation,
                   self.sessionSuspensionReasons.isEmpty else { return }
@@ -5022,9 +5054,6 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                         InputHandler.shared.removeDisplayBounds(for: connectionId)
                     }
                 }
-                self.pipelines[connectionId]?.screenRecorder = nil
-                self.pipelines[connectionId]?.videoEncoder = nil
-                self.pipelines[connectionId]?.audioEncoder = nil
                 self.startPipeline(for: connectionId)
             }
         }

@@ -265,6 +265,11 @@ void NetworkListener::catchUpStaleTcpVideo(
     if (!m_identifiedConnections.contains(socket) || buffer.isEmpty()) {
         return;
     }
+    // While waiting for a remote IDR, do not discard arriving keyframe bytes
+    // against a racing live clock — that is the backlog→flush death spiral.
+    if (m_waitingForVideoKeyframe.contains(socket)) {
+        return;
+    }
 
     const QDateTime now = QDateTime::currentDateTime();
     if (m_lastTcpCatchUpCheck.contains(socket)
@@ -344,10 +349,22 @@ void NetworkListener::catchUpStaleTcpVideo(
         }
     }
 
+    if (decision.resumeLivePosition.has_value()) {
+        m_videoTimelines[socket] = VideoTimeline{
+            decision.resumeLivePosition->streamId,
+            decision.resumeLivePosition
+                ->expectedPresentationTimestampNanoseconds,
+            m_videoTimelineClock.nsecsElapsed(),
+        };
+    }
+
     if (!decision.requestKeyframe) {
         return;
     }
     m_waitingForVideoKeyframe.insert(socket);
+    // Stop the wall-clock live estimate so the recovery IDR is not measured
+    // as already-stale the moment it lands.
+    m_videoTimelines.remove(socket);
     if (m_lastTcpKeyframeRequest.contains(socket)
         && m_lastTcpKeyframeRequest[socket].msecsTo(now)
             < kTcpKeyframeRequestIntervalMs) {
@@ -599,14 +616,18 @@ void NetworkListener::handleVideoData(
     const QString deviceId =
         QString::fromStdString(binding->deviceId);
 
-    if (m_waitingForVideoKeyframe.contains(socket)) {
+    const bool resumingAfterRemoteKeyframe =
+        m_waitingForVideoKeyframe.contains(socket);
+    if (resumingAfterRemoteKeyframe) {
         if (!frameHeader.isKeyframe) {
             return;
         }
         m_waitingForVideoKeyframe.remove(socket);
     }
 
-    if (!m_videoTimelines.contains(socket)) {
+    if (!m_videoTimelines.contains(socket) || resumingAfterRemoteKeyframe) {
+        // Fresh anchor after connect or remote-IDR recovery. Without this,
+        // live delay stays > hard limit and catch-up discards the IDR again.
         m_videoTimelines[socket] = VideoTimeline{
             frameHeader.streamId,
             frameHeader.presentationTimestampNanoseconds,

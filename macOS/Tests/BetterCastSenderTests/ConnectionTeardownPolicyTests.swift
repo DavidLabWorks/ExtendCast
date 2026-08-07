@@ -28,4 +28,23 @@ final class ConnectionTeardownPolicyTests: XCTestCase {
             ]
         )
     }
+
+    func testSuspendedCaptureDetachesMediaBeforeStopAndInvalidate() {
+        XCTAssertEqual(
+            ConnectionTeardownPolicy.suspendedCaptureSteps,
+            [
+                .detachMediaFromPipeline,
+                .stopCapture,
+                .invalidateEncoder,
+            ]
+        )
+        let detach = ConnectionTeardownPolicy.suspendedCaptureSteps
+            .firstIndex(of: .detachMediaFromPipeline)!
+        let stop = ConnectionTeardownPolicy.suspendedCaptureSteps
+            .firstIndex(of: .stopCapture)!
+        let invalidate = ConnectionTeardownPolicy.suspendedCaptureSteps
+            .firstIndex(of: .invalidateEncoder)!
+        XCTAssertLessThan(detach, stop)
+        XCTAssertLessThan(stop, invalidate)
+    }
 }

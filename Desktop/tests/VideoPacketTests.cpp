@@ -89,7 +89,6 @@ int main() {
         std::vector<std::uint8_t> buffer;
         appendVideoPacket(buffer, 7, 0, milliseconds(0), true);
         appendVideoPacket(buffer, 7, 1, milliseconds(100), false);
-        const std::size_t completePacketBytes = buffer.size();
         appendBigEndianUInt32(buffer, 100);
         buffer.push_back(0x01);
 
@@ -102,9 +101,18 @@ int main() {
             LivePosition{7, milliseconds(800)}
         );
 
-        assert(decision.discardBytes == completePacketBytes);
-        assert(decision.resetDecoder);
-        assert(decision.requestKeyframe);
+        // Live delay exceeds the hard limit, but an in-band IDR is still a
+        // safe resume point — do not discard it and ask for another one.
+        assert(decision.discardBytes == 0);
+        assert(!decision.resetDecoder);
+        assert(!decision.requestKeyframe);
+        assert(decision.resumeLivePosition.has_value());
+        assert(decision.resumeLivePosition->streamId == 7);
+        assert(
+            decision.resumeLivePosition
+                ->expectedPresentationTimestampNanoseconds
+            == milliseconds(0)
+        );
         assert(decision.bufferedDurationNanoseconds == milliseconds(800));
     }
 
@@ -192,9 +200,65 @@ int main() {
             LivePosition{7, milliseconds(600)}
         );
 
-        assert(decision.discardBytes == buffer.size());
+        assert(decision.discardBytes == 0);
+        assert(!decision.resetDecoder);
+        assert(!decision.requestKeyframe);
+        assert(decision.resumeLivePosition.has_value());
+        assert(
+            decision.resumeLivePosition
+                ->expectedPresentationTimestampNanoseconds
+            == milliseconds(0)
+        );
+    }
+
+    {
+        // Evening spiral case: only the recovery IDR is buffered, but the
+        // racing live clock already says it is >hard-limit stale.
+        std::vector<std::uint8_t> buffer;
+        appendVideoPacket(buffer, 7, 100, milliseconds(9'200), true);
+
+        const auto decision = planTcpVideoCatchUp(
+            buffer.data(),
+            buffer.size(),
+            preferredBufferedVideoNanosecondsFor(
+                ReceiverAdvertisedRoute::thunderbolt
+            ),
+            milliseconds(800),
+            maximumPacketSize,
+            LivePosition{7, milliseconds(10'007)}
+        );
+
+        assert(decision.discardBytes == 0);
+        assert(!decision.resetDecoder);
+        assert(!decision.requestKeyframe);
+        assert(decision.resumeLivePosition.has_value());
+        assert(
+            decision.resumeLivePosition
+                ->expectedPresentationTimestampNanoseconds
+            == milliseconds(9'200)
+        );
+    }
+
+    {
+        // No keyframe in buffer and live delay past the hard limit → request.
+        std::vector<std::uint8_t> buffer;
+        appendVideoPacket(buffer, 7, 40, milliseconds(0), false);
+        appendVideoPacket(buffer, 7, 41, milliseconds(100), false);
+        const std::size_t completePacketBytes = buffer.size();
+
+        const auto decision = planTcpVideoCatchUp(
+            buffer.data(),
+            buffer.size(),
+            preferredDelay,
+            maximumDelay,
+            maximumPacketSize,
+            LivePosition{7, milliseconds(800)}
+        );
+
+        assert(decision.discardBytes == completePacketBytes);
         assert(decision.resetDecoder);
         assert(decision.requestKeyframe);
+        assert(!decision.resumeLivePosition.has_value());
     }
 
     {
