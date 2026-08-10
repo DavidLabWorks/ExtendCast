@@ -152,6 +152,9 @@ bool VideoDecoder::ensureHardwareDevice() {
         return true;
     }
     auto& shared = D3D11SharedDevice::instance();
+    if (shared.hardwareDecodeDisabled()) {
+        return false;
+    }
     if (shared.ensureCreated() && shared.ffmpegHwDeviceCtx()) {
         m_hwDeviceCtx = av_buffer_ref(shared.ffmpegHwDeviceCtx());
         if (m_hwDeviceCtx) {
@@ -278,7 +281,20 @@ bool VideoDecoder::initDecoder(const uint8_t* sps, int spsLen, const uint8_t* pp
         destroyDecoder();
     }
 
-    if (openCodecContext(sps, spsLen, pps, ppsLen, /*preferHardware=*/true)) {
+    auto noteSoftwarePresentRequired = [this]() {
+        if (m_zeroCopyPresent.exchange(false)) {
+            emit zeroCopyPresentUnavailable(
+                "D3D11VA hardware decode unavailable",
+                false
+            );
+        }
+    };
+
+    if (!m_hardwareDecodeDisabled
+        && openCodecContext(sps, spsLen, pps, ppsLen, /*preferHardware=*/true)) {
+        if (!m_usingHardware) {
+            noteSoftwarePresentRequired();
+        }
         LogManager::instance().log(
             m_usingHardware
                 ? "Decoder: H.264 D3D11VA hardware decode enabled"
@@ -288,6 +304,7 @@ bool VideoDecoder::initDecoder(const uint8_t* sps, int spsLen, const uint8_t* pp
     }
 
     if (openCodecContext(sps, spsLen, pps, ppsLen, /*preferHardware=*/false)) {
+        noteSoftwarePresentRequired();
         LogManager::instance().log(
             "Decoder: H.264 software decode enabled (hardware unavailable)"
         );
@@ -296,6 +313,40 @@ bool VideoDecoder::initDecoder(const uint8_t* sps, int spsLen, const uint8_t* pp
 
     LogManager::instance().log("Decoder: failed to initialize H.264 decoder");
     return false;
+}
+
+void VideoDecoder::disableHardwareDecode() {
+    if (m_hardwareDecodeDisabled) {
+        return;
+    }
+    m_hardwareDecodeDisabled = true;
+    LogManager::instance().log(
+        "Decoder: D3D device lost — switching this session to software decode"
+    );
+    reset();
+    emit softwareDecodeFallbackReady();
+}
+
+bool VideoDecoder::reportHardwareDeviceLoss(bool probeDevice) {
+#ifdef _WIN32
+    if (!m_usingHardware) {
+        return false;
+    }
+    auto& shared = D3D11SharedDevice::instance();
+    if (!shared.hardwareDecodeDisabled()
+        && (!probeDevice || !shared.deviceIsLost())) {
+        return false;
+    }
+    if (!m_hardwareDeviceLossReported) {
+        m_hardwareDeviceLossReported = true;
+        m_zeroCopyPresent.store(false);
+        emit zeroCopyPresentUnavailable("D3D11 device lost", true);
+    }
+    return true;
+#else
+    Q_UNUSED(probeDevice);
+    return false;
+#endif
 }
 
 void VideoDecoder::flushForKeyframeResume() {
@@ -373,6 +424,10 @@ void VideoDecoder::decodeNalus(
     int size,
     const DecodedVideoFrame& metadata
 ) {
+    if (reportHardwareDeviceLoss(false)) {
+        return;
+    }
+
     int naluCount = 0;
     QByteArray packetData = avccToAnnexB(data, size, &naluCount);
     if (packetData.isEmpty()) {
@@ -399,6 +454,9 @@ void VideoDecoder::decodeNalus(
     int ret = avcodec_send_packet(m_codecCtx, m_packet);
     av_packet_unref(m_packet);
     if (ret < 0) {
+        if (reportHardwareDeviceLoss(true)) {
+            return;
+        }
         if (m_sendCount <= 10 || m_sendCount % 100 == 0) {
             LogManager::instance().log(QString("Decoder: send_packet #%1 failed: %2")
                 .arg(m_sendCount).arg(ret));
@@ -416,6 +474,9 @@ void VideoDecoder::decodeNalus(
             break;
         }
         if (ret < 0) {
+            if (reportHardwareDeviceLoss(true)) {
+                return;
+            }
             if (m_outputCount <= 5) {
                 LogManager::instance().log(QString("Decoder: receive_frame error: %1").arg(ret));
             }
@@ -425,7 +486,7 @@ void VideoDecoder::decodeNalus(
         AVFrame* usable = m_frame;
         if (m_frame->format == AV_PIX_FMT_D3D11) {
 #ifdef _WIN32
-            if (m_zeroCopyPresent && m_usingHardware) {
+            if (m_zeroCopyPresent.load() && m_usingHardware) {
                 AVFrame* anchored = av_frame_alloc();
                 if (!anchored || av_frame_ref(anchored, m_frame) < 0) {
                     if (anchored) {
@@ -496,6 +557,9 @@ void VideoDecoder::decodeNalus(
 #endif
             av_frame_unref(m_transferFrame);
             if (av_hwframe_transfer_data(m_transferFrame, m_frame, 0) < 0) {
+                if (reportHardwareDeviceLoss(true)) {
+                    return;
+                }
                 if (m_outputCount <= 5) {
                     LogManager::instance().log(
                         "Decoder: hwframe transfer failed, requesting keyframe"

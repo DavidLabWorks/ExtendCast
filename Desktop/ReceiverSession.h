@@ -6,6 +6,8 @@
 #include <QElapsedTimer>
 #include <QThread>
 
+#include <atomic>
+
 #include "InputEvent.h"
 #include "VideoDecodeQueue.h"
 
@@ -62,7 +64,7 @@ private:
     void connectOpenGLPresentPath();
 #ifdef _WIN32
     void connectZeroCopyPresentPath();
-    void fallbackPresentToOpenGL(const QString& reason);
+    void fallbackPresentToOpenGL(const QString& reason, bool deviceLost);
 #endif
 
     QString m_deviceId;
@@ -83,6 +85,8 @@ private:
     QThread m_decoderThread;
     QElapsedTimer m_playbackAcknowledgementTimer;
     QElapsedTimer m_keyframeRequestCooldown;
+    std::atomic_bool m_deviceLossHandled{false};
+    std::atomic_bool m_videoRecoveryPending{false};
     VideoDecodeQueue<QByteArray> m_videoDecodeQueue{
         500'000'000,
         30,

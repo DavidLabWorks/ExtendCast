@@ -10,6 +10,10 @@ extern "C" {
 
 bool hardwareH264DecodeAvailable() {
 #ifdef _WIN32
+    auto& shared = D3D11SharedDevice::instance();
+    if (shared.hardwareDecodeDisabled()) {
+        return false;
+    }
     static const bool available = []() {
         if (D3D11SharedDevice::instance().ensureCreated()) {
             return true;
@@ -28,7 +32,7 @@ bool hardwareH264DecodeAvailable() {
         av_buffer_unref(&device);
         return true;
     }();
-    return available;
+    return available && !shared.hardwareDecodeDisabled();
 #else
     return false;
 #endif

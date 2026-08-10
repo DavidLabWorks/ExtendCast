@@ -33,8 +33,11 @@ D3D11SharedDevice::~D3D11SharedDevice() {
 }
 
 bool D3D11SharedDevice::ensureCreated() {
+    if (m_hardwareDecodeDisabled.load()) {
+        return false;
+    }
     if (m_device) {
-        return true;
+        return !m_hardwareDecodeDisabled.load();
     }
     if (!createDevice()) {
         return false;
@@ -51,7 +54,7 @@ bool D3D11SharedDevice::ensureCreated() {
         return false;
     }
     LogManager::instance().log("D3D11: Shared device ready for decode + present");
-    return true;
+    return !m_hardwareDecodeDisabled.load();
 }
 
 bool D3D11SharedDevice::createDevice() {
@@ -105,8 +108,11 @@ bool D3D11SharedDevice::createFfmpegCtx() {
     m_device->AddRef();
     d3d11->device_context = m_context;
     m_context->AddRef();
-    d3d11->lock = nullptr;
-    d3d11->unlock = nullptr;
+    // FFmpeg and the presenter share one immediate context. Use one recursive
+    // lock for both instead of FFmpeg's otherwise-private default mutex.
+    d3d11->lock = &D3D11SharedDevice::lockFfmpegContext;
+    d3d11->unlock = &D3D11SharedDevice::unlockFfmpegContext;
+    d3d11->lock_ctx = this;
 
     if (av_hwdevice_ctx_init(m_ffmpegHwDeviceCtx) < 0) {
         LogManager::instance().log("D3D11: FFmpeg hwdevice_ctx_init failed");
@@ -121,6 +127,45 @@ AVBufferRef* D3D11SharedDevice::ffmpegHwDeviceCtx() {
         return nullptr;
     }
     return m_ffmpegHwDeviceCtx;
+}
+
+void D3D11SharedDevice::markDeviceLost() {
+    if (!m_hardwareDecodeDisabled.exchange(true)) {
+        LogManager::instance().log(
+            "D3D11: Device lost — hardware decode disabled until restart"
+        );
+    }
+}
+
+bool D3D11SharedDevice::deviceIsLost() {
+    if (m_hardwareDecodeDisabled.load()) {
+        return true;
+    }
+    if (!m_device) {
+        return false;
+    }
+    const HRESULT reason = m_device->GetDeviceRemovedReason();
+    if (SUCCEEDED(reason)) {
+        return false;
+    }
+    LogManager::instance().log(
+        QString("D3D11: GetDeviceRemovedReason hr=0x%1")
+            .arg(quint32(reason), 8, 16, QChar('0'))
+    );
+    markDeviceLost();
+    return true;
+}
+
+std::unique_lock<std::recursive_mutex> D3D11SharedDevice::acquireContextLock() {
+    return std::unique_lock<std::recursive_mutex>(m_contextMutex);
+}
+
+void D3D11SharedDevice::lockFfmpegContext(void* opaque) {
+    static_cast<D3D11SharedDevice*>(opaque)->m_contextMutex.lock();
+}
+
+void D3D11SharedDevice::unlockFfmpegContext(void* opaque) {
+    static_cast<D3D11SharedDevice*>(opaque)->m_contextMutex.unlock();
 }
 
 #endif  // _WIN32

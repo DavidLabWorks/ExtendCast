@@ -132,8 +132,8 @@ ReceiverSession::ReceiverSession(
             m_d3dPresenter,
             &D3D11VideoPresenter::presentFailed,
             this,
-            [this](const QString& reason) {
-                fallbackPresentToOpenGL(reason);
+            [this](const QString& reason, bool deviceLost) {
+                fallbackPresentToOpenGL(reason, deviceLost);
             }
         );
         m_inputHandler->attach(m_d3dPresenter);
@@ -159,6 +159,26 @@ ReceiverSession::ReceiverSession(
         onVideoSizeChanged
     );
 
+    connect(
+        m_decoder,
+        &VideoDecoder::zeroCopyPresentUnavailable,
+        this,
+        [this](const QString& reason, bool deviceLost) {
+            fallbackPresentToOpenGL(reason, deviceLost);
+        },
+        Qt::QueuedConnection
+    );
+    connect(
+        m_decoder,
+        &VideoDecoder::softwareDecodeFallbackReady,
+        this,
+        [this]() {
+            m_videoDecodeQueue.waitForRemoteKeyframe();
+            m_videoRecoveryPending.store(false);
+            requestKeyframeThrottled("D3D device loss fallback");
+        },
+        Qt::QueuedConnection
+    );
     connect(
         m_decoder,
         &VideoDecoder::dimensionsChanged,
@@ -223,8 +243,15 @@ void ReceiverSession::connectZeroCopyPresentPath() {
     );
 }
 
-void ReceiverSession::fallbackPresentToOpenGL(const QString& reason) {
-    if (!m_usingZeroCopyPresent) {
+void ReceiverSession::fallbackPresentToOpenGL(
+    const QString& reason,
+    bool deviceLost
+) {
+    const bool wasUsingZeroCopyPresent = m_usingZeroCopyPresent;
+    if (!wasUsingZeroCopyPresent && !deviceLost) {
+        return;
+    }
+    if (deviceLost && m_deviceLossHandled.exchange(true)) {
         return;
     }
     m_usingZeroCopyPresent = false;
@@ -232,7 +259,7 @@ void ReceiverSession::fallbackPresentToOpenGL(const QString& reason) {
         QString("Receiver: Falling back to OpenGL present — %1").arg(reason)
     );
 
-    if (m_d3dPresenter) {
+    if (wasUsingZeroCopyPresent && m_d3dPresenter) {
         disconnect(
             m_decoder,
             &VideoDecoder::hardwareFrameDecoded,
@@ -248,19 +275,33 @@ void ReceiverSession::fallbackPresentToOpenGL(const QString& reason) {
     }
 
     m_decoder->setZeroCopyPresent(false);
-    connectOpenGLPresentPath();
-    if (m_presentStack && m_renderer) {
-        m_presentStack->setCurrentWidget(m_renderer);
+    if (deviceLost) {
+        // Stop feeding the invalid D3D decoder before reopening in software.
+        m_videoRecoveryPending.store(true);
+        m_videoDecodeQueue.clearForStreamReset();
+        QMetaObject::invokeMethod(
+            m_decoder,
+            [decoder = m_decoder]() { decoder->disableHardwareDecode(); },
+            Qt::QueuedConnection
+        );
     }
-    if (m_d3dPresenter) {
-        m_d3dPresenter->hide();
-    }
-    if (m_renderer) {
-        m_inputHandler->attach(m_renderer);
+    if (wasUsingZeroCopyPresent) {
+        connectOpenGLPresentPath();
+        if (m_presentStack && m_renderer) {
+            m_presentStack->setCurrentWidget(m_renderer);
+        }
+        if (m_d3dPresenter) {
+            m_d3dPresenter->hide();
+        }
+        if (m_renderer) {
+            m_inputHandler->attach(m_renderer);
+        }
     }
 
-    // Force a fresh IDR so the OpenGL path gets a clean access unit soon.
-    requestKeyframeThrottled("zero-copy present fallback");
+    if (!deviceLost) {
+        // Force a fresh IDR so the OpenGL path gets a clean access unit soon.
+        requestKeyframeThrottled("zero-copy present fallback");
+    }
 }
 #endif
 
@@ -366,7 +407,7 @@ void ReceiverSession::requestKeyframeThrottled(const char* reason) {
 void ReceiverSession::decodeVideo(
     const QByteArray& data
 ) {
-    if (!m_decoder) return;
+    if (!m_decoder || m_videoRecoveryPending.load()) return;
 
     video_packet::Header header;
     if (!video_packet::parseHeader(

@@ -48,7 +48,7 @@ signals:
     );
     /// Emitted when the D3D present path cannot show frames; caller should
     /// fall back to CPU/OpenGL presentation.
-    void presentFailed(const QString& reason);
+    void presentFailed(const QString& reason, bool deviceLost);
 
 public slots:
     void onHardwareFrame(const HardwareVideoFrame& frame);
@@ -81,7 +81,7 @@ private:
     void releasePipeline();
     void presentPendingFrame();
     void drawLetterboxed();
-    void failPresent(const QString& reason);
+    void failPresent(const QString& reason, bool deviceLost = false);
 
     ID3D11Device* m_device = nullptr;
     ID3D11DeviceContext* m_context = nullptr;

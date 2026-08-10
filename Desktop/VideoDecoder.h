@@ -3,6 +3,9 @@
 #include <QObject>
 #include <QByteArray>
 #include <QSize>
+#include <QString>
+
+#include <atomic>
 
 #include "DecodedVideoFrame.h"
 #include "HardwareVideoFrame.h"
@@ -28,11 +31,15 @@ public:
 
     bool usingHardwareDecode() const { return m_usingHardware; }
     /// When true on Windows, emit GPU frames instead of CPU NV12 copies.
-    void setZeroCopyPresent(bool enabled) { m_zeroCopyPresent = enabled; }
+    void setZeroCopyPresent(bool enabled) { m_zeroCopyPresent.store(enabled); }
+    /// Permanently use software decode for this session after D3D device loss.
+    void disableHardwareDecode();
 
 signals:
     void frameDecoded(const DecodedVideoFrame& frame);
     void hardwareFrameDecoded(const HardwareVideoFrame& frame);
+    void zeroCopyPresentUnavailable(const QString& reason, bool deviceLost);
+    void softwareDecodeFallbackReady();
     void dimensionsChanged(int width, int height);
     void keyframeNeeded();  // Emitted on decode errors — receiver should request IDR from sender
 
@@ -53,6 +60,7 @@ private:
         const DecodedVideoFrame& metadata
     );
     QByteArray avccToAnnexB(const uint8_t* data, int size, int* naluCount = nullptr) const;
+    bool reportHardwareDeviceLoss(bool probeDevice);
 
     AVBufferRef* m_hwDeviceCtx = nullptr;
     AVCodecContext* m_codecCtx = nullptr;
@@ -60,7 +68,9 @@ private:
     AVFrame* m_transferFrame = nullptr;
     AVPacket* m_packet = nullptr;
     bool m_usingHardware = false;
-    bool m_zeroCopyPresent = false;
+    std::atomic_bool m_zeroCopyPresent{false};
+    bool m_hardwareDecodeDisabled = false;
+    bool m_hardwareDeviceLossReported = false;
 
     // Cached SPS/PPS (from current packet scan)
     QByteArray m_sps;

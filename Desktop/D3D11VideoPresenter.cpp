@@ -219,8 +219,13 @@ void D3D11VideoPresenter::showEvent(QShowEvent* event) {
         return;
     }
     syncPresentHwndGeometry();
-    ensureSwapChain();
-    ensurePipeline();
+    if (!ensureSwapChain()) {
+        return;
+    }
+    if (!ensurePipeline()) {
+        failPresent("render pipeline initialization failed");
+        return;
+    }
     // Re-assert z-order/geometry after Qt finishes native updates.
     schedulePresentHwndResync();
 }
@@ -369,6 +374,9 @@ bool D3D11VideoPresenter::ensurePresentHwnd() {
 }
 
 bool D3D11VideoPresenter::syncPresentHwndGeometry() {
+    if (m_failed.load()) {
+        return false;
+    }
     if (!ensurePresentHwnd()) {
         return false;
     }
@@ -493,6 +501,10 @@ bool D3D11VideoPresenter::resizeSwapChainToHwnd() {
         return true;
     }
 
+    auto contextLock = D3D11SharedDevice::instance().acquireContextLock();
+
+    // ResizeBuffers requires every binding to the current back buffer released.
+    m_context->OMSetRenderTargets(0, nullptr, nullptr);
     releaseCom(m_rtv);
     releaseCom(m_backBuffer);
     const HRESULT hr = m_swapChain->ResizeBuffers(
@@ -527,6 +539,14 @@ bool D3D11VideoPresenter::resizeSwapChainToHwnd() {
         QString("D3D11: ResizeBuffers failed hr=0x%1")
             .arg(quint32(hr), 8, 16, QChar('0'))
     );
+    if (D3D11SharedDevice::instance().deviceIsLost()) {
+        failPresent(
+            QString("ResizeBuffers hr=0x%1")
+                .arg(quint32(hr), 8, 16, QChar('0')),
+            true
+        );
+        return false;
+    }
     releaseSwapChain();
     return false;
 }
@@ -583,6 +603,7 @@ bool D3D11VideoPresenter::ensureSwapChain() {
     if (m_failed.load()) {
         return false;
     }
+    auto contextLock = D3D11SharedDevice::instance().acquireContextLock();
     if (!ensurePresentHwnd()) {
         failPresent("present HWND unavailable");
         return false;
@@ -773,17 +794,26 @@ bool D3D11VideoPresenter::ensureSwapChain() {
     return true;
 }
 
-void D3D11VideoPresenter::failPresent(const QString& reason) {
+void D3D11VideoPresenter::failPresent(const QString& reason, bool deviceLost) {
+    auto& shared = D3D11SharedDevice::instance();
+    const bool actualDeviceLoss = deviceLost || shared.deviceIsLost();
+    if (actualDeviceLoss) {
+        shared.markDeviceLost();
+    }
     if (m_failed.exchange(true)) {
         return;
     }
     LogManager::instance().log(QString("D3D11: Present failed — %1").arg(reason));
     releaseSwapChain();
     releasePresentHwnd();
-    emit presentFailed(reason);
+    emit presentFailed(reason, actualDeviceLoss);
 }
 
 void D3D11VideoPresenter::releaseSwapChain() {
+    auto contextLock = D3D11SharedDevice::instance().acquireContextLock();
+    if (m_context) {
+        m_context->OMSetRenderTargets(0, nullptr, nullptr);
+    }
     releaseCom(m_rtv);
     releaseCom(m_backBuffer);
     releaseCom(m_swapChain);
@@ -1027,14 +1057,25 @@ void D3D11VideoPresenter::presentPendingFrame() {
     // leave Flip buffers at the pre-fullscreen size — both read as a black screen.
     syncPresentHwndGeometry();
 
-    if (!ensureSwapChain() || !ensurePipeline()) {
+    if (!ensureSwapChain()) {
+        return;
+    }
+    if (!ensurePipeline()) {
+        failPresent("render pipeline initialization failed");
         return;
     }
     resizeSwapChainToHwnd();
+    if (m_failed.load()) {
+        return;
+    }
+
+    // FFmpeg uses this same recursive lock around decode/context calls.
+    auto contextLock = D3D11SharedDevice::instance().acquireContextLock();
 
     auto pending = m_pendingFrame.take();
     if (pending.has_value() && pending->isValid()) {
         if (!ensureDisplayTexture(pending->width, pending->height)) {
+            contextLock.unlock();
             failPresent("display texture create failed");
             return;
         }
@@ -1080,11 +1121,6 @@ void D3D11VideoPresenter::presentPendingFrame() {
             m_videoSize = newSize;
             emit videoSizeChanged(newSize);
         }
-        emit framePresented(
-            pending->streamId,
-            pending->sequence,
-            pending->presentationTimestampNanoseconds
-        );
     }
 
     if (m_texWidth <= 0 || !m_rtv || !m_swapChain) {
@@ -1097,23 +1133,30 @@ void D3D11VideoPresenter::presentPendingFrame() {
     // long enough for the Mac sender's 15s heartbeat timeout to fire.
     const HRESULT presentHr =
         m_swapChain->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
+    contextLock.unlock();
     if (presentHr == DXGI_ERROR_WAS_STILL_DRAWING) {
         // Drop this vsync slot; keep the last composed frame on screen.
         return;
     }
     if (FAILED(presentHr)) {
         ++m_copyFailCount;
+        const bool deviceLost =
+            presentHr == DXGI_ERROR_DEVICE_REMOVED
+            || presentHr == DXGI_ERROR_DEVICE_RESET
+            || presentHr == DXGI_ERROR_DEVICE_HUNG
+            || presentHr == DXGI_ERROR_DRIVER_INTERNAL_ERROR;
         LogManager::instance().log(
             QString("D3D11: Present failed hr=0x%1 count=%2 effect=%3")
                 .arg(quint32(presentHr), 8, 16, QChar('0'))
                 .arg(m_copyFailCount)
                 .arg(m_swapEffectLabel)
         );
-        if (m_copyFailCount >= 3) {
+        if (deviceLost || m_copyFailCount >= 3) {
             failPresent(
                 QString("Present hr=0x%1 effect=%2")
                     .arg(quint32(presentHr), 8, 16, QChar('0'))
-                    .arg(m_swapEffectLabel)
+                    .arg(m_swapEffectLabel),
+                deviceLost
             );
         }
     } else {
@@ -1133,6 +1176,15 @@ void D3D11VideoPresenter::presentPendingFrame() {
             m_loggedFirstPresent = true;
         }
         m_copyFailCount = 0;
+        if (presentHr != DXGI_STATUS_OCCLUDED
+            && pending.has_value()
+            && pending->isValid()) {
+            emit framePresented(
+                pending->streamId,
+                pending->sequence,
+                pending->presentationTimestampNanoseconds
+            );
+        }
     }
 }
 
