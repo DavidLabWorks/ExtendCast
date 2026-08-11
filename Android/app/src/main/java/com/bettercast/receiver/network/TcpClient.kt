@@ -28,7 +28,7 @@ class TcpClient {
     companion object {
         private const val TAG = "TcpServer"
         private const val HEARTBEAT_INTERVAL_MS = 500L
-        const val DEFAULT_PORT = 51820
+        const val DEFAULT_PORT = 41820
     }
 
     private val _connectionState = MutableStateFlow(ConnectionState.IDLE)

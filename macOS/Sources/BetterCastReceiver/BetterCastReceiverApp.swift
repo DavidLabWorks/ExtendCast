@@ -345,7 +345,7 @@ class NetworkListener: ObservableObject, VideoDecoderDelegate {
     @Published var status: String? = "Initializing..."
     @Published var connectedClients: [NWConnection] = []
     @Published var manualConnectHost: String = "localhost"
-    @Published var manualConnectPort: String = "51820"
+    @Published var manualConnectPort: String = "41820"
 
     enum ConnectionType {
         case tcp
@@ -624,7 +624,10 @@ class NetworkListener: ObservableObject, VideoDecoderDelegate {
             // parameters.requiredInterfaceType = .wifi <--- REMOVED: Allow AWDL!
             parameters.serviceClass = .interactiveVideo
             
-            let listener = try NWListener(using: parameters)
+            let listener = try NWListener(
+                using: parameters,
+                on: NWEndpoint.Port(rawValue: BCConstants.tcpPort)!
+            )
             listener.service = NWListener.Service(name: "BetterCast Receiver", type: "_bettercast._tcp")
             
             listener.stateUpdateHandler = { [weak self] state in

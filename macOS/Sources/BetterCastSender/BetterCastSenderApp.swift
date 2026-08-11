@@ -3934,6 +3934,17 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             .lowercased()
     }
 
+    static func migratedManualPort(
+        _ savedPort: String?,
+        previousDefault: UInt16 = 51820
+    ) -> String {
+        guard let savedPort,
+              savedPort != String(previousDefault) else {
+            return String(BCConstants.tcpPort)
+        }
+        return savedPort
+    }
+
     private enum PreferenceKey {
         static let resolutionWidth = "senderResolutionWidth"
         static let resolutionHeight = "senderResolutionHeight"
@@ -3979,6 +3990,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     private var receiverProfiles: [String: ReceiverSettings] = [:]
     @Published private var autoConnectReceiverKeys: Set<String> = []
     private var suppressedAutoConnectReceiverKeys: Set<String> = []
+    private var suppressedAutoConnectReceiverNames: Set<String> = []
     private var manualAvailabilityProbes: [String: NWConnection] = [:]
     private var manualAvailabilityProbeGeneration = UUID()
     private var lastManualAvailabilityRefresh: Date?
@@ -4060,7 +4072,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
     @Published var manualHost: String = "" {
         didSet { persistSettings() }
     }
-    @Published var manualPort: String = "51820" {
+    @Published var manualPort: String = "41820" {
         didSet { persistSettings() }
     }
     @Published private(set) var manualConnectionHistory: [ManualConnectionHistoryItem] = []
@@ -4632,7 +4644,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         focusedBonjourReachabilityRecheckInterval: TimeInterval = 3.0,
         bonjourReachabilityProbe: BonjourReachabilityProbe? = nil,
         localConnectionAddressProvider: @escaping () -> [ReceiverConnectionAddress] = {
-            ReceiverConnectionAddressProvider.availableAddresses(port: 51820)
+            ReceiverConnectionAddressProvider.availableAddresses(
+                port: BCConstants.tcpPort
+            )
         }
     ) {
         self.discoveryRemovalDelay = discoveryRemovalDelay
@@ -4704,7 +4718,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             defaults.stringArray(forKey: PreferenceKey.autoConnectReceiverKeys) ?? []
         )
         manualHost = defaults.string(forKey: PreferenceKey.manualHost) ?? ""
-        manualPort = defaults.string(forKey: PreferenceKey.manualPort) ?? "51820"
+        manualPort = Self.migratedManualPort(
+            defaults.string(forKey: PreferenceKey.manualPort)
+        )
         if let profilesData = defaults.data(forKey: PreferenceKey.receiverProfiles),
            let profiles = try? JSONDecoder().decode([String: ReceiverSettings].self, from: profilesData) {
             receiverProfiles = profiles
@@ -5426,20 +5442,31 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
     private func shouldAutoConnect(to service: DiscoveredService) -> Bool {
         let key = receiverProfileKey(for: service)
+        let name = Self.bonjourReceiverIdentity(service.name)
         return autoConnectReceiverKeys.contains(key)
             && !suppressedAutoConnectReceiverKeys.contains(key)
+            && !suppressedAutoConnectReceiverNames.contains(name)
     }
 
     private func suppressAutoConnect(for service: DiscoveredService) {
         let key = receiverProfileKey(for: service)
-        guard autoConnectReceiverKeys.contains(key) else { return }
-        suppressedAutoConnectReceiverKeys.insert(key)
-        LogManager.shared.log("Sender: Auto-connect paused for \(service.name) after manual disconnect")
+        let name = Self.bonjourReceiverIdentity(service.name)
+        if autoConnectReceiverKeys.contains(key) {
+            suppressedAutoConnectReceiverKeys.insert(key)
+        }
+        if suppressedAutoConnectReceiverNames.insert(name).inserted {
+            LogManager.shared.log(
+                "Sender: Auto-connect paused for \(service.name) after manual disconnect"
+            )
+        }
     }
 
     private func resumeAutoConnect(for service: DiscoveredService) {
         let key = receiverProfileKey(for: service)
-        if suppressedAutoConnectReceiverKeys.remove(key) != nil {
+        let name = Self.bonjourReceiverIdentity(service.name)
+        let removedKey = suppressedAutoConnectReceiverKeys.remove(key) != nil
+        let removedName = suppressedAutoConnectReceiverNames.remove(name) != nil
+        if removedKey || removedName {
             LogManager.shared.log("Sender: Auto-connect resumed for \(service.name)")
         }
     }
@@ -5453,6 +5480,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         let key = receiverProfileKey(for: service)
         if enabled {
             suppressedAutoConnectReceiverKeys.remove(key)
+            suppressedAutoConnectReceiverNames.remove(
+                Self.bonjourReceiverIdentity(service.name)
+            )
             autoConnectReceiverKeys.insert(key)
             var updatedSettings = receiverProfiles[key] ?? currentReceiverSettings()
             if case .hostPort = service.endpoint {
@@ -5465,7 +5495,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         persistAutoConnectReceiverKeys()
 
         guard enabled,
-              !suppressedAutoConnectReceiverKeys.contains(key),
+              shouldAutoConnect(to: service),
               !connectedServices.contains(where: { $0.name == service.name }),
               !isConnecting(to: service) else {
             return
@@ -6210,7 +6240,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
         // Smart routing: Apple receivers (iOS/Mac) get P2P/AWDL, others get infrastructure
         let nameLower = service.name.lowercased()
-        // Manual IP connections (e.g. "10.0.0.5:51820") are never Apple receivers
+        // Manual IP connections (e.g. "10.0.0.5:41820") are never Apple receivers
         let isManualIP = service.name.contains(":") && service.name.first?.isNumber == true
         let isAppleReceiver = !isManualIP && !nameLower.contains("android") && !nameLower.contains("windows") && !nameLower.contains("linux")
 
@@ -6760,7 +6790,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 // Disconnect existing streaming pipeline
                 DispatchQueue.main.async {
                     self.adbStatus = "Setting up wireless tunnel..."
-                    let adbNames = ["Android (USB)", "Android (WiFi ADB)", "localhost:51820"]
+                    let adbNames = ["Android (USB)", "Android (WiFi ADB)", "localhost:41820"]
                     for name in adbNames {
                         if let entry = self.pipelines.first(where: { $0.value.service.name == name }) {
                             self.removeConnection(entry.key)
@@ -6771,12 +6801,15 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 Thread.sleep(forTimeInterval: 0.3)
 
                 // Set up port forwarding through existing WiFi connection
-                let forwardResult = self.runAdb(["-s", wifiSerial, "forward", "tcp:51820", "tcp:51820"])
+                let port = String(BCConstants.tcpPort)
+                let forwardResult = self.runAdb([
+                    "-s", wifiSerial, "forward", "tcp:\(port)", "tcp:\(port)"
+                ])
                 LogManager.shared.log("ADB Wireless: forward result: \(forwardResult.output)")
 
                 DispatchQueue.main.async {
                     self.adbStatus = "Connecting stream..."
-                    LogManager.shared.log("ADB Wireless: Tunnel ready via existing WiFi — connecting to localhost:51820")
+                    LogManager.shared.log("ADB Wireless: Tunnel ready via existing WiFi — connecting to localhost:\(BCConstants.tcpPort)")
                     self.connectADBTunnel(displayName: "Android (WiFi ADB)")
 
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -6821,7 +6854,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
             // 3. Disconnect existing ADB connection first (tcpip will kill USB tunnel anyway)
             DispatchQueue.main.async {
                 self.adbStatus = "Switching to wireless — disconnecting USB..."
-                let adbNames = ["Android (USB)", "Android (WiFi ADB)", "localhost:51820"]
+                let adbNames = ["Android (USB)", "Android (WiFi ADB)", "localhost:41820"]
                 for name in adbNames {
                     if let entry = self.pipelines.first(where: { $0.value.service.name == name }) {
                         self.removeConnection(entry.key)
@@ -6873,13 +6906,16 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                 self.adbStatus = "Switching to wireless — setting up tunnel..."
                 LogManager.shared.log("ADB Wireless: Setting up port forward on \(deviceIP):5555...")
             }
-            let forwardResult = self.runAdb(["-s", "\(deviceIP):5555", "forward", "tcp:51820", "tcp:51820"])
+            let port = String(BCConstants.tcpPort)
+            let forwardResult = self.runAdb([
+                "-s", "\(deviceIP):5555", "forward", "tcp:\(port)", "tcp:\(port)"
+            ])
             LogManager.shared.log("ADB Wireless: forward result: \(forwardResult.output)")
 
-            // 7. Connect sender to localhost:51820 (tunneled through WiFi ADB)
+            // 7. Connect sender to the local port tunneled through WiFi ADB.
             DispatchQueue.main.async {
                 self.adbStatus = "Connecting stream..."
-                LogManager.shared.log("ADB Wireless: Tunnel ready — connecting to localhost:51820")
+                LogManager.shared.log("ADB Wireless: Tunnel ready — connecting to localhost:\(BCConstants.tcpPort)")
                 self.connectADBTunnel(displayName: "Android (WiFi ADB)")
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -6908,7 +6944,10 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
 
             // Use -s serial if available (handles multiple-device case)
             let deviceArgs: [String] = serial.map { ["-s", $0] } ?? []
-            let forwardResult = self.runAdb(deviceArgs + ["forward", "tcp:51820", "tcp:51820"])
+            let port = String(BCConstants.tcpPort)
+            let forwardResult = self.runAdb(
+                deviceArgs + ["forward", "tcp:\(port)", "tcp:\(port)"]
+            )
             LogManager.shared.log("ADB USB: forward result: \(forwardResult.output)")
 
             DispatchQueue.main.async {
@@ -6943,7 +6982,7 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         let parameters = NWParameters(tls: nil, tcp: tcpOptions)
         parameters.serviceClass = .interactiveVideo
 
-        LogManager.shared.log("Sender: ADB connect '\(displayName)' via localhost:51820")
+        LogManager.shared.log("Sender: ADB connect '\(displayName)' via localhost:\(BCConstants.tcpPort)")
         connectWithParameters(service: service, parameters: parameters, forceTCP: true)
     }
 
@@ -7471,6 +7510,15 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
         removeConnection(connectionId)
     }
 
+    private func handleReceiverRequestedDisconnect(_ connectionId: UUID) {
+        guard let service = pipelines[connectionId]?.service else { return }
+        LogManager.shared.log(
+            "Sender: Receiver requested disconnect from \(service.name)"
+        )
+        suppressAutoConnect(for: service)
+        removeConnection(connectionId)
+    }
+
     func setAudioEnabled(_ enabled: Bool, for connectionId: UUID) {
         if let idx = connectedDisplays.firstIndex(where: { $0.id == connectionId }) {
             connectedDisplays[idx].audioEnabled = enabled
@@ -7635,6 +7683,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                                         physicalWidthMM: event.x > 1 ? event.x : nil,
                                         physicalHeightMM: event.y > 1 ? event.y : nil
                                     )
+                                } else if event.type == .command
+                                    && event.keyCode == InputCommandKeyCode.receiverRequestedDisconnect {
+                                    self?.handleReceiverRequestedDisconnect(connectionId)
                                 } else if event.type == .command && event.keyCode == 666,
                                           let streamID = event.streamID.flatMap(UInt64.init),
                                           let timestamp = event.presentationTimestampNanoseconds.flatMap(UInt64.init) {
@@ -7694,6 +7745,9 @@ class NetworkClient: ObservableObject, VideoEncoderDelegate, AudioEncoderDelegat
                                     physicalWidthMM: event.x > 1 ? event.x : nil,
                                     physicalHeightMM: event.y > 1 ? event.y : nil
                                 )
+                            } else if event.type == .command
+                                && event.keyCode == InputCommandKeyCode.receiverRequestedDisconnect {
+                                self?.handleReceiverRequestedDisconnect(connectionId)
                             } else if event.type == .command && event.keyCode == 666,
                                       let streamID = event.streamID.flatMap(UInt64.init),
                                       let timestamp = event.presentationTimestampNanoseconds.flatMap(UInt64.init) {

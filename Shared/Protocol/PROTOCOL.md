@@ -13,7 +13,7 @@ applications are branded ExtendCast.
 
 ## Ports
 
-- TCP video/audio stream: `51820`
+- TCP video/audio stream: `41820`
 - UDP chunked stream: `51821`
 
 ## TCP framing
@@ -78,3 +78,36 @@ creating another window or changing its fullscreen state.
 A TCP client that disconnects without sending a valid identity message is a
 reachability probe and must not create, close, resize, or focus a Receiving
 window.
+
+## Receiver control commands
+
+Receivers send length-prefixed JSON `InputEvent` messages back to a sender.
+An event with `type: 99` is an internal command. The reserved command key codes
+are:
+
+- `555`: the receiver user intentionally disconnected this sender. The sender
+  must suppress automatic reconnection to that receiver for the remainder of
+  the current sender process lifetime, unless the user starts a new manual
+  connection or explicitly re-enables that receiver's auto-connect setting.
+- `666`: playback acknowledgement.
+- `777`: receiver screen information.
+- `888`: heartbeat.
+- `999`: request an IDR keyframe.
+
+After sending command `555`, the receiver must close the transport gracefully
+so the command is delivered before the connection ends.
+
+Command processing must be idempotent because receivers may repeat important
+control messages to tolerate a transport closing immediately afterward. An
+`eventId`, when present, can be used for deduplication.
+
+User-initiated disconnect and unexpected connection loss have different
+semantics. A connection loss may be retried when automatic connection is
+enabled. Command `555` is an explicit user intent: the sender must stop the
+matching capture and encoding pipeline and must not immediately reconnect due
+to discovery, an address change, or another available interface.
+
+Closing a Receiving window and selecting Disconnect from another receiver UI
+must use the same command-and-teardown path. Full lifecycle behavior and the
+cross-platform conformance cases are documented in
+[`docs/sender-receiver-implementation-baseline.md`](../../docs/sender-receiver-implementation-baseline.md).

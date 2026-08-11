@@ -3,7 +3,7 @@ import Foundation
 /// Shared constants for the BetterCast iOS receiver app.
 enum BCConstants {
     /// Standard TCP port for BetterCast video/audio stream.
-    static let tcpPort: UInt16 = 51820
+    static let tcpPort: UInt16 = 41820
 
     /// Standard UDP port for chunked frame delivery.
     static let udpPort: UInt16 = 51821

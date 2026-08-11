@@ -54,7 +54,7 @@ _Avoid_: Inferred route, local interface guess
 
 **Advertised Route Endpoint**:
 An address and port explicitly paired with one Advertised Route Capability by
-the Receiver, for example `ep_thunderbolt=169.254.204.111:51820`. It is a Route
+the Receiver, for example `ep_thunderbolt=169.254.204.111:41820`. It is a Route
 Candidate until the Sender completes a transport handshake. ARP neighbors,
 receiver names, and the number of discovered devices are not substitutes.
 _Avoid_: Guessed peer, inferred endpoint

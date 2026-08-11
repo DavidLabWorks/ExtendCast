@@ -215,15 +215,25 @@ if (-not $makensis) {
     throw "makensis.exe not found. Install NSIS or add it to PATH."
 }
 
-$artifact = Join-Path $desktop 'artifact'
-if (Test-Path $artifact) {
-    Remove-Item $artifact -Recurse -Force
+# NSIS consumes the completed portable directory directly. Keeping this source
+# path configurable avoids copying a second staging tree into the repository,
+# which is especially important for local release builds whose binaries belong
+# on a dedicated output drive. SOURCE_DIR and OUTPUT_FILE are passed as absolute
+# paths so CI, developer workstations, and mapped workspaces all follow the same
+# packaging path. installer.nsi still provides backward-compatible defaults for
+# direct/manual makensis invocations. The portable directory is fully validated
+# above before NSIS sees it, so the installer cannot silently package a partial
+# runtime. makensis writes directly to InstallerOut; there is no temporary setup
+# executable to discover, copy, or remove from the source tree afterward.
+$sourceDir = (Resolve-Path $OutDir).Path
+if (-not $InstallerOut) {
+    $InstallerOut = Join-Path (Split-Path $sourceDir -Parent) "ExtendCast-Setup-$version.exe"
 }
-New-Item -ItemType Directory -Force $artifact | Out-Null
-Copy-Item -Path (Join-Path $OutDir '*') -Destination $artifact -Recurse -Force
-
-Get-ChildItem $desktop -Filter 'ExtendCast-Setup-*.exe' -ErrorAction SilentlyContinue |
-    Remove-Item -Force
+$installerDir = Split-Path $InstallerOut -Parent
+if ($installerDir) {
+    New-Item -ItemType Directory -Force $installerDir | Out-Null
+}
+$InstallerOut = [System.IO.Path]::GetFullPath($InstallerOut)
 
 Push-Location $desktop
 try {
@@ -232,26 +242,18 @@ try {
     } else {
         $makensis.FullName
     }
-    & $makensisPath /INPUTCHARSET UTF8 "/DPRODUCT_VERSION=$version" installer.nsi
+    & $makensisPath /INPUTCHARSET UTF8 `
+        "/DPRODUCT_VERSION=$version" `
+        "/DSOURCE_DIR=$sourceDir" `
+        "/DOUTPUT_FILE=$InstallerOut" `
+        installer.nsi
     if ($LASTEXITCODE -ne 0) {
         throw "makensis failed with exit code $LASTEXITCODE"
     }
 
-    $built = Get-ChildItem $desktop -Filter "ExtendCast-Setup-$version.exe" |
-        Select-Object -First 1
-    if (-not $built) {
-        throw "Installer not produced: ExtendCast-Setup-$version.exe"
+    if (-not (Test-Path $InstallerOut)) {
+        throw "Installer not produced: $InstallerOut"
     }
-
-    if (-not $InstallerOut) {
-        $InstallerOut = Join-Path (Split-Path $OutDir -Parent) "ExtendCast-Setup-$version.exe"
-    }
-    $installerDir = Split-Path $InstallerOut -Parent
-    if ($installerDir) {
-        New-Item -ItemType Directory -Force $installerDir | Out-Null
-    }
-    Copy-Item $built.FullName $InstallerOut -Force
-    Remove-Item $built.FullName -Force
 }
 finally {
     Pop-Location

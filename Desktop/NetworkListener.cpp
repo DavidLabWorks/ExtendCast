@@ -123,6 +123,68 @@ void NetworkListener::disconnectAll() {
     m_inboundSessions.clear();
 }
 
+/*
+ * Intentional receiver disconnect contract
+ * -----------------------------------------
+ * A user closing a Receiving window and a user pressing Disconnect in the
+ * tray are the same product action. Both routes arrive here while the sender
+ * identity is still registered and while its TCP socket is still writable.
+ *
+ * The receiver first sends command 555. The sender treats that command as a
+ * user decision: it removes the connection pipeline, stops screen capture,
+ * invalidates the encoder, destroys its virtual display, and suppresses
+ * automatic reconnect for this receiver. This is deliberately different from
+ * a transport failure. A Wi-Fi or Thunderbolt interruption carries no command,
+ * so the sender remains free to reconnect automatically.
+ *
+ * Command events use the protocol's critical-event repetition. Repetition is
+ * harmless because sender teardown is idempotent, and it improves delivery on
+ * noisy links. disconnectFromHost() is required here instead of abort(): Qt
+ * drains queued bytes before sending FIN, whereas abort() can discard command
+ * 555 and make an intentional close indistinguishable from a network failure.
+ *
+ * MainWindow tears down decoder and renderer objects only after calling this
+ * method. That ordering prevents slow GPU cleanup from delaying the control
+ * command or starving the heartbeat timer. NetworkListener remains the sole
+ * owner of socket/session bookkeeping; onTcpDisconnected performs the normal
+ * registry cleanup and emits connectionLost exactly as it does for any other
+ * closed transport.
+ *
+ * This method intentionally does nothing for an unknown device ID. That makes
+ * duplicate UI requests safe: closing a window can race a tray click or a peer
+ * disconnect, but only the first request finds an active binding and writes to
+ * the socket. Later requests simply observe that the binding has gone away.
+ */
+void NetworkListener::disconnectDevice(const QString& deviceId) {
+    const auto binding =
+        m_inboundSessions.sessionForDevice(deviceId.toStdString());
+    if (!binding.has_value()) {
+        return;
+    }
+
+    const QString connectionId =
+        QString::fromStdString(binding->connectionId);
+    if (auto* socket = m_socketsByConnectionId.value(connectionId)) {
+        LogManager::instance().log(
+            QString("Receiver: Disconnecting %1 from the tray")
+                .arg(deviceId.left(8))
+        );
+        // Tell the sender this is an intentional receiver-side disconnect so
+        // its auto-connect policy can pause. disconnectFromHost() drains these
+        // control packets before closing, unlike abort(), which discards them.
+        writeInputEvent(
+            socket,
+            InputEvent(
+                InputEventType::Command,
+                0,
+                0,
+                kReceiverRequestedDisconnectKeyCode
+            )
+        );
+        socket->disconnectFromHost();
+    }
+}
+
 void NetworkListener::adoptConnectedRemoteSender(QTcpSocket* socket) {
     if (!socket || socket->state() != QAbstractSocket::ConnectedState) {
         return;

@@ -110,3 +110,33 @@ InputHandler        → Mouse/keyboard capture → normalized coordinates → JS
 ServiceDiscovery    → mDNS advertising (Bonjour on Windows, Avahi on Linux)
 InputEvent          → Data model matching Swift InputEvent exactly
 ```
+
+## Windows D3D11 presentation and recovery
+
+On supported Windows systems, FFmpeg D3D11VA decode and the zero-copy
+presenter share one D3D11 device. Access to the immediate context is serialized
+between FFmpeg and the presenter; decoded NV12 textures remain on the GPU for
+the normal presentation path.
+
+The receiver uses a stability-first fallback policy:
+
+- A presenter or swap-chain failure that does not remove the D3D device falls
+  back to the OpenGL presenter. Hardware decode may continue, with frames
+  transferred to system memory for OpenGL rendering.
+- A removed, reset, hung, or internally failed D3D device disables D3D decode
+  and presentation for the rest of the process lifetime. Active sessions clear
+  queued frames, reopen the H.264 decoder in software, wait for a fresh IDR,
+  and then resume through OpenGL.
+- Playback acknowledgement is emitted only after `Present` succeeds and the
+  frame is not reported as occluded. A dropped or failed presentation is never
+  acknowledged as displayed.
+- Restart ExtendCast to attempt hardware decode again after a device-loss
+  fallback. The process does not hot-recreate the shared device because old
+  FFmpeg frame references may still be alive.
+
+Set `EXTENDCAST_DISABLE_ZERO_COPY=1` before starting the receiver to exercise
+the OpenGL presentation path without disabling D3D11VA hardware decode.
+
+After changing this path, validate a Windows Release build with normal playback,
+window resizing, fullscreen enter/exit, the environment-variable fallback, and
+at least one device-loss or forced software-decode recovery scenario.

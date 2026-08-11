@@ -17,6 +17,7 @@
 #include <QSystemTrayIcon>
 #include <QMenu>
 #include <QAction>
+#include <QList>
 #include <QStringList>
 #include <QTime>
 #include <QHash>
@@ -110,6 +111,10 @@ private slots:
     void cancelPendingSessionClose(const QString& deviceId);
     void schedulePendingSessionClose(const QString& deviceId, int graceMs);
     void closeReceiverSession(const QString& deviceId, const QString& reason);
+    void disconnectReceiverDevice(
+        const QString& deviceId,
+        const QString& reason
+    );
     void onVideoDataReceived(
         const QString& deviceId,
         const QByteArray& data
@@ -197,6 +202,9 @@ private:
     QAction* m_trayShowAction = nullptr;
     QAction* m_trayListeningAction = nullptr;
     QAction* m_trayCopyAddressAction = nullptr;
+    QAction* m_trayConnectionsHeaderAction = nullptr;
+    QAction* m_trayConnectionsEndSeparator = nullptr;
+    QList<QAction*> m_trayConnectionActions;
     bool m_quitRequested = false;
 
     // Page indices (set during setupUi based on ENABLE_SENDER)
@@ -226,7 +234,7 @@ private:
     QPushButton* m_receiverListenToggle = nullptr;
     QPushButton* m_receiverAutoStartToggle = nullptr;
     bool m_receiverListening = false;
-    uint16_t m_receiverPort = 51820;
+    uint16_t m_receiverPort = 41820;
     QString m_receiverAddressSignature;
     struct ConnectedSenderInfo {
         QString deviceName;

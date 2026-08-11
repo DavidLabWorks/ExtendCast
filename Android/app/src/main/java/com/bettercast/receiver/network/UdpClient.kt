@@ -21,7 +21,7 @@ class UdpClient(private val port: Int) {
         private const val STALE_FRAME_TIMEOUT_MS = 500L
         private const val CLEANUP_INTERVAL = 100
         private const val HEARTBEAT_INTERVAL_MS = 5_000L
-        const val DEFAULT_PORT = 51820
+        const val DEFAULT_PORT = 41820
     }
 
     private data class FrameBuffer(

@@ -23,6 +23,12 @@ Each platform is kept as a top-level project:
 The applications share a network protocol, not source-code dependencies, so
 each platform can be opened and built independently.
 
+## Implementation Documentation
+
+- [Sender / Receiver implementation baseline](docs/sender-receiver-implementation-baseline.md) defines the current macOS Sender + Windows Receiver lifecycle and the cross-platform behavior contract.
+- [Wire protocol](Shared/Protocol/PROTOCOL.md) defines discovery names, media framing, stable Sender identity, and Receiver control commands.
+- [Shared terminology](CONTEXT.md) defines role, route, advertisement, stream, and session names used across platform implementations.
+
 ## Improvements over BetterCast
 
 ExtendCast substantially changes the macOS sender experience. The work focuses
@@ -313,7 +319,7 @@ modes over WiFi or ADB.
 
 ## Networking
 
-ExtendCast uses **TCP (port 51820)** for the primary video/audio stream and
+ExtendCast uses **TCP (port 41820)** for the primary video/audio stream and
 **UDP (port 51821)** for chunked frame delivery. Discovery browses both
 `_bettercast._tcp` and `_bettercast._udp`.
 

@@ -1,6 +1,7 @@
 #include "VideoWindow.h"
 #include "InputHandler.h"
 #include "MainWindow.h"  // for LogManager
+#include "UiIcons.h"
 
 #include <QDebug>
 #include <QEvent>
@@ -97,9 +98,11 @@ void VideoWindow::setupTitleBar(QVBoxLayout* layout) {
     titleLayout->addWidget(m_titleLabel);
     titleLayout->addStretch();
 
-    m_fullscreenButton = new QPushButton(QString::fromWCharArray(L"\uE740"), m_titleBar);
+    m_fullscreenButton = new QPushButton(m_titleBar);
     m_fullscreenButton->setObjectName("videoWindowButton");
     m_fullscreenButton->setFixedSize(46, 32);
+    m_fullscreenButton->setIcon(UiIcons::fullscreenCorners());
+    m_fullscreenButton->setIconSize(QSize(16, 16));
     m_fullscreenButton->setToolTip("Enter fullscreen");
     connect(m_fullscreenButton, &QPushButton::clicked, this, &VideoWindow::toggleFullscreen);
     titleLayout->addWidget(m_fullscreenButton);
@@ -429,6 +432,10 @@ bool VideoWindow::isImmersiveFullscreen() const {
     return m_immersiveFullscreen || isFullScreen();
 }
 
+bool VideoWindow::isFullscreen() const {
+    return isImmersiveFullscreen();
+}
+
 void VideoWindow::enterImmersiveFullscreen() {
     if (m_immersiveFullscreen) {
         return;
@@ -462,6 +469,7 @@ void VideoWindow::enterImmersiveFullscreen() {
     activateWindow();
 
     updateWindowControlStates();
+    updateFullscreenButton();
     if (m_videoSurface) {
         m_videoSurface->updateGeometry();
         m_videoSurface->update();
@@ -528,5 +536,13 @@ void VideoWindow::updateFullscreenButton() {
         return;
     }
     m_fullscreenButton->show();
-    m_fullscreenButton->setText(QString::fromWCharArray(L"\uE740"));
+    const bool fullscreen = isImmersiveFullscreen();
+    m_fullscreenButton->setIcon(
+        fullscreen
+            ? UiIcons::exitFullscreenCorners()
+            : UiIcons::fullscreenCorners()
+    );
+    m_fullscreenButton->setToolTip(
+        fullscreen ? "Exit fullscreen" : "Enter fullscreen"
+    );
 }

@@ -207,7 +207,7 @@ bool AdbHelper::setupForward(uint16_t remotePort) {
 
     emit statusChanged("Setting up ADB tunnel...");
 
-    // Use a DIFFERENT local port to avoid conflict with our own receiver on 51820
+    // Use a different local port to avoid conflict with the remote receiver port.
     uint16_t localPort = remotePort + 1; // e.g., 51821 → android:51820
 
     // Run: adb [-s serial] forward tcp:localPort tcp:remotePort

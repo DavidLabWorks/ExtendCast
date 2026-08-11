@@ -17,11 +17,16 @@
 // Add Windows Firewall exceptions for mDNS and streaming
 static void ensureFirewallRule() {
     // Check if our firewall rules already exist
-    QProcess check;
-    check.start("netsh", {"advfirewall", "firewall", "show", "rule", "name=ExtendCast mDNS In"});
-    check.waitForFinished(3000);
-    QString output = QString::fromUtf8(check.readAllStandardOutput());
-    if (output.contains("ExtendCast mDNS In")) {
+    QProcess checkMdns;
+    checkMdns.start("netsh", {"advfirewall", "firewall", "show", "rule", "name=ExtendCast mDNS In"});
+    checkMdns.waitForFinished(3000);
+    const QString mdnsOutput = QString::fromUtf8(checkMdns.readAllStandardOutput());
+
+    QProcess checkReceiver;
+    checkReceiver.start("netsh", {"advfirewall", "firewall", "show", "rule", "name=ExtendCast Receiver"});
+    checkReceiver.waitForFinished(3000);
+    const QString receiverOutput = QString::fromUtf8(checkReceiver.readAllStandardOutput());
+    if (mdnsOutput.contains("ExtendCast mDNS In") && receiverOutput.contains("41820")) {
         qDebug() << "Firewall: Rules already exist";
         return;
     }
@@ -48,12 +53,12 @@ static void ensureFirewallRule() {
                            "description=Allow outbound mDNS for ExtendCast auto-discovery"});
     addOut.waitForFinished(3000);
 
-    // Inbound TCP 51820 — accept streaming connections
+    // Inbound TCP 41820 — accept streaming connections
     QProcess addTcp;
     addTcp.start("netsh", {"advfirewall", "firewall", "add", "rule",
                             "name=ExtendCast Receiver",
                             "dir=in", "action=allow", "protocol=TCP",
-                            "localport=51820",
+                            "localport=41820",
                             "profile=private,public",
                             "description=Allow ExtendCast screen streaming"});
     addTcp.waitForFinished(3000);

@@ -29,6 +29,8 @@ public:
     void resizeToFitVideo(int videoWidth, int videoHeight);
     void bindToDevice(const QString& deviceId, const QString& deviceName);
     QString deviceId() const { return m_deviceId; }
+    bool isFullscreen() const;
+    void toggleFullscreen();
 
 signals:
     void windowClosed();
@@ -45,7 +47,6 @@ protected:
 private:
     void setupTitleBar(QVBoxLayout* layout);
     void updateWindowControlStates();
-    void toggleFullscreen();
     void updateFullscreenButton();
     void applyWindowChrome();
     bool isImmersiveFullscreen() const;

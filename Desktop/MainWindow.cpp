@@ -6,6 +6,7 @@
 #include "InputEvent.h"
 #include "ReceiverSession.h"
 #include "ServiceDiscovery.h"
+#include "UiIcons.h"
 #ifdef ENABLE_ANDROID_ADB
 #include "AdbHelper.h"
 #endif
@@ -45,6 +46,7 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QToolButton>
+#include <QWidgetAction>
 #include <QEvent>
 #include <QCloseEvent>
 #include <QWindow>
@@ -53,6 +55,7 @@
 #include <QtAlgorithms>
 #include <algorithm>
 #include <thread>
+#include <utility>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -605,7 +608,7 @@ static QString formatAddressLines(const QVector<LocalAddressInfo>& infos) {
         const QString badge = (i == 0 && info.priority <= 30)
             ? QStringLiteral("Recommended - ")
             : QString();
-        lines.append(QString("%1%2<br><b>%3:51820</b><br>%4<br><span style=\"color:#777;\">%5</span>")
+        lines.append(QString("%1%2<br><b>%3:41820</b><br>%4<br><span style=\"color:#777;\">%5</span>")
                          .arg(badge,
                               info.connectionLabel.toHtmlEscaped(),
                               info.ip.toHtmlEscaped(),
@@ -640,10 +643,10 @@ static void clearLayout(QLayout* layout) {
 }
 
 static QString formatPrimaryAddress(const QVector<LocalAddressInfo>& infos) {
-    if (infos.isEmpty()) return "Listening on port 51820";
+    if (infos.isEmpty()) return "Listening on port 41820";
 
     const auto& primary = infos.first();
-    return QString("Listening at %1:%2").arg(primary.ip, QStringLiteral("51820"));
+    return QString("Listening at %1:%2").arg(primary.ip, QStringLiteral("41820"));
 }
 
 static QString formatPrimaryHint(const QVector<LocalAddressInfo>& infos) {
@@ -976,7 +979,17 @@ void MainWindow::setupTrayIcon() {
     m_trayCopyAddressAction = m_trayMenu->addAction("Copy Receiver Address", this,
                                                     &MainWindow::onCopyReceiverAddressFromTray);
     m_trayMenu->addSeparator();
+    m_trayConnectionsHeaderAction =
+        m_trayMenu->addAction("Receiving Connections");
+    m_trayConnectionsHeaderAction->setEnabled(false);
+    m_trayConnectionsEndSeparator = m_trayMenu->addSeparator();
     m_trayMenu->addAction("Quit ExtendCast", this, &MainWindow::onQuitFromTray);
+    connect(
+        m_trayMenu,
+        &QMenu::aboutToShow,
+        this,
+        &MainWindow::updateTrayActions
+    );
 
     m_trayIcon = new QSystemTrayIcon(QIcon(":/appicon.png"), this);
     m_trayIcon->setToolTip("ExtendCast Receiver");
@@ -995,6 +1008,184 @@ void MainWindow::updateTrayActions() {
 
     if (m_trayCopyAddressAction) {
         m_trayCopyAddressAction->setEnabled(m_receiverListening && !bestReceiverAddress(m_receiverPort).isEmpty());
+    }
+
+    if (m_trayMenu && m_trayConnectionsEndSeparator) {
+        for (QAction* action : std::as_const(m_trayConnectionActions)) {
+            m_trayMenu->removeAction(action);
+            delete action;
+        }
+        m_trayConnectionActions.clear();
+
+        QStringList deviceIds = m_connectedSenders.keys();
+        std::sort(
+            deviceIds.begin(),
+            deviceIds.end(),
+            [this](const QString& lhs, const QString& rhs) {
+                const int nameOrder = QString::localeAwareCompare(
+                    m_connectedSenders.value(lhs).deviceName,
+                    m_connectedSenders.value(rhs).deviceName
+                );
+                return nameOrder == 0 ? lhs < rhs : nameOrder < 0;
+            }
+        );
+
+        if (deviceIds.isEmpty()) {
+            auto* emptyAction = new QAction("No active connections", m_trayMenu);
+            emptyAction->setEnabled(false);
+            m_trayMenu->insertAction(
+                m_trayConnectionsEndSeparator,
+                emptyAction
+            );
+            m_trayConnectionActions.append(emptyAction);
+        } else {
+            constexpr int trayTouchTargetSize = 40;
+            constexpr int trayActionIconSize = 18;
+            for (const QString& deviceId : deviceIds) {
+                const ConnectedSenderInfo info =
+                    m_connectedSenders.value(deviceId);
+                const QString label = info.deviceName.isEmpty()
+                    ? deviceId.left(8)
+                    : info.deviceName;
+
+                auto* rowAction = new QWidgetAction(m_trayMenu);
+                auto* row = new QWidget(m_trayMenu);
+                row->setObjectName("trayConnectionRow");
+                row->setFixedWidth(250);
+                row->setMinimumHeight(44);
+                row->setStyleSheet(
+                    "QWidget#trayConnectionRow { background: transparent; }"
+                    "QLabel#trayConnectionName {"
+                    "  color: #f3f3f3;"
+                    "  font-family: 'Segoe UI', 'Microsoft YaHei UI';"
+                    "  font-size: 13px;"
+                    "}"
+                    "QToolButton {"
+                    "  background-color: #292929;"
+                    "  border: none;"
+                    "  border-radius: 8px;"
+                    "}"
+                    "QToolButton:hover {"
+                    "  background-color: #3a3a3a;"
+                    "  color: #ffffff;"
+                    "}"
+                    "QToolButton:pressed { background-color: #565656; }"
+                    "QToolButton:focus { border: 1px solid #6ea8fe; }"
+                );
+
+                auto* rowLayout = new QHBoxLayout(row);
+                rowLayout->setContentsMargins(12, 2, 8, 2);
+                rowLayout->setSpacing(6);
+
+                auto* nameLabel = new QLabel(row);
+                nameLabel->setObjectName("trayConnectionName");
+                nameLabel->setText(
+                    nameLabel->fontMetrics().elidedText(
+                        label,
+                        Qt::ElideRight,
+                        138
+                    )
+                );
+                nameLabel->setToolTip(
+                    QString("%1\n%2")
+                        .arg(
+                            label,
+                            displayEndpoint(info.peerAddress, info.peerPort)
+                        )
+                );
+                rowLayout->addWidget(nameLabel, 1);
+
+                auto* fullscreenButton = new QToolButton(row);
+                const bool fullscreen =
+                    m_receiverSessions.value(deviceId) &&
+                    m_receiverSessions.value(deviceId)->isFullscreen();
+                fullscreenButton->setIcon(
+                    fullscreen
+                        ? UiIcons::exitFullscreenCorners()
+                        : UiIcons::fullscreenCorners()
+                );
+                fullscreenButton->setIconSize(
+                    QSize(trayActionIconSize, trayActionIconSize)
+                );
+                fullscreenButton->setFixedSize(
+                    trayTouchTargetSize,
+                    trayTouchTargetSize
+                );
+                fullscreenButton->setCursor(Qt::PointingHandCursor);
+                fullscreenButton->setFocusPolicy(Qt::StrongFocus);
+                fullscreenButton->setAttribute(Qt::WA_AlwaysShowToolTips);
+                fullscreenButton->setAccessibleName(
+                    fullscreen ? "Exit fullscreen" : "Enter fullscreen"
+                );
+                fullscreenButton->setAccessibleDescription(label);
+                fullscreenButton->setToolTip(
+                    QString("%1 — %2")
+                        .arg(
+                            fullscreen
+                                ? "Exit fullscreen"
+                                : "Enter fullscreen",
+                            label
+                        )
+                );
+                connect(
+                    fullscreenButton,
+                    &QToolButton::clicked,
+                    this,
+                    [this, deviceId]() {
+                        m_trayMenu->close();
+                        QTimer::singleShot(0, this, [this, deviceId]() {
+                            if (auto* session =
+                                    m_receiverSessions.value(deviceId)) {
+                                session->toggleFullscreen();
+                                updateTrayActions();
+                            }
+                        });
+                    }
+                );
+                rowLayout->addWidget(fullscreenButton);
+
+                auto* disconnectButton = new QToolButton(row);
+                disconnectButton->setObjectName("trayDisconnectButton");
+                disconnectButton->setIcon(UiIcons::disconnectCircle());
+                disconnectButton->setIconSize(
+                    QSize(trayActionIconSize, trayActionIconSize)
+                );
+                disconnectButton->setFixedSize(
+                    trayTouchTargetSize,
+                    trayTouchTargetSize
+                );
+                disconnectButton->setCursor(Qt::PointingHandCursor);
+                disconnectButton->setFocusPolicy(Qt::StrongFocus);
+                disconnectButton->setAttribute(Qt::WA_AlwaysShowToolTips);
+                disconnectButton->setAccessibleName("Disconnect");
+                disconnectButton->setAccessibleDescription(label);
+                disconnectButton->setToolTip(
+                    QString("Disconnect — %1").arg(label)
+                );
+                connect(
+                    disconnectButton,
+                    &QToolButton::clicked,
+                    this,
+                    [this, deviceId]() {
+                        m_trayMenu->close();
+                        QTimer::singleShot(0, this, [this, deviceId]() {
+                            disconnectReceiverDevice(
+                                deviceId,
+                                "disconnected from tray"
+                            );
+                        });
+                    }
+                );
+                rowLayout->addWidget(disconnectButton);
+
+                rowAction->setDefaultWidget(row);
+                m_trayMenu->insertAction(
+                    m_trayConnectionsEndSeparator,
+                    rowAction
+                );
+                m_trayConnectionActions.append(rowAction);
+            }
+        }
     }
 
     if (m_trayIcon) {
@@ -2241,20 +2432,10 @@ void MainWindow::onConnectionEstablished(
                 LogManager::instance().log(
                     "Video window closed by user [" + closedDeviceId.left(8) + "]"
                 );
-                cancelPendingSessionClose(closedDeviceId);
-                if (auto* closed = m_receiverSessions.take(closedDeviceId)) {
-                    delete closed;
-                }
-                m_connectedSenders.remove(closedDeviceId);
-                refreshConnectedSendersCard();
-                if (m_receiverSessions.isEmpty() && m_recvStatusLabel) {
-                    m_recvStatusLabel->setText(
-                        QString("Listening on port %1").arg(m_receiverPort)
-                    );
-                    m_recvStatusLabel->setStyleSheet(
-                        "font-size: 13px; font-weight: bold; color: #d8d8d8;"
-                    );
-                }
+                disconnectReceiverDevice(
+                    closedDeviceId,
+                    "video window closed by user"
+                );
             }
         );
         session->show();
@@ -2286,6 +2467,7 @@ void MainWindow::onConnectionEstablished(
             .arg(m_receiverSessions.size())
     );
     m_recvStatusLabel->setStyleSheet("font-size: 15px; font-weight: bold; color: #4caf50;");
+    updateTrayActions();
 
     // Reset reconnect counter only after video actually starts flowing
     // (delayed so brief connect-then-disconnect during reconnect doesn't reset it)
@@ -2375,6 +2557,34 @@ void MainWindow::closeReceiverSession(
     }
 }
 
+void MainWindow::disconnectReceiverDevice(
+    const QString& deviceId,
+    const QString& reason
+) {
+    cancelPendingSessionClose(deviceId);
+
+    // Notify and close the transport before tearing down the heavier decoder
+    // and renderer objects. This lets the sender stop capture/encoding and
+    // classify the close as intentional instead of a heartbeat failure.
+    if (m_network) {
+        m_network->disconnectDevice(deviceId);
+    }
+
+    closeReceiverSession(deviceId, reason);
+    m_connectedSenders.remove(deviceId);
+    refreshConnectedSendersCard();
+    updateTrayActions();
+
+    if (m_receiverSessions.isEmpty() && m_recvStatusLabel) {
+        m_recvStatusLabel->setText(
+            QString("Listening on port %1").arg(m_receiverPort)
+        );
+        m_recvStatusLabel->setStyleSheet(
+            "font-size: 13px; font-weight: bold; color: #d8d8d8;"
+        );
+    }
+}
+
 void MainWindow::schedulePendingSessionClose(
     const QString& deviceId,
     int graceMs
@@ -2411,6 +2621,7 @@ void MainWindow::schedulePendingSessionClose(
 void MainWindow::onConnectionLost(const QString& deviceId) {
     m_connectedSenders.remove(deviceId);
     refreshConnectedSendersCard();
+    updateTrayActions();
 
     // Keep the window through brief Thunderbolt/Wi-Fi flaps. If the Mac
     // stays gone past the grace period, close so we don't freeze on the
@@ -2443,7 +2654,7 @@ void MainWindow::onConnectionLost(const QString& deviceId) {
     } else
 #endif
     if (m_connectedSenders.isEmpty()) {
-        m_recvStatusLabel->setText("Connection lost — still listening on port 51820");
+        m_recvStatusLabel->setText(QString("Connection lost — still listening on port %1").arg(m_receiverPort));
         m_recvStatusLabel->setStyleSheet("font-size: 15px; font-weight: bold; color: orange;");
         LogManager::instance().log("Connection lost [" + deviceId.left(8) + "]");
     } else {
@@ -2952,8 +3163,10 @@ void MainWindow::updateLocalIpDisplay() {
 
     if (!infos.isEmpty()) {
         const auto& primary = infos.first();
-        overviewText = QString("Best manual address: %1:51820 (%2)")
-                           .arg(primary.ip, primary.connectionLabel);
+        overviewText = QString("Best manual address: %1:%2 (%3)")
+                           .arg(primary.ip)
+                           .arg(m_receiverPort)
+                           .arg(primary.connectionLabel);
     }
 
     if (m_overviewIpLabel) m_overviewIpLabel->setText(overviewText);

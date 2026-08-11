@@ -45,6 +45,8 @@ public:
         const QString& deviceName
     );
     void show();
+    bool isFullscreen() const;
+    void toggleFullscreen();
     void resetVideoDecoder();
     void noteCatchUpToBufferedKeyframe();
     void noteCatchUpWaitingForKeyframe();

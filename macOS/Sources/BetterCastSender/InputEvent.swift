@@ -12,6 +12,10 @@ enum InputEventType: Int, Codable {
     case command = 99 // Internal commands (e.g. Force Keyframe)
 }
 
+enum InputCommandKeyCode {
+    static let receiverRequestedDisconnect: UInt16 = 555
+}
+
 struct InputEvent: Codable {
     let type: InputEventType
     let x: Double // Normalized 0-1

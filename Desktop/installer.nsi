@@ -17,9 +17,15 @@
 !ifndef PRODUCT_VERSION
   !error "PRODUCT_VERSION is required; pass the value from the VERSION file."
 !endif
+!ifndef SOURCE_DIR
+  !define SOURCE_DIR "artifact"
+!endif
+!ifndef OUTPUT_FILE
+  !define OUTPUT_FILE "ExtendCast-Setup-${PRODUCT_VERSION}.exe"
+!endif
 
 Name "${PRODUCT_NAME} ${PRODUCT_VERSION}"
-OutFile "ExtendCast-Setup-${PRODUCT_VERSION}.exe"
+OutFile "${OUTPUT_FILE}"
 InstallDir "$PROGRAMFILES64\${PRODUCT_NAME}"
 InstallDirRegKey HKLM "${PRODUCT_DIR_REGKEY}" ""
 RequestExecutionLevel admin  ; Needed for driver installation
@@ -64,8 +70,8 @@ Section "ExtendCast (required)" SecCore
 
     SetOutPath "$INSTDIR"
 
-    ; Main application files (populated by CI into artifact/ directory)
-    File /r "artifact\*.*"
+    ; Main application files from the packaging output directory.
+    File /r "${SOURCE_DIR}\*.*"
 
     ; Create Start Menu shortcuts
     CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
@@ -105,7 +111,9 @@ Section "ExtendCast (required)" SecCore
     DetailPrint "Adding firewall rules..."
     nsExec::ExecToLog 'netsh advfirewall firewall add rule name="ExtendCast mDNS In" dir=in action=allow protocol=UDP localport=5353'
     nsExec::ExecToLog 'netsh advfirewall firewall add rule name="ExtendCast mDNS Out" dir=out action=allow protocol=UDP remoteport=5353'
-    nsExec::ExecToLog 'netsh advfirewall firewall add rule name="ExtendCast Receiver" dir=in action=allow protocol=TCP localport=51820 program="$INSTDIR\${PRODUCT_EXE}"'
+    ; Replace the old receiver rule during upgrades so it follows the Windows TCP port.
+    nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="ExtendCast Receiver"'
+    nsExec::ExecToLog 'netsh advfirewall firewall add rule name="ExtendCast Receiver" dir=in action=allow protocol=TCP localport=41820 program="$INSTDIR\${PRODUCT_EXE}"'
 SectionEnd
 
 !ifdef INCLUDE_VDD

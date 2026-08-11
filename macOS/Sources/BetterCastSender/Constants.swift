@@ -9,7 +9,7 @@ enum BCConstants {
     /// Standard TCP port for BetterCast video/audio stream.
     /// All BetterCast receivers listen here. Windows/Linux/Android senders
     /// rely on this being constant since they may not parse mDNS SRV records.
-    static let tcpPort: UInt16 = 51820
+    static let tcpPort: UInt16 = 41820
 
     /// Standard UDP port for chunked frame delivery.
     static let udpPort: UInt16 = 51821

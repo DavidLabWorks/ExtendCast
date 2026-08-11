@@ -31,6 +31,10 @@ public:
     bool isListening() const;
     void adoptConnectedRemoteSender(QTcpSocket* socket);
     void disconnectAll();
+    // Performs an intentional, per-device disconnect. The sender is notified
+    // before the socket closes so it can stop capture and pause auto-connect;
+    // ordinary network failures continue to use the normal reconnect policy.
+    void disconnectDevice(const QString& deviceId);
     const QList<QTcpSocket*>& clients() const { return m_clients; }
     uint16_t actualTcpPort() const;
 
@@ -116,7 +120,7 @@ private:
 
     // UDP
     QUdpSocket* m_udpSocket = nullptr;
-    static constexpr uint16_t kDefaultTcpPort = 51820;
+    static constexpr uint16_t kDefaultTcpPort = 41820;
     static constexpr uint16_t kDefaultUdpPort = 51821;
     static constexpr uint32_t kMaxPacketSize = 8 * 1024 * 1024;   // 8MB per frame max
     static constexpr int kMaxBufferSize = 32 * 1024 * 1024;       // 32MB buffer limit

@@ -68,9 +68,12 @@ class NetworkListenerIOS {
             // Try preferred port first for consistency with Mac/Windows receivers
             var listener: NWListener
             do {
-                listener = try NWListener(using: parameters, on: 51820)
+                listener = try NWListener(
+                    using: parameters,
+                    on: NWEndpoint.Port(rawValue: BCConstants.tcpPort)!
+                )
             } catch {
-                LogManager.shared.log("ReceiverIOS (TCP): Port 51820 unavailable, using system-assigned port")
+                LogManager.shared.log("ReceiverIOS (TCP): Port \(BCConstants.tcpPort) unavailable, using system-assigned port")
                 listener = try NWListener(using: parameters)
             }
             listener.service = NWListener.Service(name: deviceName, type: "_bettercast._tcp")

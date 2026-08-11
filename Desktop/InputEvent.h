@@ -25,6 +25,7 @@ constexpr uint16_t kHeartbeatKeyCode = 888;
 constexpr uint16_t kIDRRequestKeyCode = 999;
 constexpr uint16_t kPlaybackAcknowledgementKeyCode = 666;
 constexpr uint16_t kScreenInfoKeyCode = 777;
+constexpr uint16_t kReceiverRequestedDisconnectKeyCode = 555;
 
 struct InputEvent {
     InputEventType type;

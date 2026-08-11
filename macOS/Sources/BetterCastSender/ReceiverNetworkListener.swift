@@ -180,8 +180,8 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
             if let serial = deviceSerial {
                 args += ["-s", serial]
             }
-            // Use a different local port to avoid conflict with our own receiver on 51820
-            let localPort = port + 1  // e.g., 51821 → android:51820
+            // Use a different local port to avoid conflict with our own receiver.
+            let localPort = port + 1  // e.g., 41821 → android:41820
             args += ["forward", "tcp:\(localPort)", "tcp:\(port)"]
             process.arguments = args
             let pipe = Pipe()
@@ -499,7 +499,7 @@ class ReceiverNetworkListener: ObservableObject, ReceiverVideoDecoderDelegate {
             case .failed(let error):
                 if type == "TCP" {
                     self.status = "Failed: \(error.localizedDescription)"
-                    LogManager.shared.log("Receiver (TCP): Failed — \(error). Check if port 51820 is in use or if macOS firewall is blocking incoming connections.")
+                    LogManager.shared.log("Receiver (TCP): Failed — \(error). Check if port \(BCConstants.tcpPort) is in use or if macOS firewall is blocking incoming connections.")
                 } else {
                     LogManager.shared.log("Receiver (\(type)): Failed \(error)")
                 }

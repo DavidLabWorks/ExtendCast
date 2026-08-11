@@ -372,6 +372,16 @@ void ReceiverSession::show() {
     m_window->showForVideo();
 }
 
+bool ReceiverSession::isFullscreen() const {
+    return m_window && m_window->isFullscreen();
+}
+
+void ReceiverSession::toggleFullscreen() {
+    if (m_window) {
+        m_window->toggleFullscreen();
+    }
+}
+
 void ReceiverSession::resetVideoDecoder() {
     m_videoDecodeQueue.clearForStreamReset();
     if (!m_decoder) {

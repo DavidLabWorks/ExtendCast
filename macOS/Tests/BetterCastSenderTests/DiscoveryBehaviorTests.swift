@@ -5,6 +5,16 @@ import Network
 
 @MainActor
 final class DiscoveryBehaviorTests: XCTestCase {
+    func testDefaultTCPPortIs41820() {
+        XCTAssertEqual(BCConstants.tcpPort, 41820)
+    }
+
+    func testOldDefaultManualPortMigratesWithoutOverwritingCustomPort() {
+        XCTAssertEqual(NetworkClient.migratedManualPort(nil), "41820")
+        XCTAssertEqual(NetworkClient.migratedManualPort("51820"), "41820")
+        XCTAssertEqual(NetworkClient.migratedManualPort("52416"), "52416")
+    }
+
     func testTransientNetworkWaitingDoesNotHideBonjourReceiver() {
         let state = NWConnection.State.waiting(.posix(.ENETDOWN))
 
@@ -149,7 +159,8 @@ final class DiscoveryBehaviorTests: XCTestCase {
             catalog.advertisedThunderboltRoute(),
             AdvertisedThunderboltRoute(
                 host: "169.254.204.111",
-                interfaceName: "bridge0"
+                interfaceName: "bridge0",
+                port: 51820
             )
         )
         XCTAssertEqual(
@@ -990,7 +1001,8 @@ final class DiscoveryBehaviorTests: XCTestCase {
             catalog.advertisedThunderboltRoute(),
             AdvertisedThunderboltRoute(
                 host: "169.254.204.111",
-                interfaceName: "bridge0"
+                interfaceName: "bridge0",
+                port: 51820
             )
         )
     }
@@ -1499,7 +1511,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
             ),
             .hostPort(
                 host: "169.254.204.222%bridge0",
-                port: 51820
+                port: NWEndpoint.Port(rawValue: BCConstants.tcpPort)!
             )
         )
     }
@@ -1530,7 +1542,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
             ),
             .hostPort(
                 host: "169.254.204.111%bridge1",
-                port: 51820
+                port: NWEndpoint.Port(rawValue: BCConstants.tcpPort)!
             )
         )
     }
@@ -1707,7 +1719,7 @@ final class DiscoveryBehaviorTests: XCTestCase {
             ),
             .hostPort(
                 host: "169.254.16.252%bridge0",
-                port: 51820
+                port: NWEndpoint.Port(rawValue: BCConstants.tcpPort)!
             )
         )
     }

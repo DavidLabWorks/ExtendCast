@@ -28,7 +28,7 @@ class TcpSender(
 
     companion object {
         private const val TAG = "TcpSender"
-        const val DEFAULT_PORT = 51820
+        const val DEFAULT_PORT = 41820
     }
 
     private val _connectionState = MutableStateFlow(ConnectionState.IDLE)
